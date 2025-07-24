@@ -10,8 +10,11 @@ Supports, training, inference or export to Compositor tools such Foundry Nuke or
 ## 🎥 Showcases: 
 AOVs:   
 [![Watch the video](https://img.youtube.com/vi/TwvN8axWJLY/0.jpg)](https://youtu.be/TwvN8axWJLY)   
-Nuke and Scripts can be downloaded link below for test locally:   
-https://f.io/HovatFeX
+Models from the video for Nuke and Flame can be downloaded link below for test locally:   
+https://f.io/HovatFeX   
+   
+AOVs has been trained in combination with Nvidia Cosmos foundation models.   
+Trained with 8x B200 GPUs. Inference can be done in consumer GPUs.
 
 
 
