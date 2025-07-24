@@ -13,12 +13,12 @@ AOVs:
 Models from the video for Nuke and Flame can be downloaded link below for test locally:   
 https://f.io/HovatFeX   
    
-AOVs has been trained in combination with Nvidia Cosmos foundation models.   
-Trained with 8x B200 GPUs. Inference can be done in consumer GPUs.
+Models has been trained in combination with Nvidia Cosmos foundation models.   
+Using 8x B200 GPUs. Inference can be done in consumer GPUs.
 
 
 
-## 🎥 Watch In Action:
+AOVs:   
 Flame:   
 [![Flame video](https://img.youtube.com/vi/6-OFAJtfliM/hqdefault.jpg)](https://youtu.be/6-OFAJtfliM)
 
