@@ -7,10 +7,11 @@ Supports, training, inference or export to Compositor tools such Foundry Nuke or
 
 </div>
 
-## 🎥 Showcases:
-[![Watch the video](https://img.youtube.com/vi/TwvN8axWJLY/0.jpg)](https://youtu.be/TwvN8axWJLY)
-https://thiagoporto.com/git_videos/aovs_1.mp4
-
+## 🎥 Showcases: 
+AOVs:   
+[![Watch the video](https://img.youtube.com/vi/TwvN8axWJLY/0.jpg)](https://youtu.be/TwvN8axWJLY)   
+Nuke and Scripts can be downloaded link below for test locally:   
+https://f.io/HovatFeX
 
 
 
