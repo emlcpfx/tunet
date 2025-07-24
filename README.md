@@ -7,6 +7,12 @@ Supports, training, inference or export to Compositor tools such Foundry Nuke or
 
 </div>
 
+## 🎥 Showcases:
+
+https://thiagoporto.com/git_videos/aovs_1.mp4
+
+
+
 
 ## 🎥 Watch In Action:
 Flame:   
