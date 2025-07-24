@@ -9,7 +9,7 @@ Supports, training, inference or export to Compositor tools such Foundry Nuke or
 
 ## 🎥 Showcases: 
 AOVs:   
-[![Watch the video](https://img.youtube.com/vi/TwvN8axWJLY/0.jpg)](https://youtu.be/TwvN8axWJLY)   
+[![Watch the video](https://thiagoporto.com/git_videos/aovs_1.gif)](https://youtu.be/TwvN8axWJLY)
 Models from the video for Nuke and Flame can be downloaded link below for test locally:   
 https://f.io/HovatFeX   
    
