@@ -19,7 +19,7 @@ Nuke: (video soon)
 ###[[Install Video](https://youtu.be/QaAca_LiwKc))]
 
 ```
-git clone https://github.com/tpc2233/tunet.git
+git clone --branch multios --single-branch https://github.com/tpc2233/tunet.git
 cd tunet
 
 conda create -n tunet python=3.8
