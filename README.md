@@ -39,6 +39,11 @@ pip install torch torchvision torchaudio
 pip install onnx pyyaml lpips onnxruntime Pillow albumentations
 ```
 
+For Windows or MacOS use the dedicated Branch: 
+```
+check branches
+```
+
 ✅ How to use: 
 ###[[Training Video](https://youtu.be/gRwQRJPaX7U)] 
 ```
