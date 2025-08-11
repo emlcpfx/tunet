@@ -29,12 +29,15 @@ pip install --pre torch torchvision torchaudio --index-url https://download.pyto
 
 pip install onnx pyyaml lpips onnxruntime Pillow albumentations
 
+
+```
 TEST YOUR INSTALLATION:
 python -c "import torch; print('Torch version:', torch.__version__); print('CUDA available:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU only')"
 
 Should give your GPU and Torch version, cuda available: True. if not, was not installed properlly. 
 ```
 
+```
 ## For Linux and Multi-GPU use the dedicated Branch:   
 
 ```
