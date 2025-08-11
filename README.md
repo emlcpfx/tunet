@@ -14,7 +14,7 @@ Flame:
 
 Nuke: (video soon)
 
-## For Windows and macOS:   
+## For Windows:   
 ✅ Make sure Miniconda or Anaconda is installed:
 ###[[Install Video](https://youtu.be/QaAca_LiwKc))]
 
@@ -37,6 +37,25 @@ python -c "import torch; print('Torch version:', torch.__version__); print('CUDA
 
 Should give your GPU and Torch version, cuda available: True. if not, was not installed properlly. 
 ```
+
+## For macOS:   
+✅ Make sure Miniconda or Anaconda is installed:
+###[[Install Video](https://youtu.be/QaAca_LiwKc))]
+
+```
+git clone --branch multios --single-branch https://github.com/tpc2233/tunet.git
+cd tunet
+
+conda create -n tunet python=3.10 -y
+conda activate tunet
+
+pip install torch torchvision torchaudio  
+
+pip install onnx pyyaml lpips onnxruntime Pillow albumentations
+
+```
+
+
 
 ## For Linux and Multi-GPU use the dedicated Branch:   
 
