@@ -7,8 +7,19 @@ Supports, training, inference or export to Compositor tools such Foundry Nuke or
 
 </div>
 
+## 🎥 Showcases: 
+AOVs:   
+![540_ezgif-45f24ebccb11e0](https://github.com/user-attachments/assets/507167b0-c473-44c0-b444-55f48bc7843b)   
+https://youtu.be/TwvN8axWJLY   
+Models from the video are available for Nuke and Flame can be downloaded link below for test locally:   
+https://f.io/HovatFeX   
+   
+Models has been trained in combination with Nvidia Cosmos foundation models.   
+Using 8x B200 GPUs. Inference can be done in consumer GPUs.
 
-## 🎥 Watch In Action:
+
+
+Rain:   
 Flame:   
 [![Flame video](https://img.youtube.com/vi/6-OFAJtfliM/hqdefault.jpg)](https://youtu.be/6-OFAJtfliM)
 
@@ -26,7 +37,7 @@ conda activate tunet
 
 pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 
 
-pip install onnx pyyaml lpips onnxruntime Pillow albumentations
+pip install onnx pyyaml lpips onnxruntime Pillow albumentations PySide6
 
 ```
 
