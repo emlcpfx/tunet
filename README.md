@@ -45,68 +45,36 @@ check branches
 ```
 
 ✅ How to use: 
-###[[Training Video](https://youtu.be/gRwQRJPaX7U)] 
+###[[Training Video soon]] 
 ```
-TRAINING:
-1- Choose one of the config_templates for your project (simple or advanced)
-2- Set the input plate paths 
+Open Tunet UI:
+
+python ui_app.py
+
 You are good to go!
 ```
 
-Training (Single or Multi-GPU)  
-Run the training script. The number of GPUs is set via --nproc_per_node:
+
+✅ Tunet UI:
+## Main:
+![main](https://github.com/user-attachments/assets/fe8f03e1-2e53-46b9-8c91-b85befdb3ff9)
+
+## Training:
+![train5](https://github.com/user-attachments/assets/f6bf9ba3-f84b-4d0d-9d95-ff418bebaaf5)
+
+## Converter:
+![convert](https://github.com/user-attachments/assets/8633b5ff-0152-4a09-afaf-1fa7e4669359)
+
+## Adv:
+![adv](https://github.com/user-attachments/assets/f27df935-6677-4c8f-adfb-dbc3b7cd8c9d)
+
+
+### Terminal CMD:
+
+✅ Command line and terminal trainings are still available as usual, check docs:
 ```
-# Single GPU
-torchrun --standalone --nnodes=1 --nproc_per_node=1 train.py --config /path/to/your/config.yaml
-
-# Multi-GPU (support: 2, 4, or 8 GPUs)
-torchrun --standalone --nnodes=1 --nproc_per_node=2 train.py --config /path/to/your/config.yaml
-
+soon
 ```
-
-
-Note:
-batch_size is per GPU.  
-For example, batch_size=2 with 8 GPUs results in an effective batch size of 16.
-
-
-
-## Training screen:
-```
-left: Src Original plate
-Middle: Dst Modified plate
-Right: Model Inference 
-```
-![Screenshot 2025-04-06 at 18 37 45](https://github.com/user-attachments/assets/bc4ab4b4-d636-4b7b-9003-aaed1b213d02)
-
-
-
-
-## Inference:
-```
-python inference.py --overlap_factor 0.25 --checkpoint /path/to/your/tunet_latest.pth --input_dir /path/to/your/plate --output_dir /path/to/output/folder
-```
-
-### Inference converters:
-
-✅ Foundry NUKE Converter:
-```
-Convert the model to run native inside Nuke, CAT:
-
-python utils/convert_nuke.py --generate_nk --checkpoint_pth /path/to/model/tunet_latest.pth --method script
-```
-<img width="899" alt="Screenshot 2025-04-06 at 19 31 15" src="https://github.com/user-attachments/assets/e8b4c620-93a3-4f50-8789-09f88326c2b6" />
-
-
-
-✅ Autodesk FLAME Converter:
-```
-WIP TODO
-Convert the model to run native inside Flame, ONNX:
-
-python utils/convert_flame.py --checkpoint /path/to/model/tunet_latest.pth --use_gpu
-```
-<img width="893" alt="Screenshot 2025-04-06 at 19 28 21" src="https://github.com/user-attachments/assets/0eec9a04-eb3b-4e1a-94bb-b23f9d441690" />
 
 
 ## Video:
