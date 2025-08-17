@@ -33,10 +33,10 @@ Nuke: (video soon)
 git clone --branch linux --single-branch https://github.com/tpc2233/tunet.git
 cd tunet
 
-conda create -n tunet python=3.9
+conda create -n tunet python=3.10
 conda activate tunet
 pip install torch torchvision torchaudio 
-pip install onnx pyyaml lpips onnxruntime Pillow albumentations
+pip install onnx pyyaml lpips onnxruntime Pillow albumentations PySide6 
 ```
 
 For Windows or MacOS use the dedicated Branch: 
