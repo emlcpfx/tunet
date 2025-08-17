@@ -12,7 +12,6 @@ Supports, training, inference or export to Compositor tools such Foundry Nuke or
 Flame:   
 [![Flame video](https://img.youtube.com/vi/6-OFAJtfliM/hqdefault.jpg)](https://youtu.be/6-OFAJtfliM)
 
-Nuke: (video soon)
 
 ## For Windows:   
 ✅ Make sure Miniconda or Anaconda is installed:
@@ -51,7 +50,7 @@ conda activate tunet
 
 pip install torch torchvision torchaudio  
 
-pip install onnx pyyaml lpips onnxruntime Pillow albumentations
+pip install onnx pyyaml lpips onnxruntime Pillow albumentations PySide6
 
 ```
 
@@ -64,71 +63,39 @@ check branches
 ```
 
 
-✅ How to use: 
-###[[Training Video](https://youtu.be/gRwQRJPaX7U)] 
+✅ How to use, Open Tunet UI: 
+###[[Training Video soon]] 
 ```
-TRAINING:
-1- Choose one of the config_templates for your project (simple or advanced)
-2- Set the input plate paths 
+python ui_app.py
+
 You are good to go!
 ```
- 
-SINGLE-GPU  
-Run the trainer:  
-   
-- Windows or macOS   
+
+
+✅ Tunet UI:
+## Main:
+![main](https://github.com/user-attachments/assets/fe8f03e1-2e53-46b9-8c91-b85befdb3ff9)
+
+## Training:
+![train5](https://github.com/user-attachments/assets/f6bf9ba3-f84b-4d0d-9d95-ff418bebaaf5)
+
+## Converter:
+![convert](https://github.com/user-attachments/assets/8633b5ff-0152-4a09-afaf-1fa7e4669359)
+
+## Adv:
+![adv](https://github.com/user-attachments/assets/f27df935-6677-4c8f-adfb-dbc3b7cd8c9d)
+
+## Data control:
+![data](https://github.com/user-attachments/assets/a30e0160-dc23-4623-9106-d3237700be94)
+
+
+
+### Terminal CMD:
+
+✅ Command line and terminal trainings are still available as usual, check docs:
 ```
-python train.py --config /path/to/your/config.yaml
-```  
-
-
-- Linux
+soon
 ```
-check branches
-```   
-   
-
-
-
-
-## Training screen:
-```
-left: Src Original plate
-Middle: Dst Modified plate
-Right: Model Inference 
-```
-![Screenshot 2025-04-06 at 18 37 45](https://github.com/user-attachments/assets/bc4ab4b4-d636-4b7b-9003-aaed1b213d02)
-
-
-
-
-## Inference:
-- * Important: Make sure you are using correct inference for your branch OS. Do not mix up 
-```
-python inference.py --overlap_factor 0.25 --checkpoint /path/to/your/tunet_latest.pth --input_dir /path/to/your/plate --output_dir /path/to/output/folder
-```
-
-### Inference converters:
-- * Important: Make sure you are using correct converter for your branch OS. Do not mix up
-
-✅ Foundry NUKE Converter:
-```
-Convert the model to run native inside Nuke, CAT:
-
-python utils/convert_nuke.py --method script --generate_nk --checkpoint_pth /path/to/model/tunet_latest.pth
-```
-<img width="899" alt="Screenshot 2025-04-06 at 19 31 15" src="https://github.com/user-attachments/assets/e8b4c620-93a3-4f50-8789-09f88326c2b6" />
-
-
-
-✅ Autodesk FLAME Converter:
-```
-WIP TODO
-Convert the model to run native inside Flame, ONNX:
-
-python utils/convert_flame.py --use_gpu --checkpoint /path/to/model/tunet_latest.pth
-```
-<img width="893" alt="Screenshot 2025-04-06 at 19 28 21" src="https://github.com/user-attachments/assets/0eec9a04-eb3b-4e1a-94bb-b23f9d441690" />
 
 
 ## Video:
