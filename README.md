@@ -23,8 +23,6 @@ Rain:
 Flame:   
 [![Flame video](https://img.youtube.com/vi/6-OFAJtfliM/hqdefault.jpg)](https://youtu.be/6-OFAJtfliM)
 
-Nuke: (video soon)
-
 
 ✅ Install using Miniconda or Anaconda:
 ###[[Install Video](https://youtu.be/QaAca_LiwKc))]
@@ -44,11 +42,9 @@ For Windows or MacOS use the dedicated Branch:
 check branches
 ```
 
-✅ How to use: 
+✅ How to use, Open Tunet UI: 
 ###[[Training Video soon]] 
 ```
-Open Tunet UI:
-
 python ui_app.py
 
 You are good to go!
@@ -67,6 +63,10 @@ You are good to go!
 
 ## Adv:
 ![adv](https://github.com/user-attachments/assets/f27df935-6677-4c8f-adfb-dbc3b7cd8c9d)
+
+## Data control:
+![data](https://github.com/user-attachments/assets/a30e0160-dc23-4623-9106-d3237700be94)
+
 
 
 ### Terminal CMD:
