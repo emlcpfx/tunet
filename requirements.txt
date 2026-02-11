@@ -32,6 +32,7 @@ scipy==1.16.3
 
 # Image processing
 pillow==12.0.0
+OpenEXR==3.2.4  # For EXR file support
 
 # Configuration and logging
 pyyaml==6.0.3

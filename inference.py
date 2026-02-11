@@ -8,6 +8,9 @@ import logging
 import time
 from types import SimpleNamespace
 import numpy as np
+
+# Enable OpenEXR support in OpenCV
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 import cv2
 
 import torch
@@ -15,6 +18,14 @@ import torch.nn as nn
 import torchvision.transforms as T
 from torchvision.transforms.functional import to_pil_image
 from torch.amp import autocast
+
+# Try to import OpenEXR as fallback
+try:
+    import OpenEXR
+    import Imath
+    HAS_OPENEXR = True
+except ImportError:
+    HAS_OPENEXR = False
 
 # --- Helper to convert nested dict to nested SimpleNamespace ---
 # (Copied from train.py)
@@ -120,13 +131,40 @@ def load_image_any_format(image_path):
     _, ext = os.path.splitext(image_path.lower())
 
     if ext == '.exr':
-        # Read EXR using OpenCV
+        # Try OpenCV first (faster if enabled)
         img_cv = cv2.imread(image_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
-        if img_cv is None:
-            raise ValueError(f"Failed to load EXR file: {image_path}")
 
-        # Convert BGR to RGB
-        if len(img_cv.shape) == 3 and img_cv.shape[2] == 3:
+        if img_cv is None and HAS_OPENEXR:
+            # Fallback to OpenEXR library
+            logging.debug(f"OpenCV failed, trying OpenEXR library for: {image_path}")
+            try:
+                exr_file = OpenEXR.InputFile(image_path)
+                header = exr_file.header()
+                dw = header['dataWindow']
+                width = dw.max.x - dw.min.x + 1
+                height = dw.max.y - dw.min.y + 1
+
+                # Read RGB channels
+                FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
+                channels = ['R', 'G', 'B']
+                channel_data = [exr_file.channel(c, FLOAT) for c in channels]
+
+                # Convert to numpy arrays
+                img_channels = []
+                for data in channel_data:
+                    channel_array = np.frombuffer(data, dtype=np.float32)
+                    channel_array = channel_array.reshape((height, width))
+                    img_channels.append(channel_array)
+
+                img_cv = np.stack(img_channels, axis=2)
+            except Exception as e:
+                raise ValueError(f"Failed to load EXR file with both OpenCV and OpenEXR library: {image_path}. Error: {e}")
+        elif img_cv is None:
+            raise ValueError(f"Failed to load EXR file: {image_path}. Install OpenEXR library: pip install OpenEXR")
+
+        # Convert BGR to RGB (OpenCV uses BGR)
+        if len(img_cv.shape) == 3 and img_cv.shape[2] == 3 and not HAS_OPENEXR:
+            # Only convert if it came from OpenCV (which uses BGR)
             img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
         elif len(img_cv.shape) == 3 and img_cv.shape[2] == 4:
             img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGRA2RGB)
