@@ -185,8 +185,30 @@ class MainWindow(QMainWindow):
     def create_about_tab(self):
         tab = QWidget(); layout = QVBoxLayout(tab); layout.setAlignment(Qt.AlignCenter); title = QLabel("Tunet by tpo.comp"); title.setStyleSheet("font-size: 18px; font-weight: bold;"); desc_text = ("A direct, pixel-level mapping from src to dst images via an encoder-decoder network.\n" "Supports training, inference, and export to VFX tools."); description = QLabel(desc_text); description.setAlignment(Qt.AlignCenter); description.setWordWrap(True); support_text = "Native inference support in Autodesk Flame or Foundry Nuke."; support = QLabel(support_text); support.setAlignment(Qt.AlignCenter); source_title = QLabel("Source:"); source_link = QLabel('<a href="https://github.com/tpc2233/tunet">https://github.com/tpc2233/tunet</a>'); source_link.setOpenExternalLinks(True); source_link.setAlignment(Qt.AlignCenter); layout.addStretch(); layout.addWidget(title); layout.addSpacing(15); layout.addWidget(description); layout.addSpacing(10); layout.addWidget(support); layout.addSpacing(25); layout.addWidget(source_title); layout.addWidget(source_link); layout.addStretch(); self.tabs.addTab(tab, "About")
     def create_control_panel(self):
-        control_layout = QHBoxLayout(); self.load_btn = QPushButton("Load Config"); self.save_btn = QPushButton("Save Config"); self.start_btn = QPushButton("Start Training"); self.stop_btn = QPushButton("Stop Training"); self.load_btn.clicked.connect(self.load_config_from_file); self.save_btn.clicked.connect(self.save_config_to_file); self.start_btn.clicked.connect(self.start_training); self.stop_btn.clicked.connect(self.stop_training); self.stop_btn.setEnabled(False); self.start_btn.setStyleSheet("background-color: #a8e6cf;"); self.stop_btn.setStyleSheet("background-color: #ff8a80;"); control_layout.addWidget(self.load_btn); control_layout.addWidget(self.save_btn); control_layout.addStretch(); control_layout.addWidget(self.start_btn); control_layout.addWidget(self.stop_btn); return control_layout
-    
+        control_layout = QHBoxLayout(); self.load_btn = QPushButton("Load Config"); self.save_btn = QPushButton("Save Config"); self.monitor_btn = QPushButton("Training Monitor"); self.start_btn = QPushButton("Start Training"); self.stop_btn = QPushButton("Stop Training"); self.load_btn.clicked.connect(self.load_config_from_file); self.save_btn.clicked.connect(self.save_config_to_file); self.monitor_btn.clicked.connect(self.launch_training_monitor); self.start_btn.clicked.connect(self.start_training); self.stop_btn.clicked.connect(self.stop_training); self.stop_btn.setEnabled(False); self.start_btn.setStyleSheet("background-color: #a8e6cf;"); self.stop_btn.setStyleSheet("background-color: #ff8a80;"); self.monitor_btn.setStyleSheet("background-color: #b3e5fc;"); control_layout.addWidget(self.load_btn); control_layout.addWidget(self.save_btn); control_layout.addWidget(self.monitor_btn); control_layout.addStretch(); control_layout.addWidget(self.start_btn); control_layout.addWidget(self.stop_btn); return control_layout
+
+    def launch_training_monitor(self):
+        """Launch the training monitor window as a separate process."""
+        app_dir = Path(__file__).parent
+        monitor_script = app_dir / "training_monitor.py"
+        if not monitor_script.is_file():
+            QMessageBox.warning(self, "Error", f"Training monitor script not found:\n{monitor_script}")
+            return
+        # Get the model folder to find training.log
+        model_folder = self.model_folder_input.findChild(QLineEdit).text()
+        command = [sys.executable, str(monitor_script)]
+        if model_folder and Path(model_folder).is_dir():
+            log_file = Path(model_folder) / "training.log"
+            if log_file.exists():
+                command.extend(['--log_file', str(log_file)])
+            else:
+                command.extend(['--output_dir', model_folder])
+        try:
+            subprocess.Popen(command)
+            self.console_output.append(f"Launched Training Monitor\n")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to launch training monitor:\n{e}")
+
     def gather_config_from_ui(self):
         def get_path(widget): return widget.findChild(QLineEdit).text()
         augs = []

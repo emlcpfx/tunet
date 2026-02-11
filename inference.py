@@ -1,11 +1,12 @@
 import os
 import argparse
 import math
+import re
 from glob import glob
 from PIL import Image
 import logging
 import time
-from types import SimpleNamespace # <-- Add import
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -23,49 +24,84 @@ def dict_to_namespace(d):
     elif isinstance(d,list): return [dict_to_namespace(item) for item in d]
     else: return d
 
-# --- Corrected UNet Model Definition ---
+# --- UNet Model Definition ---
 # !! Must be IDENTICAL to the training script !!
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels, mid_channels=None):
         super().__init__()
         if not mid_channels: mid_channels = out_channels
         mid_channels = max(1, mid_channels)
-        self.d = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, 3, 1, 1, bias=False), nn.BatchNorm2d(mid_channels), nn.ReLU(True),
-            nn.Conv2d(mid_channels, out_channels, 3, 1, 1, bias=False), nn.BatchNorm2d(out_channels), nn.ReLU(True) )
-    def forward(self, x): return self.d(x)
+        self.d_block = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+    def forward(self, x): return self.d_block(x)
+
 class Down(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super().__init__(); self.m = nn.Sequential(nn.MaxPool2d(2), DoubleConv(in_channels, out_channels))
-    def forward(self, x): return self.m(x)
+        super().__init__()
+        self.m_block = nn.Sequential(nn.MaxPool2d(2), DoubleConv(in_channels, out_channels))
+    def forward(self, x): return self.m_block(x)
+
 class Up(nn.Module):
     def __init__(self, in_channels, skip_channels, out_channels, bilinear=True):
-        super().__init__(); self.bilinear = bilinear
-        if bilinear: self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True); conv_in_channels = in_channels + skip_channels
-        else: up_out_channels = in_channels // 2; self.up = nn.ConvTranspose2d(in_channels, up_out_channels, kernel_size=2, stride=2); conv_in_channels = up_out_channels + skip_channels
-        self.conv = DoubleConv(conv_in_channels, out_channels)
-    def forward(self, x1, x2):
-        x1 = self.up(x1); diffY = x2.size(2) - x1.size(2); diffX = x2.size(3) - x1.size(3)
-        if diffY != 0 or diffX != 0: x1 = nn.functional.pad(x1, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
-        x = torch.cat([x2, x1], dim=1); return self.conv(x)
-class OutConv(nn.Module):
-    def __init__(self, in_channels, out_channels): super().__init__(); self.c = nn.Conv2d(in_channels, out_channels, 1)
-    def forward(self, x): return self.c(x)
-
-# <-- CHANGED: UNet class uses model_size_dims -->
-class UNet(nn.Module):
-    def __init__(self, config, n_ch=3, n_cls=3, bilinear=True):
-        super().__init__(); self.n_ch = n_ch; self.n_cls = n_cls;
-        # Get model size from the passed config object using the new key
-        self.hidden_size = config.model.model_size_dims # <-- Use new key
+        super().__init__()
         self.bilinear = bilinear
-        h = self.hidden_size; chs = {'enc1': h, 'enc2': h*2, 'enc3': h*4, 'enc4': h*8, 'bottle': h*16}
-        self.inc = DoubleConv(n_ch, chs['enc1']); self.down1 = Down(chs['enc1'], chs['enc2']); self.down2 = Down(chs['enc2'], chs['enc3']); self.down3 = Down(chs['enc3'], chs['enc4']); self.down4 = Down(chs['enc4'], chs['bottle'])
-        self.up1 = Up(chs['bottle'], chs['enc4'], chs['enc4'], bilinear); self.up2 = Up(chs['enc4'], chs['enc3'], chs['enc3'], bilinear); self.up3 = Up(chs['enc3'], chs['enc2'], chs['enc2'], bilinear); self.up4 = Up(chs['enc2'], chs['enc1'], chs['enc1'], bilinear)
+        if bilinear:
+            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+            conv_in_channels = in_channels + skip_channels
+        else:
+            up_out_channels = in_channels // 2
+            self.up = nn.ConvTranspose2d(in_channels, up_out_channels, kernel_size=2, stride=2)
+            conv_in_channels = up_out_channels + skip_channels
+        conv_in_channels = max(1, conv_in_channels)
+        out_channels = max(1, out_channels)
+        self.conv = DoubleConv(conv_in_channels, out_channels)
+
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        diffY = x2.size(2) - x1.size(2)
+        diffX = x2.size(3) - x1.size(3)
+        if diffY != 0 or diffX != 0:
+            pad_left = diffX // 2; pad_right = diffX - pad_left
+            pad_top = diffY // 2; pad_bottom = diffY - pad_top
+            x1 = nn.functional.pad(x1, [pad_left, pad_right, pad_top, pad_bottom])
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
+
+class OutConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.c_block = nn.Conv2d(max(1, in_channels), max(1, out_channels), kernel_size=1)
+    def forward(self, x): return self.c_block(x)
+
+class UNet(nn.Module):
+    def __init__(self, n_ch=3, n_cls=3, hidden_size=64, bilinear=True):
+        super().__init__()
+        if n_ch <= 0 or n_cls <= 0 or hidden_size <= 0:
+            raise ValueError("n_ch, n_cls, hidden_size must be positive")
+        self.n_ch, self.n_cls, self.hidden_size, self.bilinear = n_ch, n_cls, hidden_size, bilinear
+        h = hidden_size
+        chs = {'enc1': max(1, h), 'enc2': max(1, h*2), 'enc3': max(1, h*4), 'enc4': max(1, h*8), 'bottle': max(1, h*16)}
+        self.inc = DoubleConv(n_ch, chs['enc1'])
+        self.down1 = Down(chs['enc1'], chs['enc2'])
+        self.down2 = Down(chs['enc2'], chs['enc3'])
+        self.down3 = Down(chs['enc3'], chs['enc4'])
+        self.down4 = Down(chs['enc4'], chs['bottle'])
+        self.up1 = Up(chs['bottle'], chs['enc4'], chs['enc4'], bilinear)
+        self.up2 = Up(chs['enc4'], chs['enc3'], chs['enc3'], bilinear)
+        self.up3 = Up(chs['enc3'], chs['enc2'], chs['enc2'], bilinear)
+        self.up4 = Up(chs['enc2'], chs['enc1'], chs['enc1'], bilinear)
         self.outc = OutConv(chs['enc1'], n_cls)
+
     def forward(self, x):
-        x1=self.inc(x); x2=self.down1(x1); x3=self.down2(x2); x4=self.down3(x3); x5=self.down4(x4)
-        x=self.up1(x5, x4); x=self.up2(x, x3); x=self.up3(x, x2); x=self.up4(x, x1); return self.outc(x)
+        x1 = self.inc(x); x2 = self.down1(x1); x3 = self.down2(x2); x4 = self.down3(x3); x5 = self.down4(x4)
+        x = self.up1(x5, x4); x = self.up2(x, x3); x = self.up3(x, x2); x = self.up4(x, x1)
+        return self.outc(x)
 
 # --- Helper Functions ---
 NORM_MEAN = [0.5, 0.5, 0.5]; NORM_STD = [0.5, 0.5, 0.5]
@@ -126,11 +162,7 @@ def load_model_and_config(checkpoint_path, device):
         logging.info(f"Effective Model Size = {effective_model_size}")
 
     # Instantiate Model
-    # <-- CHANGED: Create minimal config with the NEW key name -->
-    minimal_unet_config = SimpleNamespace(
-        model=SimpleNamespace(model_size_dims=effective_model_size)
-    )
-    model = UNet(config=minimal_unet_config, n_ch=3, n_cls=3, bilinear=bilinear_mode)
+    model = UNet(n_ch=3, n_cls=3, hidden_size=effective_model_size, bilinear=bilinear_mode)
 
     # Load State Dict
     state_dict = checkpoint['model_state_dict']
@@ -153,12 +185,22 @@ def create_blend_mask(resolution, device):
 
 # --- Main Inference Function ---
 # ... (process_image remains the same) ...
-def process_image(model, image_path, output_path, resolution, stride, device, batch_size, transform, denormalize_fn, use_amp):
+def process_image(model, image_path, output_path, resolution, stride, device, batch_size, transform, denormalize_fn, use_amp, half_res=False):
     logging.info(f"Processing: {os.path.basename(image_path)}")
     start_time = time.time()
     try:
         img = Image.open(image_path).convert('RGB')
-        img_width, img_height = img.size
+        orig_width, orig_height = img.size
+
+        # Downscale to half resolution if requested
+        if half_res:
+            img_width = orig_width // 2
+            img_height = orig_height // 2
+            img = img.resize((img_width, img_height), Image.LANCZOS)
+            logging.info(f"Half-res mode: {orig_width}x{orig_height} -> {img_width}x{img_height}")
+        else:
+            img_width, img_height = orig_width, orig_height
+
         if img_width < resolution or img_height < resolution:
             logging.warning(f"Image smaller than resolution {resolution}. Skipping.")
             return
@@ -224,6 +266,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=1, help='Slice batch size (adjust based on GPU memory)')
     parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu'], help='Device for inference')
     parser.add_argument('--use_amp', action='store_true', help='Enable AMP for inference')
+    parser.add_argument('--half_res', action='store_true', help='Process at half resolution for ~4x speedup (upscale in comp)')
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -270,10 +313,18 @@ if __name__ == "__main__":
     for i, img_path in enumerate(input_files):
         logging.info(f"--- Processing image {i+1}/{len(input_files)} ---")
         basename = os.path.splitext(os.path.basename(img_path))[0]
-        output_filename = f"{basename}_processed.png"
+        # Extract frame number from end of filename (e.g., "shot_name_0001" -> "shot_name", "0001")
+        match = re.match(r'^(.+?)_?(\d+)$', basename)
+        if match:
+            name_part = match.group(1)
+            frame_num = match.group(2)
+            output_filename = f"{name_part}_tunet_{frame_num}.png"
+        else:
+            # Fallback if no frame number found
+            output_filename = f"{basename}_tunet.png"
         output_path = os.path.join(args.output_dir, output_filename)
         process_image(model, img_path, output_path, resolution, stride, device,
-                      args.batch_size, transform, denormalize, args.use_amp)
+                      args.batch_size, transform, denormalize, args.use_amp, args.half_res)
 
     total_end_time = time.time()
     logging.info(f"--- Inference finished ---")
