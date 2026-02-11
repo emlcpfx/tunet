@@ -133,6 +133,7 @@ def load_image_any_format(image_path):
     if ext == '.exr':
         # Try OpenCV first (faster if enabled)
         img_cv = cv2.imread(image_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+        loaded_with_opencv = img_cv is not None
 
         if img_cv is None and HAS_OPENEXR:
             # Fallback to OpenEXR library
@@ -144,7 +145,7 @@ def load_image_any_format(image_path):
                 width = dw.max.x - dw.min.x + 1
                 height = dw.max.y - dw.min.y + 1
 
-                # Read RGB channels
+                # Read RGB channels (OpenEXR reads in RGB order)
                 FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
                 channels = ['R', 'G', 'B']
                 channel_data = [exr_file.channel(c, FLOAT) for c in channels]
@@ -162,15 +163,19 @@ def load_image_any_format(image_path):
         elif img_cv is None:
             raise ValueError(f"Failed to load EXR file: {image_path}. Install OpenEXR library: pip install OpenEXR")
 
-        # Convert BGR to RGB (OpenCV uses BGR)
-        if len(img_cv.shape) == 3 and img_cv.shape[2] == 3 and not HAS_OPENEXR:
-            # Only convert if it came from OpenCV (which uses BGR)
-            img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
-        elif len(img_cv.shape) == 3 and img_cv.shape[2] == 4:
-            img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGRA2RGB)
-        elif len(img_cv.shape) == 2:
-            # Grayscale - convert to RGB
-            img_cv = cv2.cvtColor(img_cv, cv2.COLOR_GRAY2RGB)
+        # Convert BGR to RGB ONLY if loaded with OpenCV (which uses BGR order)
+        if loaded_with_opencv:
+            if len(img_cv.shape) == 3 and img_cv.shape[2] == 3:
+                img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
+            elif len(img_cv.shape) == 3 and img_cv.shape[2] == 4:
+                img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGRA2RGB)
+            elif len(img_cv.shape) == 2:
+                img_cv = cv2.cvtColor(img_cv, cv2.COLOR_GRAY2RGB)
+        else:
+            # Loaded with OpenEXR library - already in RGB order
+            # Just handle grayscale case
+            if len(img_cv.shape) == 2:
+                img_cv = np.stack([img_cv, img_cv, img_cv], axis=2)
 
         # Clip negative values and normalize to [0, 1] for display
         # Keep HDR data but ensure it's positive
