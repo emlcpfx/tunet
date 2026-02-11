@@ -7,6 +7,8 @@ from PIL import Image
 import logging
 import time
 from types import SimpleNamespace
+import numpy as np
+import cv2
 
 import torch
 import torch.nn as nn
@@ -110,6 +112,45 @@ def denormalize(tensor):
     std = torch.tensor(NORM_STD, device=tensor.device).view(1, 3, 1, 1)
     return torch.clamp(tensor * std + mean, 0, 1)
 
+def load_image_any_format(image_path):
+    """
+    Load an image in any format including EXR.
+    Returns a PIL Image in RGB mode.
+    """
+    _, ext = os.path.splitext(image_path.lower())
+
+    if ext == '.exr':
+        # Read EXR using OpenCV
+        img_cv = cv2.imread(image_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+        if img_cv is None:
+            raise ValueError(f"Failed to load EXR file: {image_path}")
+
+        # Convert BGR to RGB
+        if len(img_cv.shape) == 3 and img_cv.shape[2] == 3:
+            img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
+        elif len(img_cv.shape) == 3 and img_cv.shape[2] == 4:
+            img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGRA2RGB)
+        elif len(img_cv.shape) == 2:
+            # Grayscale - convert to RGB
+            img_cv = cv2.cvtColor(img_cv, cv2.COLOR_GRAY2RGB)
+
+        # Clip negative values and normalize to [0, 1] for display
+        # Keep HDR data but ensure it's positive
+        img_cv = np.clip(img_cv, 0, None)
+
+        # Tone map for display (simple Reinhard)
+        # This preserves detail while bringing HDR into displayable range
+        img_normalized = img_cv / (1.0 + img_cv)
+
+        # Convert to 8-bit for PIL
+        img_8bit = (np.clip(img_normalized, 0, 1) * 255).astype(np.uint8)
+
+        # Convert to PIL Image
+        return Image.fromarray(img_8bit, mode='RGB')
+    else:
+        # Use PIL for standard formats
+        return Image.open(image_path).convert('RGB')
+
 # --- Updated load_model_and_config ---
 def load_model_and_config(checkpoint_path, device):
     """Loads TuNet, automatically detecting config from checkpoint.""" # Changed description
@@ -189,7 +230,7 @@ def process_image(model, image_path, output_path, resolution, stride, device, ba
     logging.info(f"Processing: {os.path.basename(image_path)}")
     start_time = time.time()
     try:
-        img = Image.open(image_path).convert('RGB')
+        img = load_image_any_format(image_path)
         orig_width, orig_height = img.size
 
         # Downscale to half resolution if requested
@@ -301,7 +342,7 @@ if __name__ == "__main__":
     stride = max(1, resolution - overlap_pixels)
     logging.info(f"Inference Parameters: Resolution={resolution}, Overlap Factor={args.overlap_factor}, Stride={stride}")
 
-    img_extensions = ['*.png', '*.jpg', '*.jpeg', '*.bmp', '*.tif', '*.tiff', '*.webp']
+    img_extensions = ['*.png', '*.jpg', '*.jpeg', '*.bmp', '*.tif', '*.tiff', '*.webp', '*.exr']
     input_files = sorted([f for ext in img_extensions for f in glob(os.path.join(args.input_dir, ext))])
     if not input_files:
         logging.error(f"No supported image files found in {args.input_dir}")

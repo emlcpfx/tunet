@@ -284,7 +284,7 @@ class MultiGPUInferenceGUI:
             from glob import glob
 
             # Find images
-            img_extensions = ['*.png', '*.jpg', '*.jpeg', '*.bmp', '*.tif', '*.tiff', '*.webp']
+            img_extensions = ['*.png', '*.jpg', '*.jpeg', '*.bmp', '*.tif', '*.tiff', '*.webp', '*.exr']
             input_files = sorted([f for ext in img_extensions
                                   for f in glob(os.path.join(self.input_dir.get(), ext))])
 
