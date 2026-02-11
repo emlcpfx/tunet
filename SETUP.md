@@ -100,6 +100,19 @@ For CPU-only systems (not recommended for training):
 pip install torch torchvision torchaudio
 ```
 
+## EXR File Support
+
+TuNet supports high dynamic range (HDR) EXR files for VFX workflows:
+
+- **Automatic tone mapping**: EXR files are tone-mapped using Reinhard operator
+- **Preserves HDR detail**: Brings HDR values into displayable range
+- **All inference tools support EXR**: CLI, GUI, and Multi-GPU
+
+The setup automatically installs OpenEXR support. If you encounter issues:
+```batch
+pip install OpenEXR==3.2.4
+```
+
 ## Troubleshooting
 
 ### "conda: command not found"
