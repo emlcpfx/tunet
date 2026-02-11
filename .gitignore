@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Generated configs
+config_from_ui.yaml
+
+# Model outputs
+*.pth
+*.pt
+
+# Data directories (uncomment if you don't want to track data)
+# data/
+# output/
+
+# OS
+.DS_Store
+Thumbs.db
