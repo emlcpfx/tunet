@@ -1,0 +1,33 @@
+name: tunet
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      # Core ML/DL
+      - torch==2.5.1
+      - torchvision==0.20.1
+      - torchaudio==2.5.1
+      # Data augmentation
+      - albumentations==2.0.8
+      - albucore==0.0.24
+      - opencv-python-headless==4.12.0.88
+      # Perceptual loss
+      - lpips==0.1.4
+      # Visualization
+      - matplotlib==3.10.8
+      # UI Framework
+      - PySide6==6.10.1
+      # Utilities
+      - numpy==2.2.6
+      - scipy==1.16.3
+      - pillow==12.0.0
+      - pyyaml==6.0.3
+      - tqdm==4.67.1
+      - coloredlogs==15.0.1
+      - humanfriendly==10.0
+      # Export formats
+      - onnx==1.20.0
+      - onnxruntime==1.23.2
