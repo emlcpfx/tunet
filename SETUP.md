@@ -1,6 +1,6 @@
 # TuNet Setup Guide
 
-Quick setup instructions for getting TuNet running on Windows.
+Quick setup instructions for getting TuNet running on Windows, Linux, and macOS.
 
 ## Prerequisites
 
@@ -12,6 +12,7 @@ Quick setup instructions for getting TuNet running on Windows.
 
 ### Option 1: Automated Setup (Recommended)
 
+**Windows:**
 Simply double-click `setup_environment.bat` and it will:
 1. Create a conda environment named "tunet"
 2. Install all required dependencies
@@ -19,6 +20,13 @@ Simply double-click `setup_environment.bat` and it will:
 
 ```batch
 setup_environment.bat
+```
+
+**Linux/macOS:**
+Run the shell script:
+```bash
+chmod +x setup_environment.sh
+./setup_environment.sh
 ```
 
 ### Option 2: Manual Setup
@@ -74,8 +82,12 @@ python inference_gui_multigpu.py
 ```
 
 ### 4. Command Line Training
-```batch
+```bash
+# Single GPU
 python train.py --config your_config.yaml
+
+# Multi-GPU (Linux only - uses torchrun)
+torchrun --standalone --nnodes=1 --nproc_per_node=4 train.py --config your_config.yaml
 ```
 
 ### 5. Command Line Inference
