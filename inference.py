@@ -177,16 +177,12 @@ def load_image_any_format(image_path):
             if len(img_cv.shape) == 2:
                 img_cv = np.stack([img_cv, img_cv, img_cv], axis=2)
 
-        # Clip negative values and normalize to [0, 1] for display
-        # Keep HDR data but ensure it's positive
-        img_cv = np.clip(img_cv, 0, None)
-
-        # Tone map for display (simple Reinhard)
-        # This preserves detail while bringing HDR into displayable range
-        img_normalized = img_cv / (1.0 + img_cv)
+        # Clip negative values and clamp to [0, 1] range
+        # No tone mapping - EXRs are already in correct color space
+        img_cv = np.clip(img_cv, 0, 1)
 
         # Convert to 8-bit for PIL
-        img_8bit = (np.clip(img_normalized, 0, 1) * 255).astype(np.uint8)
+        img_8bit = (img_cv * 255).astype(np.uint8)
 
         # Convert to PIL Image
         return Image.fromarray(img_8bit, mode='RGB')
