@@ -240,7 +240,7 @@ class UNet(nn.Module):
 # --- Data Loading and Augmentation ---
 
 # --- Augmentation Creation Function ---
-def create_augmentations(augmentation_list):
+def create_augmentations(augmentation_list, has_mask=False):
     transforms = []
     uses_albumentations = False
     if not isinstance(augmentation_list, list):
@@ -284,7 +284,10 @@ def create_augmentations(augmentation_list):
 
     if not transforms: return None
     # Use DEBUG for pipeline type confirmation
-    if uses_albumentations: logging.debug(f"Creating Albumentations pipeline ({len(transforms)} steps)."); return A.Compose(transforms)
+    if uses_albumentations:
+        logging.debug(f"Creating Albumentations pipeline ({len(transforms)} steps).")
+        if has_mask: return A.Compose(transforms, additional_targets={'loss_mask': 'mask'})
+        return A.Compose(transforms)
     else: logging.debug(f"Creating Torchvision pipeline ({len(transforms)} steps)."); return T.Compose(transforms)
 
 # --- EXR Image Loading ---
@@ -349,15 +352,48 @@ def load_image_any_format(image_path):
         # Use PIL for standard formats
         return Image.open(image_path).convert('RGB')
 
+def load_mask_image(image_path):
+    """Load a mask image as single-channel (H,W) float32 numpy array in [0,1]."""
+    _, ext = os.path.splitext(image_path.lower())
+    if ext == '.exr':
+        img_cv = cv2.imread(image_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+        if img_cv is None and HAS_OPENEXR:
+            try:
+                exr_file = OpenEXR.InputFile(image_path)
+                header = exr_file.header()
+                dw = header['dataWindow']
+                width = dw.max.x - dw.min.x + 1
+                height = dw.max.y - dw.min.y + 1
+                FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
+                available = list(header['channels'].keys())
+                ch_name = 'Y' if 'Y' in available else available[0]
+                data = exr_file.channel(ch_name, FLOAT)
+                mask = np.frombuffer(data, dtype=np.float32).reshape((height, width))
+                return np.clip(mask, 0.0, 1.0)
+            except Exception as e:
+                raise ValueError(f"Failed to load mask EXR: {image_path}. Error: {e}")
+        elif img_cv is None:
+            raise ValueError(f"Failed to load mask EXR: {image_path}")
+        if len(img_cv.shape) == 3:
+            mask = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY) if img_cv.shape[2] >= 3 else img_cv[:, :, 0]
+        else:
+            mask = img_cv
+        return np.clip(mask.astype(np.float32), 0.0, 1.0)
+    else:
+        img = Image.open(image_path).convert('L')
+        return np.array(img, dtype=np.float32) / 255.0
+
 # --- Augmented Dataset Class ---
 class AugmentedImagePairSlicingDataset(Dataset):
     def __init__(self, src_dir, dst_dir, resolution, overlap_factor=0.0,
                  src_transforms=None, dst_transforms=None, shared_transforms=None,
-                 final_transform=None):
+                 final_transform=None, mask_dir=None):
         self.src_dir = os.path.abspath(src_dir)
         self.dst_dir = os.path.abspath(dst_dir)
         if not os.path.isdir(self.src_dir): raise FileNotFoundError(f"Src dir not found: {self.src_dir}")
         if not os.path.isdir(self.dst_dir): raise FileNotFoundError(f"Dst dir not found: {self.dst_dir}")
+        self.mask_dir = os.path.abspath(mask_dir) if mask_dir else None
+        if self.mask_dir and not os.path.isdir(self.mask_dir): raise FileNotFoundError(f"Mask dir not found: {self.mask_dir}")
         self.resolution, self.overlap_factor = resolution, overlap_factor
         self.src_transforms, self.dst_transforms = src_transforms, dst_transforms
         self.shared_transforms, self.final_transform = shared_transforms, final_transform
@@ -375,6 +411,14 @@ class AugmentedImagePairSlicingDataset(Dataset):
         for i, src_path in enumerate(src_files):
             base_name = os.path.basename(src_path); dst_path = os.path.join(self.dst_dir, base_name)
             if not os.path.exists(dst_path): self.skipped_count += 1; self.skipped_file_reasons.append((base_name, "Dst missing")); continue
+            mask_path = None
+            if self.mask_dir:
+                stem = os.path.splitext(base_name)[0]
+                mask_exts = ['.png', '.jpg', '.jpeg', '.exr', '.tif', '.tiff']
+                for mext in mask_exts:
+                    candidate = os.path.join(self.mask_dir, stem + mext)
+                    if os.path.exists(candidate): mask_path = candidate; break
+                if mask_path is None: self.skipped_count += 1; self.skipped_file_reasons.append((base_name, "Mask missing")); continue
             try:
                 img_s = load_image_any_format(src_path); img_d = load_image_any_format(dst_path)
                 w_s, h_s = img_s.size; w_d, h_d = img_d.size
@@ -391,7 +435,9 @@ class AugmentedImagePairSlicingDataset(Dataset):
                     for x in unique_x:
                         if not (0 <= x <= w_s - resolution): continue
                         crop_box = (x, y, x + resolution, y + resolution)
-                        self.slice_info.append({'src_path': src_path, 'dst_path': dst_path, 'crop_box': crop_box}); num_slices_for_file += 1
+                        info_dict = {'src_path': src_path, 'dst_path': dst_path, 'crop_box': crop_box}
+                        if mask_path: info_dict['mask_path'] = mask_path
+                        self.slice_info.append(info_dict); num_slices_for_file += 1
                 if num_slices_for_file > 0: self.processed_files += 1; self.total_slices_generated += num_slices_for_file
             except (FileNotFoundError, UnidentifiedImageError) as file_err:
                  self.skipped_count += 1; self.skipped_file_reasons.append((base_name, type(file_err).__name__));
@@ -427,9 +473,16 @@ class AugmentedImagePairSlicingDataset(Dataset):
     def __len__(self): return len(self.slice_info)
     def __getitem__(self, idx):
         try: info = self.slice_info[idx]; src_path, dst_path, crop_box = info['src_path'], info['dst_path'], info['crop_box']
-        except IndexError: logging.error(f"Index {idx} out of bounds for slice_info (len {len(self.slice_info)})."); return None # Keep Error
+        except IndexError: logging.error(f"Index {idx} out of bounds for slice_info (len {len(self.slice_info)})."); return None
         try: src_img = load_image_any_format(src_path); dst_img = load_image_any_format(dst_path)
-        except Exception as load_e: logging.error(f"Item {idx}: Img load error ({os.path.basename(src_path)}): {load_e}"); return None # Keep Error
+        except Exception as load_e: logging.error(f"Item {idx}: Img load error ({os.path.basename(src_path)}): {load_e}"); return None
+        # Load mask if configured
+        mask_slice = None
+        if self.mask_dir and 'mask_path' in info:
+            try: mask_full = load_mask_image(info['mask_path'])
+            except Exception as e: logging.error(f"Item {idx}: Mask load error: {e}"); return None
+            x1, y1, x2, y2 = crop_box
+            mask_slice = mask_full[y1:y2, x1:x2]
         try:
             src_slice_pil = src_img.crop(crop_box); dst_slice_pil = dst_img.crop(crop_box)
             src_img.close(); dst_img.close()
@@ -438,7 +491,12 @@ class AugmentedImagePairSlicingDataset(Dataset):
             else: src_slice_current, dst_slice_current = src_slice_pil, dst_slice_pil
 
             if self.shared_transforms:
-                if isinstance(self.shared_transforms, A.Compose): aug = self.shared_transforms(image=src_slice_current, mask=dst_slice_current); src_slice_current, dst_slice_current = aug['image'], aug['mask']
+                if isinstance(self.shared_transforms, A.Compose):
+                    aug_kwargs = {'image': src_slice_current, 'mask': dst_slice_current}
+                    if mask_slice is not None: aug_kwargs['loss_mask'] = mask_slice
+                    aug = self.shared_transforms(**aug_kwargs)
+                    src_slice_current, dst_slice_current = aug['image'], aug['mask']
+                    if mask_slice is not None: mask_slice = aug['loss_mask']
                 elif isinstance(self.shared_transforms, T.Compose): seed = random.randint(0, 2**32-1); torch.manual_seed(seed); random.seed(seed); src_slice_current = self.shared_transforms(src_slice_current); torch.manual_seed(seed); random.seed(seed); dst_slice_current = self.shared_transforms(dst_slice_current)
             if self.src_transforms:
                 if isinstance(self.src_transforms, A.Compose): src_slice_current = self.src_transforms(image=src_slice_current)['image']
@@ -451,12 +509,17 @@ class AugmentedImagePairSlicingDataset(Dataset):
                 if use_numpy: src_final_input, dst_final_input = Image.fromarray(src_slice_current), Image.fromarray(dst_slice_current)
                 else: src_final_input, dst_final_input = src_slice_current, dst_slice_current
                 src_tensor, dst_tensor = self.final_transform(src_final_input), self.final_transform(dst_final_input)
-            else: # Manual conversion if no final transform
+            else:
                 if not use_numpy: src_slice_current, dst_slice_current = np.array(src_slice_current), np.array(dst_slice_current)
                 src_tensor = torch.from_numpy(src_slice_current.transpose(2, 0, 1)).float() / 255.0; dst_tensor = torch.from_numpy(dst_slice_current.transpose(2, 0, 1)).float() / 255.0
                 norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist()); src_tensor, dst_tensor = norm(src_tensor), norm(dst_tensor)
+            # Convert mask to tensor (1, H, W) in [0,1] - no normalization
+            if mask_slice is not None:
+                mask_tensor = torch.from_numpy(np.ascontiguousarray(mask_slice)).unsqueeze(0).float()
+                mask_tensor = torch.clamp(mask_tensor, 0.0, 1.0)
+                return src_tensor, dst_tensor, mask_tensor
             return src_tensor, dst_tensor
-        except Exception as e: logging.error(f"Item {idx}: Transform error ({os.path.basename(src_path)}): {e}", exc_info=False); return None # Keep Error
+        except Exception as e: logging.error(f"Item {idx}: Transform error ({os.path.basename(src_path)}): {e}", exc_info=False); return None
 
 # --- Helper Functions ---
 NORM_MEAN = torch.tensor([0.5, 0.5, 0.5]); NORM_STD = torch.tensor([0.5, 0.5, 0.5])
@@ -471,35 +534,41 @@ def cycle(iterable):
         except StopIteration: iterator = iter(iterable)
 
 # --- Preview Capture/Saving ---
-def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, preview_save_count, preview_refresh_rate):
+def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, preview_save_count, preview_refresh_rate, fixed_mask_batch=None, use_mask_input=False):
     if not is_main_process() or fixed_src_batch is None or fixed_dst_batch is None or fixed_src_batch.nelement() == 0: return
-    num_grid_cols = 3; num_samples = min(fixed_src_batch.size(0), num_grid_cols)
+    has_mask = fixed_mask_batch is not None
+    num_grid_cols = 4 if has_mask else 3
+    num_samples = min(fixed_src_batch.size(0), 3)
     if num_samples == 0: return
     src_select, dst_select = fixed_src_batch[:num_samples].cpu(), fixed_dst_batch[:num_samples].cpu()
+    mask_select = fixed_mask_batch[:num_samples].cpu() if has_mask else None
     model.eval(); device_type = device.type
-    # Determine AMP usage for inference based on scaler status (safer)
     use_amp_inf = scaler.is_enabled() if 'scaler' in globals() and scaler is not None else False
     pred_select = None
     try:
-        # on CUDA use autocast, otherwise just do a plain no_grad
         if device_type == 'cuda' and use_amp_inf:
             ctx = autocast(device_type=device_type, enabled=True)
         else:
             ctx = torch.no_grad()
         with ctx:
-            # make sure we’re feeding float32 into the MPS 
-            src_dev = src_select.float().to(device)
-
             src_dev = src_select.to(device)
-            
             model_module = model.module if isinstance(model, DDP) else model
-            predicted_batch = model_module(src_dev)
+            if use_mask_input and mask_select is not None:
+                mask_dev = mask_select.to(device)
+                model_input = torch.cat([src_dev, mask_dev], dim=1)
+            else:
+                model_input = src_dev
+            predicted_batch = model_module(model_input)
         pred_select = predicted_batch.cpu().float()
-    except Exception as e: logging.error(f"Preview inference error (Step {global_step}): {e}"); model.train(); return # Keep Error
+    except Exception as e: logging.error(f"Preview inference error (Step {global_step}): {e}"); model.train(); return
     model.train()
     src_denorm, pred_denorm, dst_denorm = denormalize(src_select), denormalize(pred_select), denormalize(dst_select)
-    if src_denorm is None or pred_denorm is None or dst_denorm is None: logging.error(f"Preview denorm error (Step {global_step})"); return # Keep Error
-    combined = [item for i in range(num_samples) for item in [src_denorm[i], dst_denorm[i], pred_denorm[i]]]
+    if src_denorm is None or pred_denorm is None or dst_denorm is None: logging.error(f"Preview denorm error (Step {global_step})"); return
+    if has_mask:
+        mask_3ch = mask_select.repeat(1, 3, 1, 1)  # (N, 3, H, W) for display
+        combined = [item for i in range(num_samples) for item in [src_denorm[i], mask_3ch[i], dst_denorm[i], pred_denorm[i]]]
+    else:
+        combined = [item for i in range(num_samples) for item in [src_denorm[i], dst_denorm[i], pred_denorm[i]]]
     if not combined: return
     try: grid_tensor = torch.stack(combined); grid = make_grid(grid_tensor, nrow=num_grid_cols, padding=2, normalize=False)
     except Exception as e: logging.error(f"Preview grid error (Step {global_step}): {e}"); return # Keep Error
@@ -516,29 +585,32 @@ def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_e
         logging.log(log_level, f"{log_msg_base} {log_msg_details}" + (" - Refreshed" if refreshed else ""))
     except Exception as e: logging.error(f"Failed to save preview image: {e}") # Keep Error
 
-def capture_preview_batch(config, src_transforms, dst_transforms, shared_transforms, standard_transform):
-    if not is_main_process(): return None, None
+def capture_preview_batch(config, src_transforms, dst_transforms, shared_transforms, standard_transform, use_masks=False):
+    if not is_main_process(): return None, None, None
     num_preview_samples = 3
-    # Use DEBUG for capture attempt message
     logging.debug(f"Capturing/refreshing fixed batch ({num_preview_samples} samples) for previews...")
-    fixed_src_slices, fixed_dst_slices = None, None
     try:
-        preview_dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, config.data.resolution, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform)
-        if len(preview_dataset) == 0: logging.warning("Preview dataset has 0 slices."); return None, None # Keep Warning
+        preview_dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, config.data.resolution, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None)
+        if len(preview_dataset) == 0: logging.warning("Preview dataset has 0 slices."); return None, None, None
         num_samples_to_load = min(num_preview_samples, len(preview_dataset))
-        if num_samples_to_load < num_preview_samples: logging.info(f"Preview capturing {num_samples_to_load} samples (dataset smaller).") # Keep INFO
+        if num_samples_to_load < num_preview_samples: logging.info(f"Preview capturing {num_samples_to_load} samples (dataset smaller).")
         preview_loader = DataLoader(preview_dataset, batch_size=num_samples_to_load, shuffle=True, num_workers=0, collate_fn=collate_skip_none)
         batch_data = next(iter(preview_loader))
-        if batch_data is None: logging.error("Preview DataLoader returned None after collation."); return None, None # Keep Error
-        fixed_src_slices, fixed_dst_slices = batch_data
-        if fixed_src_slices is not None and fixed_dst_slices is not None and fixed_src_slices.size(0) > 0:
-            # Use DEBUG for success message
-            logging.debug(f"Captured preview batch size {fixed_src_slices.size(0)}.")
-            return fixed_src_slices.cpu(), fixed_dst_slices.cpu()
-        else: logging.error("Preview DataLoader returned empty/None tensor."); return None, None # Keep Error
-    except StopIteration: logging.error("Preview DataLoader StopIteration."); return None, None # Keep Error
-    except ValueError as dataset_ve: logging.error(f"Failed creating preview dataset: {dataset_ve}"); return None, None # Keep Error
-    except Exception as e: logging.exception(f"Error capturing preview batch: {e}"); return None, None # Keep Error using exception
+        if batch_data is None: logging.error("Preview DataLoader returned None after collation."); return None, None, None
+        if use_masks:
+            fixed_src, fixed_dst, fixed_mask = batch_data
+            if fixed_src is not None and fixed_dst is not None and fixed_src.size(0) > 0:
+                logging.debug(f"Captured preview batch size {fixed_src.size(0)} (with masks).")
+                return fixed_src.cpu(), fixed_dst.cpu(), fixed_mask.cpu()
+        else:
+            fixed_src, fixed_dst = batch_data
+            if fixed_src is not None and fixed_dst is not None and fixed_src.size(0) > 0:
+                logging.debug(f"Captured preview batch size {fixed_src.size(0)}.")
+                return fixed_src.cpu(), fixed_dst.cpu(), None
+        logging.error("Preview DataLoader returned empty/None tensor."); return None, None, None
+    except StopIteration: logging.error("Preview DataLoader StopIteration."); return None, None, None
+    except ValueError as dataset_ve: logging.error(f"Failed creating preview dataset: {dataset_ve}"); return None, None, None
+    except Exception as e: logging.exception(f"Error capturing preview batch: {e}"); return None, None, None
 
 # --- Signal Handler ---
 shutdown_requested = False
@@ -625,14 +697,22 @@ def train(config):
         src_list = getattr(datasets_config, 'src_augs', []); dst_list = getattr(datasets_config, 'dst_augs', []); shared_list = getattr(datasets_config, 'shared_augs', [])
         src_transforms = create_augmentations(src_list if isinstance(src_list, list) else [])
         dst_transforms = create_augmentations(dst_list if isinstance(dst_list, list) else [])
-        shared_transforms = create_augmentations(shared_list if isinstance(shared_list, list) else [])
+        shared_transforms = create_augmentations(shared_list if isinstance(shared_list, list) else [], has_mask=bool(config.data.mask_dir))
         if is_main_process(): logging.debug("Augmentation pipelines created (if configured).")
     except Exception as e: logging.error(f"FATAL: Augmentation creation failed: {e}. Exiting.", exc_info=True); cleanup_ddp(); return
+
+    # --- Mask Settings ---
+    use_masks = config.data.mask_dir is not None and (config.mask.use_mask_loss or config.mask.use_mask_input)
+    use_mask_loss = use_masks and config.mask.use_mask_loss
+    use_mask_input = use_masks and config.mask.use_mask_input
+    n_input_ch = 4 if use_mask_input else 3
+    if is_main_process() and use_masks:
+        logging.info(f"Mask enabled: loss_weighting={use_mask_loss} (weight={config.mask.mask_weight}), input_channel={use_mask_input}")
 
     # --- Dataset & DataLoader ---
     dataset, dataloader, dataloader_iter = None, None, None
     try:
-        dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, config.data.resolution, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform)
+        dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, config.data.resolution, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None)
         if is_main_process():
              logging.info(f"Dataset Size: {len(dataset)} slices.")
              global_bs = config.training.batch_size * world_size; est_bpp = math.ceil(len(dataset)/global_bs) if global_bs>0 else 0
@@ -675,7 +755,7 @@ def train(config):
     model, optimizer, scaler = None, None, None
     start_epoch, start_step = 0, 0
     try:
-        model = UNet(n_ch=3, n_cls=3, hidden_size=eff_size).to(device)
+        model = UNet(n_ch=n_input_ch, n_cls=3, hidden_size=eff_size).to(device)
         if is_main_process(): logging.debug(f"UNet instantiated: hidden_size={eff_size}, device={device}.")
         if world_size > 1 and device_type == 'cuda': # SyncBN only for CUDA DDP
             if is_main_process(): logging.debug("Converting BatchNorm to SyncBatchNorm.")
@@ -714,6 +794,8 @@ def train(config):
                 ckpt_eff_size = ckpt_base if not (ckpt_loss == 'l1+lpips' and ckpt_base == def_h) else bump_h
                 if ckpt_loss != config.training.loss: raise ValueError(f"Loss mismatch: Ckpt='{ckpt_loss}', Current='{config.training.loss}'")
                 if ckpt_eff_size != eff_size: raise ValueError(f"Effective size mismatch: Ckpt={ckpt_eff_size}, Current={eff_size}")
+                ckpt_n_ch = ckpt.get('n_input_channels', 3)
+                if ckpt_n_ch != n_input_ch: raise ValueError(f"Input channel mismatch: Ckpt={ckpt_n_ch}, Current={n_input_ch}. Cannot resume with different mask input setting.")
                 if is_main_process(): logging.debug("Checkpoint config compatible.")
                 state_dict = ckpt['model_state_dict']; is_ddp_ckpt = any(k.startswith('module.') for k in state_dict)
                 if world_size > 1 and not is_ddp_ckpt:
@@ -763,14 +845,14 @@ def train(config):
 
     # --- Training Loop Variables ---
     global_step = start_step; iter_epoch = config.training.iterations_per_epoch
-    fixed_src, fixed_dst = None, None; preview_count = 0
+    fixed_src, fixed_dst, fixed_mask = None, None, None; preview_count = 0
     ep_l1, ep_lpips, ep_steps = 0.0, 0.0, 0
     batch_times = []
 
     # --- Capture Initial Preview Batch ---
     preview_interval = config.logging.preview_batch_interval
     if is_main_process() and preview_interval > 0:
-        fixed_src, fixed_dst = capture_preview_batch(config, src_transforms, dst_transforms, shared_transforms, standard_transform)
+        fixed_src, fixed_dst, fixed_mask = capture_preview_batch(config, src_transforms, dst_transforms, shared_transforms, standard_transform, use_masks=use_masks)
         if fixed_src is None: logging.warning("Initial preview batch capture failed.")
 
     # --- Main Training Loop ---
@@ -792,8 +874,13 @@ def train(config):
             try: batch = next(dataloader_iter)
             except Exception as e: logging.error(f"S{global_step}: Batch load error: {e}, skipping.", exc_info=True); global_step += 1; continue
             if batch is None: logging.warning(f"S{global_step}: Skipped batch (collation error)."); global_step += 1; continue
-            #src, dst = batch; data_load_time = time.time() - data_load_start
-            src, dst = batch
+            # Unpack batch (2-tuple or 3-tuple with mask)
+            if use_masks:
+                src, dst, mask_batch = batch
+                mask_batch = mask_batch.to(device)
+            else:
+                src, dst = batch
+                mask_batch = None
             data_load_time = time.time() - data_load_start
 
             # ── send inputs to the same device as the model ──
@@ -802,33 +889,38 @@ def train(config):
             dst = dst.to(device)
             transfer_time = time.time() - transfer_start
 
+            # Build model input (concatenate mask as 4th channel if enabled)
+            model_input = torch.cat([src, mask_batch], dim=1) if use_mask_input and mask_batch is not None else src
+
             # --- Forward, Loss, Backward, Optimize ---
             compute_start = time.time()
             optimizer.zero_grad(set_to_none=True)
 
-            # <<< Eu sei... >>>
-            # Only use autocast context if AMP is effectively enabled (i.e., on CUDA)
             if use_amp_eff:
                 with autocast(device_type=device_type, enabled=True):
-                    out = model(src)
-                    l1 = criterion_l1(out, dst)
+                    out = model(model_input)
+                    if use_mask_loss and mask_batch is not None:
+                        weight_map = 1.0 + mask_batch * (config.mask.mask_weight - 1.0)
+                        l1 = (torch.abs(out - dst) * weight_map).mean()
+                    else:
+                        l1 = criterion_l1(out, dst)
                     lp = torch.tensor(0.0, device=device)
                     if use_lpips and loss_fn_lpips:
                         try: lp = loss_fn_lpips(out, dst).mean()
                         except Exception as e_lp: lp = torch.tensor(0.0, device=device)
-                    # Loss calculation inside autocast context
                     loss = l1 + config.training.lambda_lpips * lp
             else:
-                # Run standard forward pass if AMP is disabled (CPU or MPS)
-                out = model(src)
-                l1 = criterion_l1(out, dst)
+                out = model(model_input)
+                if use_mask_loss and mask_batch is not None:
+                    weight_map = 1.0 + mask_batch * (config.mask.mask_weight - 1.0)
+                    l1 = (torch.abs(out - dst) * weight_map).mean()
+                else:
+                    l1 = criterion_l1(out, dst)
                 lp = torch.tensor(0.0, device=device)
                 if use_lpips and loss_fn_lpips:
                     try: lp = loss_fn_lpips(out, dst).mean()
                     except Exception as e_lp: lp = torch.tensor(0.0, device=device)
-                # Loss calculation outside autocast context
                 loss = l1 + config.training.lambda_lpips * lp
-            # <<< MODIFIED AUTOCAST USAGE END >>>
 
             if not torch.isfinite(loss):
                 logging.error(f"S{global_step}: NaN/Inf loss ({loss.item()})! Skip update.")
@@ -877,11 +969,11 @@ def train(config):
             if is_main_process() and preview_interval > 0 and global_step % preview_interval == 0:
                 refresh = (fixed_src is None) or (config.logging.preview_refresh_rate > 0 and preview_count > 0 and (preview_count % config.logging.preview_refresh_rate == 0))
                 if refresh:
-                     new_src, new_dst = capture_preview_batch(config, src_transforms, dst_transforms, shared_transforms, standard_transform)
-                     if new_src is not None: fixed_src, fixed_dst = new_src, new_dst
+                     new_src, new_dst, new_mask = capture_preview_batch(config, src_transforms, dst_transforms, shared_transforms, standard_transform, use_masks=use_masks)
+                     if new_src is not None: fixed_src, fixed_dst, fixed_mask = new_src, new_dst, new_mask
                      elif fixed_src is None: logging.warning(f"S{global_step}: Preview refresh failed (no initial).")
                      else: logging.warning(f"S{global_step}: Preview refresh failed, using old.")
-                if fixed_src is not None: save_previews(model, fixed_src, fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, preview_count, config.logging.preview_refresh_rate); preview_count += 1
+                if fixed_src is not None: save_previews(model, fixed_src, fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, preview_count, config.logging.preview_refresh_rate, fixed_mask_batch=fixed_mask, use_mask_input=use_mask_input); preview_count += 1
                 elif preview_count == 0: logging.warning(f"S{global_step}: Skipping preview (no batch).")
 
             save_interval = config.saving.save_iterations_interval; save_now = (save_interval > 0 and global_step % save_interval == 0)
@@ -893,7 +985,7 @@ def train(config):
                  # Save scaler state only if AMP was effectively used
                  scaler_state = scaler.state_dict() if use_amp_eff else None
                  ckpt_data = {'epoch': ckpt_ep, 'global_step': global_step, 'model_state_dict': m_state, 'optimizer_state_dict': optimizer.state_dict(),
-                              'scaler_state_dict': scaler_state, 'config': cfg_dict, 'effective_model_size': eff_size}
+                              'scaler_state_dict': scaler_state, 'config': cfg_dict, 'effective_model_size': eff_size, 'n_input_channels': n_input_ch}
                  try:
                      reason = "interval" if save_now else "epoch end"
                      torch.save(ckpt_data, latest_path)
@@ -921,7 +1013,7 @@ def train(config):
                      m_state = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
                      scaler_state = scaler.state_dict() if use_amp_eff else None # Check effective use
                      final_data = {'epoch': final_ep, 'global_step': final_global_step, 'model_state_dict': m_state, 'optimizer_state_dict': optimizer.state_dict(),
-                                   'scaler_state_dict': scaler_state, 'config': cfg_dict, 'effective_model_size': eff_size}
+                                   'scaler_state_dict': scaler_state, 'config': cfg_dict, 'effective_model_size': eff_size, 'n_input_channels': n_input_ch}
                      torch.save(final_data, latest_path); logging.info(f"Final checkpoint saved: {latest_path}")
                  else: logging.error("Cannot save final checkpoint: Model/Optimizer/Scaler missing.")
             except Exception as e: logging.error(f"Final checkpoint save failed: {e}", exc_info=True)
@@ -1058,6 +1150,12 @@ if __name__ == "__main__":
     config.saving = getattr(config, 'saving', SimpleNamespace()); config.saving.save_iterations_interval = getattr(config.saving, 'save_iterations_interval', 0)
     config.logging = getattr(config, 'logging', SimpleNamespace()); config.logging.log_interval = getattr(config.logging, 'log_interval', 50)
     config.logging.preview_batch_interval = getattr(config.logging, 'preview_batch_interval', 500); config.logging.preview_refresh_rate = getattr(config.logging, 'preview_refresh_rate', 5)
+    # Mask defaults
+    config.data.mask_dir = getattr(config.data, 'mask_dir', None)
+    config.mask = getattr(config, 'mask', SimpleNamespace())
+    config.mask.use_mask_loss = getattr(config.mask, 'use_mask_loss', False)
+    config.mask.mask_weight = getattr(config.mask, 'mask_weight', 10.0)
+    config.mask.use_mask_input = getattr(config.mask, 'use_mask_input', False)
     # Final Value Checks
     if not missing:
         try: # Combine checks for brevity
@@ -1079,6 +1177,11 @@ if __name__ == "__main__":
             if config.logging.log_interval <= 0: error_msgs.append("log.interval<=0")
             if config.logging.preview_batch_interval < 0: error_msgs.append("log.preview<0")
             if config.logging.preview_refresh_rate < 0: error_msgs.append("log.refresh<0")
+            # Mask validation
+            if config.mask.use_mask_loss or config.mask.use_mask_input:
+                if not config.data.mask_dir: error_msgs.append("mask_dir required when mask features enabled")
+                elif not os.path.isdir(config.data.mask_dir): error_msgs.append(f"data.mask_dir missing: {config.data.mask_dir}")
+            if config.mask.mask_weight < 1.0: error_msgs.append("mask.mask_weight must be >= 1.0")
         except Exception as e: error_msgs.append(f"Validation error: {e}")
     # Abort on Errors
     if error_msgs or missing:

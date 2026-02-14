@@ -187,6 +187,37 @@ def load_image_any_format(image_path):
         # Use PIL for standard formats
         return Image.open(image_path).convert('RGB')
 
+def load_mask_image(image_path):
+    """Load a mask image as single-channel (H,W) float32 numpy array in [0,1]."""
+    _, ext = os.path.splitext(image_path.lower())
+    if ext == '.exr':
+        img_cv = cv2.imread(image_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+        if img_cv is None and HAS_OPENEXR:
+            try:
+                exr_file = OpenEXR.InputFile(image_path)
+                header = exr_file.header()
+                dw = header['dataWindow']
+                width = dw.max.x - dw.min.x + 1
+                height = dw.max.y - dw.min.y + 1
+                FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
+                available = list(header['channels'].keys())
+                ch_name = 'Y' if 'Y' in available else available[0]
+                data = exr_file.channel(ch_name, FLOAT)
+                mask = np.frombuffer(data, dtype=np.float32).reshape((height, width))
+                return np.clip(mask, 0.0, 1.0)
+            except Exception as e:
+                raise ValueError(f"Failed to load mask EXR: {image_path}. Error: {e}")
+        elif img_cv is None:
+            raise ValueError(f"Failed to load mask EXR: {image_path}")
+        if len(img_cv.shape) == 3:
+            mask = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY) if img_cv.shape[2] >= 3 else img_cv[:, :, 0]
+        else:
+            mask = img_cv
+        return np.clip(mask.astype(np.float32), 0.0, 1.0)
+    else:
+        img = Image.open(image_path).convert('L')
+        return np.array(img, dtype=np.float32) / 255.0
+
 # --- Updated load_model_and_config ---
 def load_model_and_config(checkpoint_path, device):
     """Loads TuNet, automatically detecting config from checkpoint.""" # Changed description
@@ -238,8 +269,20 @@ def load_model_and_config(checkpoint_path, device):
     else:
         logging.info(f"Effective Model Size = {effective_model_size}")
 
+    # Extract mask config
+    use_mask_input = False
+    n_input_ch = checkpoint.get('n_input_channels', 3)
+    if n_input_ch == 4:
+        use_mask_input = True
+    elif is_new_format:
+        mask_config = getattr(config_source, 'mask', SimpleNamespace())
+        use_mask_input = getattr(mask_config, 'use_mask_input', False)
+        if use_mask_input: n_input_ch = 4
+    if use_mask_input:
+        logging.info("Model uses mask input channel (4-channel input).")
+
     # Instantiate Model
-    model = UNet(n_ch=3, n_cls=3, hidden_size=effective_model_size, bilinear=bilinear_mode)
+    model = UNet(n_ch=n_input_ch, n_cls=3, hidden_size=effective_model_size, bilinear=bilinear_mode)
 
     # Load State Dict
     state_dict = checkpoint['model_state_dict']
@@ -251,7 +294,7 @@ def load_model_and_config(checkpoint_path, device):
     model.eval()
     logging.info("Model loaded successfully and set to evaluation mode.")
 
-    return model, resolution
+    return model, resolution, use_mask_input
 
 # --- create_blend_mask ---
 # ... (remains the same) ...
@@ -262,7 +305,7 @@ def create_blend_mask(resolution, device):
 
 # --- Main Inference Function ---
 # ... (process_image remains the same) ...
-def process_image(model, image_path, output_path, resolution, stride, device, batch_size, transform, denormalize_fn, use_amp, half_res=False):
+def process_image(model, image_path, output_path, resolution, stride, device, batch_size, transform, denormalize_fn, use_amp, half_res=False, mask_path=None, use_mask_input=False):
     logging.info(f"Processing: {os.path.basename(image_path)}")
     start_time = time.time()
     try:
@@ -284,6 +327,16 @@ def process_image(model, image_path, output_path, resolution, stride, device, ba
     except Exception as e:
         logging.error(f"Failed to load: {image_path}: {e}")
         return
+    # Load mask if needed
+    mask_full = None
+    if use_mask_input and mask_path:
+        try:
+            mask_full = load_mask_image(mask_path)
+            if half_res:
+                mask_full = cv2.resize(mask_full, (img_width, img_height), interpolation=cv2.INTER_LINEAR)
+        except Exception as e:
+            logging.error(f"Failed to load mask: {mask_path}: {e}")
+            return
     slice_coords = []
     possible_y = list(range(0, img_height - resolution, stride)) + ([img_height - resolution] if img_height > resolution else [0])
     possible_x = list(range(0, img_width - resolution, stride)) + ([img_width - resolution] if img_width > resolution else [0])
@@ -309,6 +362,16 @@ def process_image(model, image_path, output_path, resolution, stride, device, ba
             batch_src_list = [img.crop(coords) for coords in batch_coords]
             batch_src_tensor_list = [transform(src_pil) for src_pil in batch_src_list]
             batch_src_tensor = torch.stack(batch_src_tensor_list).to(device, non_blocking=True)
+            # Concatenate mask as 4th channel if needed
+            if use_mask_input and mask_full is not None:
+                batch_mask_list = []
+                for coords in batch_coords:
+                    x, y, _, _ = coords
+                    mask_slice = mask_full[y:y + resolution, x:x + resolution]
+                    mask_tensor = torch.from_numpy(np.ascontiguousarray(mask_slice)).unsqueeze(0).float()
+                    batch_mask_list.append(mask_tensor)
+                batch_mask_tensor = torch.stack(batch_mask_list).to(device, non_blocking=True)
+                batch_src_tensor = torch.cat([batch_src_tensor, batch_mask_tensor], dim=1)
             with autocast(device_type=device_type, enabled=use_amp):
                 batch_output_tensor = model(batch_src_tensor)
             batch_output_tensor_cpu = batch_output_tensor.cpu().float()
@@ -344,6 +407,7 @@ if __name__ == "__main__":
     parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu'], help='Device for inference')
     parser.add_argument('--use_amp', action='store_true', help='Enable AMP for inference')
     parser.add_argument('--half_res', action='store_true', help='Process at half resolution for ~4x speedup (upscale in comp)')
+    parser.add_argument('--mask_dir', type=str, default=None, help='Directory containing mask images (required if model uses mask input)')
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -368,9 +432,16 @@ if __name__ == "__main__":
         args.use_amp = False
 
     try:
-        model, resolution = load_model_and_config(args.checkpoint, device)
+        model, resolution, use_mask_input = load_model_and_config(args.checkpoint, device)
     except Exception as e:
         logging.error(f"Failed to load model: {e}", exc_info=True)
+        exit(1)
+
+    if use_mask_input and not args.mask_dir:
+        logging.error("This model requires mask input (4-channel) but --mask_dir was not provided.")
+        exit(1)
+    if args.mask_dir and not os.path.isdir(args.mask_dir):
+        logging.error(f"Mask dir not found: {args.mask_dir}")
         exit(1)
 
     transform = T.Compose([ T.ToTensor(), T.Normalize(mean=NORM_MEAN, std=NORM_STD) ])
@@ -400,8 +471,22 @@ if __name__ == "__main__":
             # Fallback if no frame number found
             output_filename = f"{basename}_tunet.png"
         output_path = os.path.join(args.output_dir, output_filename)
+
+        # Find matching mask file if mask_dir provided
+        mask_path = None
+        if args.mask_dir and use_mask_input:
+            mask_exts = ['.png', '.jpg', '.jpeg', '.exr', '.tif', '.tiff']
+            for mext in mask_exts:
+                candidate = os.path.join(args.mask_dir, basename + mext)
+                if os.path.exists(candidate):
+                    mask_path = candidate
+                    break
+            if mask_path is None:
+                logging.warning(f"No mask found for {basename}, using zeros (no mask focus)")
+
         process_image(model, img_path, output_path, resolution, stride, device,
-                      args.batch_size, transform, denormalize, args.use_amp, args.half_res)
+                      args.batch_size, transform, denormalize, args.use_amp, args.half_res,
+                      mask_path=mask_path, use_mask_input=use_mask_input)
 
     total_end_time = time.time()
     logging.info(f"--- Inference finished ---")
