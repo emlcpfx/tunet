@@ -177,12 +177,9 @@ def load_image_any_format(image_path):
             if len(img_cv.shape) == 2:
                 img_cv = np.stack([img_cv, img_cv, img_cv], axis=2)
 
-        # Clip negative values and clamp to [0, 1] range
-        # No tone mapping - EXRs are already in correct color space
-        img_cv = np.clip(img_cv, 0, 1)
-
-        # Convert to 8-bit for PIL
-        img_8bit = (img_cv * 255).astype(np.uint8)
+        # Convert to 8-bit for PIL (no transforms - treat like PNG/JPG)
+        # EXR values assumed to be in [0, 1] range like normalized PNG
+        img_8bit = np.clip(img_cv * 255, 0, 255).astype(np.uint8)
 
         # Convert to PIL Image
         return Image.fromarray(img_8bit, mode='RGB')
