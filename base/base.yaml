@@ -7,7 +7,13 @@ data:
   output_dir: MUST BE PROVIDED BY USER
   resolution: 512                     # 512 or 1024
   overlap_factor: 0.25                # default 0.25, range 0.0 to 1.0
+  mask_dir: null                       # Optional: directory with grayscale mask images
 
+# --- Mask Settings ---
+mask:
+  use_mask_loss: false                 # Weight loss by mask (white=important)
+  mask_weight: 10.0                    # Multiplier for masked regions (min 1.0)
+  use_mask_input: false                # Feed mask as 4th input channel to model
 
 # --- Model Settings ---
 model:
