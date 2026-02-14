@@ -18,6 +18,18 @@ import re # For checkpoint pruning regex
 import numpy as np
 import platform # OS detection
 
+# Enable OpenEXR support in OpenCV
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
+import cv2
+
+# Try to import OpenEXR as fallback
+try:
+    import OpenEXR
+    import Imath
+    HAS_OPENEXR = True
+except ImportError:
+    HAS_OPENEXR = False
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -275,6 +287,68 @@ def create_augmentations(augmentation_list):
     if uses_albumentations: logging.debug(f"Creating Albumentations pipeline ({len(transforms)} steps)."); return A.Compose(transforms)
     else: logging.debug(f"Creating Torchvision pipeline ({len(transforms)} steps)."); return T.Compose(transforms)
 
+# --- EXR Image Loading ---
+def load_image_any_format(image_path):
+    """Load an image in any format including EXR. Returns a PIL Image in RGB mode."""
+    _, ext = os.path.splitext(image_path.lower())
+
+    if ext == '.exr':
+        # Try OpenCV first (faster if enabled)
+        img_cv = cv2.imread(image_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+        loaded_with_opencv = img_cv is not None
+
+        if img_cv is None and HAS_OPENEXR:
+            # Fallback to OpenEXR library
+            logging.debug(f"OpenCV failed, trying OpenEXR library for: {image_path}")
+            try:
+                exr_file = OpenEXR.InputFile(image_path)
+                header = exr_file.header()
+                dw = header['dataWindow']
+                width = dw.max.x - dw.min.x + 1
+                height = dw.max.y - dw.min.y + 1
+
+                # Read RGB channels (OpenEXR reads in RGB order)
+                FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
+                channels = ['R', 'G', 'B']
+                channel_data = [exr_file.channel(c, FLOAT) for c in channels]
+
+                # Convert to numpy arrays
+                img_channels = []
+                for data in channel_data:
+                    channel_array = np.frombuffer(data, dtype=np.float32)
+                    channel_array = channel_array.reshape((height, width))
+                    img_channels.append(channel_array)
+
+                img_cv = np.stack(img_channels, axis=2)
+            except Exception as e:
+                raise ValueError(f"Failed to load EXR file with both OpenCV and OpenEXR library: {image_path}. Error: {e}")
+        elif img_cv is None:
+            raise ValueError(f"Failed to load EXR file: {image_path}. Install OpenEXR library: pip install OpenEXR")
+
+        # Convert BGR to RGB ONLY if loaded with OpenCV (which uses BGR order)
+        if loaded_with_opencv:
+            if len(img_cv.shape) == 3 and img_cv.shape[2] == 3:
+                img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
+            elif len(img_cv.shape) == 3 and img_cv.shape[2] == 4:
+                img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGRA2RGB)
+            elif len(img_cv.shape) == 2:
+                img_cv = cv2.cvtColor(img_cv, cv2.COLOR_GRAY2RGB)
+        else:
+            # Loaded with OpenEXR library - already in RGB order
+            # Just handle grayscale case
+            if len(img_cv.shape) == 2:
+                img_cv = np.stack([img_cv, img_cv, img_cv], axis=2)
+
+        # Convert to 8-bit for PIL (no transforms - treat like PNG/JPG)
+        # EXR values assumed to be in [0, 1] range like normalized PNG
+        img_8bit = np.clip(img_cv * 255, 0, 255).astype(np.uint8)
+
+        # Convert to PIL Image
+        return Image.fromarray(img_8bit, mode='RGB')
+    else:
+        # Use PIL for standard formats
+        return Image.open(image_path).convert('RGB')
+
 # --- Augmented Dataset Class ---
 class AugmentedImagePairSlicingDataset(Dataset):
     def __init__(self, src_dir, dst_dir, resolution, overlap_factor=0.0,
@@ -302,8 +376,10 @@ class AugmentedImagePairSlicingDataset(Dataset):
             base_name = os.path.basename(src_path); dst_path = os.path.join(self.dst_dir, base_name)
             if not os.path.exists(dst_path): self.skipped_count += 1; self.skipped_file_reasons.append((base_name, "Dst missing")); continue
             try:
-                with Image.open(src_path) as img_s, Image.open(dst_path) as img_d: w_s, h_s = img_s.size; w_d, h_d = img_d.size
-                if (w_s, h_s) != (w_d, h_d): self.skipped_count += 1; self.skipped_file_reasons.append((base_name, f"Dims mismatch")); continue
+                img_s = load_image_any_format(src_path); img_d = load_image_any_format(dst_path)
+                w_s, h_s = img_s.size; w_d, h_d = img_d.size
+                img_s.close(); img_d.close()
+                if (w_s, h_s) != (w_d, h_d): self.skipped_count += 1; self.skipped_file_reasons.append((base_name, f"Dims mismatch: src={w_s}x{h_s} dst={w_d}x{h_d}")); continue
                 if w_s < resolution or h_s < resolution: self.skipped_count += 1; self.skipped_file_reasons.append((base_name, f"Too small")); continue
                 num_slices_for_file = 0
                 y_coords = list(range(0, max(0, h_s - resolution) + 1, self.stride)); x_coords = list(range(0, max(0, w_s - resolution) + 1, self.stride))
@@ -352,7 +428,7 @@ class AugmentedImagePairSlicingDataset(Dataset):
     def __getitem__(self, idx):
         try: info = self.slice_info[idx]; src_path, dst_path, crop_box = info['src_path'], info['dst_path'], info['crop_box']
         except IndexError: logging.error(f"Index {idx} out of bounds for slice_info (len {len(self.slice_info)})."); return None # Keep Error
-        try: src_img = Image.open(src_path).convert('RGB'); dst_img = Image.open(dst_path).convert('RGB')
+        try: src_img = load_image_any_format(src_path); dst_img = load_image_any_format(dst_path)
         except Exception as load_e: logging.error(f"Item {idx}: Img load error ({os.path.basename(src_path)}): {load_e}"); return None # Keep Error
         try:
             src_slice_pil = src_img.crop(crop_box); dst_slice_pil = dst_img.crop(crop_box)
