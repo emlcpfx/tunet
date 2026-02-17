@@ -1,0 +1,23 @@
+data:
+  src_dir: /home/elevy/Downloads/ACTS_roto/ACTS_roto_src
+  dst_dir: /home/elevy/Downloads/ACTS_roto/ACTS_roto_dst
+  output_dir: /home/elevy/Documents/coding/tunet/models/ACTS_model_roto
+  resolution: 512
+model:
+  model_size_dims: 128
+training:
+  iterations_per_epoch: 500
+  batch_size: 4
+  use_amp: true
+logging:
+  log_interval: 5
+  preview_batch_interval: 35
+  preview_refresh_rate: 5
+saving:
+  keep_last_checkpoints: 4
+dataloader:
+  datasets:
+    shared_augs: []
+_ui_settings:
+  train_script_path: /home/elevy/Documents/coding/tunet/train.py
+  nproc_per_node: 1
