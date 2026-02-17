@@ -291,60 +291,76 @@ def create_augmentations(augmentation_list, has_mask=False):
     else: logging.debug(f"Creating Torchvision pipeline ({len(transforms)} steps)."); return T.Compose(transforms)
 
 # --- EXR Image Loading ---
+def _load_exr_full_frame(image_path):
+    """Load an EXR file as a float32 RGB numpy array using the displayWindow for full-frame size.
+
+    EXR files have a displayWindow (full frame) and dataWindow (bounding box of actual data).
+    OpenCV only reads the dataWindow, which gives wrong dimensions for compositing EXRs.
+    This function always returns a full displayWindow-sized image with dataWindow placed correctly.
+    """
+    if HAS_OPENEXR:
+        exr_file = OpenEXR.InputFile(image_path)
+        header = exr_file.header()
+
+        disp = header['displayWindow']
+        disp_width = disp.max.x - disp.min.x + 1
+        disp_height = disp.max.y - disp.min.y + 1
+
+        dw = header['dataWindow']
+        dw_width = dw.max.x - dw.min.x + 1
+        dw_height = dw.max.y - dw.min.y + 1
+
+        FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
+        channels = ['R', 'G', 'B']
+        available = list(header['channels'].keys())
+        # Handle single-channel / grayscale EXRs
+        if not all(c in available for c in channels):
+            ch_name = available[0]
+            channel_data = [exr_file.channel(ch_name, FLOAT)] * 3
+        else:
+            channel_data = [exr_file.channel(c, FLOAT) for c in channels]
+
+        img_channels = []
+        for data in channel_data:
+            arr = np.frombuffer(data, dtype=np.float32).reshape((dw_height, dw_width))
+            img_channels.append(arr)
+        data_img = np.stack(img_channels, axis=2)
+
+        # If dataWindow matches displayWindow, return directly
+        if (dw.min.x == disp.min.x and dw.min.y == disp.min.y and
+                dw_width == disp_width and dw_height == disp_height):
+            return data_img
+
+        # Place dataWindow into full displayWindow-sized buffer
+        full_img = np.zeros((disp_height, disp_width, 3), dtype=np.float32)
+        # Compute offset of dataWindow within displayWindow
+        x_off = dw.min.x - disp.min.x
+        y_off = dw.min.y - disp.min.y
+        full_img[y_off:y_off + dw_height, x_off:x_off + dw_width, :] = data_img
+        return full_img
+
+    # Fallback: try OpenCV (note: only returns dataWindow, no displayWindow info)
+    img_cv = cv2.imread(image_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+    if img_cv is not None:
+        if len(img_cv.shape) == 3 and img_cv.shape[2] >= 3:
+            img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)[:, :, :3].astype(np.float32)
+        elif len(img_cv.shape) == 2:
+            img_cv = np.stack([img_cv, img_cv, img_cv], axis=2).astype(np.float32)
+        logging.warning(f"Loaded EXR with OpenCV (no displayWindow support): {image_path}")
+        return img_cv
+
+    raise ValueError(f"Failed to load EXR file: {image_path}. Install OpenEXR library: pip install OpenEXR")
+
 def load_image_any_format(image_path):
     """Load an image in any format including EXR. Returns a PIL Image in RGB mode."""
     _, ext = os.path.splitext(image_path.lower())
 
     if ext == '.exr':
-        # Try OpenCV first (faster if enabled)
-        img_cv = cv2.imread(image_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
-        loaded_with_opencv = img_cv is not None
-
-        if img_cv is None and HAS_OPENEXR:
-            # Fallback to OpenEXR library
-            logging.debug(f"OpenCV failed, trying OpenEXR library for: {image_path}")
-            try:
-                exr_file = OpenEXR.InputFile(image_path)
-                header = exr_file.header()
-                dw = header['dataWindow']
-                width = dw.max.x - dw.min.x + 1
-                height = dw.max.y - dw.min.y + 1
-
-                # Read RGB channels (OpenEXR reads in RGB order)
-                FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
-                channels = ['R', 'G', 'B']
-                channel_data = [exr_file.channel(c, FLOAT) for c in channels]
-
-                # Convert to numpy arrays
-                img_channels = []
-                for data in channel_data:
-                    channel_array = np.frombuffer(data, dtype=np.float32)
-                    channel_array = channel_array.reshape((height, width))
-                    img_channels.append(channel_array)
-
-                img_cv = np.stack(img_channels, axis=2)
-            except Exception as e:
-                raise ValueError(f"Failed to load EXR file with both OpenCV and OpenEXR library: {image_path}. Error: {e}")
-        elif img_cv is None:
-            raise ValueError(f"Failed to load EXR file: {image_path}. Install OpenEXR library: pip install OpenEXR")
-
-        # Convert BGR to RGB ONLY if loaded with OpenCV (which uses BGR order)
-        if loaded_with_opencv:
-            if len(img_cv.shape) == 3 and img_cv.shape[2] == 3:
-                img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
-            elif len(img_cv.shape) == 3 and img_cv.shape[2] == 4:
-                img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGRA2RGB)
-            elif len(img_cv.shape) == 2:
-                img_cv = cv2.cvtColor(img_cv, cv2.COLOR_GRAY2RGB)
-        else:
-            # Loaded with OpenEXR library - already in RGB order
-            # Just handle grayscale case
-            if len(img_cv.shape) == 2:
-                img_cv = np.stack([img_cv, img_cv, img_cv], axis=2)
+        img_float = _load_exr_full_frame(image_path)
 
         # Convert to 8-bit for PIL (no transforms - treat like PNG/JPG)
         # EXR values assumed to be in [0, 1] range like normalized PNG
-        img_8bit = np.clip(img_cv * 255, 0, 255).astype(np.uint8)
+        img_8bit = np.clip(img_float * 255, 0, 255).astype(np.uint8)
 
         # Convert to PIL Image
         return Image.fromarray(img_8bit, mode='RGB')
@@ -356,24 +372,39 @@ def load_mask_image(image_path):
     """Load a mask image as single-channel (H,W) float32 numpy array in [0,1]."""
     _, ext = os.path.splitext(image_path.lower())
     if ext == '.exr':
+        if HAS_OPENEXR:
+            exr_file = OpenEXR.InputFile(image_path)
+            header = exr_file.header()
+
+            disp = header['displayWindow']
+            disp_width = disp.max.x - disp.min.x + 1
+            disp_height = disp.max.y - disp.min.y + 1
+
+            dw = header['dataWindow']
+            dw_width = dw.max.x - dw.min.x + 1
+            dw_height = dw.max.y - dw.min.y + 1
+
+            FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
+            available = list(header['channels'].keys())
+            ch_name = 'Y' if 'Y' in available else available[0]
+            data = exr_file.channel(ch_name, FLOAT)
+            mask_data = np.frombuffer(data, dtype=np.float32).reshape((dw_height, dw_width))
+
+            if (dw.min.x == disp.min.x and dw.min.y == disp.min.y and
+                    dw_width == disp_width and dw_height == disp_height):
+                return np.clip(mask_data, 0.0, 1.0)
+
+            # Place dataWindow into full displayWindow-sized buffer
+            mask = np.zeros((disp_height, disp_width), dtype=np.float32)
+            x_off = dw.min.x - disp.min.x
+            y_off = dw.min.y - disp.min.y
+            mask[y_off:y_off + dw_height, x_off:x_off + dw_width] = mask_data
+            return np.clip(mask, 0.0, 1.0)
+
         img_cv = cv2.imread(image_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
-        if img_cv is None and HAS_OPENEXR:
-            try:
-                exr_file = OpenEXR.InputFile(image_path)
-                header = exr_file.header()
-                dw = header['dataWindow']
-                width = dw.max.x - dw.min.x + 1
-                height = dw.max.y - dw.min.y + 1
-                FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
-                available = list(header['channels'].keys())
-                ch_name = 'Y' if 'Y' in available else available[0]
-                data = exr_file.channel(ch_name, FLOAT)
-                mask = np.frombuffer(data, dtype=np.float32).reshape((height, width))
-                return np.clip(mask, 0.0, 1.0)
-            except Exception as e:
-                raise ValueError(f"Failed to load mask EXR: {image_path}. Error: {e}")
-        elif img_cv is None:
-            raise ValueError(f"Failed to load mask EXR: {image_path}")
+        if img_cv is None:
+            raise ValueError(f"Failed to load mask EXR: {image_path}. Install OpenEXR library: pip install OpenEXR")
+        logging.warning(f"Loaded mask EXR with OpenCV (no displayWindow support): {image_path}")
         if len(img_cv.shape) == 3:
             mask = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY) if img_cv.shape[2] >= 3 else img_cv[:, :, 0]
         else:
@@ -942,6 +973,7 @@ def train(config):
             compute_time = time.time() - compute_start
 
             batch_l1 = l1.detach().item(); batch_lp = lp.detach().item() if use_lpips else 0.0
+            batch_l1_raw = criterion_l1(out.detach(), dst).item() if use_mask_loss and mask_batch is not None else batch_l1
             if world_size > 1:
                 l1_t = torch.tensor(batch_l1, device=device); lp_t = torch.tensor(batch_lp, device=device)
                 dist.all_reduce(l1_t, op=dist.ReduceOp.AVG); dist.all_reduce(lp_t, op=dist.ReduceOp.AVG)
@@ -961,6 +993,8 @@ def train(config):
                 steps_in_ep = global_step % iter_epoch or iter_epoch
                 log_msg = (f'Epoch[{current_ep_idx + 1}] Step[{global_step}] ({steps_in_ep}/{iter_epoch}), '
                            f'L1:{batch_l1:.4f}(Avg:{avg_ep_l1:.4f})')
+                if use_mask_loss and mask_batch is not None:
+                    log_msg += f'[raw:{batch_l1_raw:.4f}]'
                 if use_lpips: log_msg += (f', LPIPS:{batch_lp:.4f}(Avg:{avg_ep_lp:.4f})')
                 log_msg += (f', LR:{current_lr:.1e}, T/Step:{avg_time:.3f}s '
                             f'(D:{data_load_time:.3f} T:{transfer_time:.3f} C:{compute_time:.3f})')
