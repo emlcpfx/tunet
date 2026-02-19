@@ -21,7 +21,7 @@ def gpu_worker(gpu_id, checkpoint_path, image_paths, output_dir, resolution, str
         log_queue.put((gpu_id, 'info', f'GPU {gpu_id}: Starting worker'))
 
         # Load model on this GPU
-        model, res = load_model_and_config(checkpoint_path, device)
+        model, res, _ = load_model_and_config(checkpoint_path, device)
         log_queue.put((gpu_id, 'info', f'GPU {gpu_id}: Model loaded'))
 
         transform = T.Compose([T.ToTensor(), T.Normalize(mean=NORM_MEAN, std=NORM_STD)])
@@ -304,7 +304,7 @@ class MultiGPUInferenceGUI:
 
             # Load model once to get resolution
             device = torch.device(f'cuda:{selected_gpus[0]}')
-            _, resolution = load_model_and_config(self.checkpoint_path.get(), device)
+            _, resolution, _ = load_model_and_config(self.checkpoint_path.get(), device)
 
             overlap_pixels = int(resolution * self.overlap_factor.get())
             stride = max(1, resolution - overlap_pixels)
@@ -400,7 +400,8 @@ class MultiGPUInferenceGUI:
             logging.error(f"Error: {e}")
             import traceback
             logging.error(traceback.format_exc())
-            self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
+            err_msg = str(e)
+            self.root.after(0, lambda: messagebox.showerror("Error", err_msg))
         finally:
             self.root.after(0, self.inference_complete)
 
