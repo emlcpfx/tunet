@@ -1,0 +1,10 @@
+{
+  "checkpoint_path": "D:/Work/Dropbox/Documents_DB/Work_DB/Bouffant_db/tunet_models/ACT_roto_tunet_latest.pth",
+  "input_dir": "Q:/Work/Bouffant_local/_for_tunet/A001_A008_0423HF_001_HandRightStab",
+  "output_dir": "Q:/Work/Bouffant_local/_for_tunet/output/A001_A008_0423HF_001_HandRightStab_tunet",
+  "overlap_factor": 0.5,
+  "batch_size": 24,
+  "use_amp": true,
+  "half_res": false,
+  "device": "cuda"
+}

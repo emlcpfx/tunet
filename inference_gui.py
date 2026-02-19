@@ -1,4 +1,5 @@
 import os
+import json
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -9,6 +10,8 @@ from inference import load_model_and_config, process_image, denormalize, NORM_ME
 
 import torch
 import torchvision.transforms as T
+
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'inference_gui_settings.json')
 
 
 class InferenceGUI:
@@ -32,6 +35,9 @@ class InferenceGUI:
 
         self.create_widgets()
         self.setup_logging()
+        self.load_settings()
+
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def create_widgets(self):
         # Main frame with padding
@@ -136,6 +142,42 @@ class InferenceGUI:
         logger.setLevel(logging.INFO)
         logger.addHandler(handler)
 
+    def load_settings(self):
+        try:
+            with open(SETTINGS_FILE, 'r') as f:
+                s = json.load(f)
+            self.checkpoint_path.set(s.get('checkpoint_path', ''))
+            self.input_dir.set(s.get('input_dir', ''))
+            self.output_dir.set(s.get('output_dir', ''))
+            self.overlap_factor.set(s.get('overlap_factor', 0.5))
+            self.batch_size.set(s.get('batch_size', 1))
+            self.use_amp.set(s.get('use_amp', True))
+            self.half_res.set(s.get('half_res', False))
+            self.device.set(s.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+    def save_settings(self):
+        s = {
+            'checkpoint_path': self.checkpoint_path.get(),
+            'input_dir': self.input_dir.get(),
+            'output_dir': self.output_dir.get(),
+            'overlap_factor': self.overlap_factor.get(),
+            'batch_size': self.batch_size.get(),
+            'use_amp': self.use_amp.get(),
+            'half_res': self.half_res.get(),
+            'device': self.device.get(),
+        }
+        try:
+            with open(SETTINGS_FILE, 'w') as f:
+                json.dump(s, f, indent=2)
+        except OSError:
+            pass
+
+    def on_close(self):
+        self.save_settings()
+        self.root.destroy()
+
     def browse_checkpoint(self):
         path = filedialog.askopenfilename(
             title="Select Model Checkpoint",
@@ -188,6 +230,7 @@ class InferenceGUI:
         thread.start()
 
     def inference_thread(self):
+        self.save_settings()
         try:
             from glob import glob
             import re
@@ -203,7 +246,7 @@ class InferenceGUI:
             logging.info(f"Using device: {device}")
             logging.info("Loading model...")
 
-            model, resolution = load_model_and_config(self.checkpoint_path.get(), device)
+            model, resolution, use_mask_input = load_model_and_config(self.checkpoint_path.get(), device)
 
             transform = T.Compose([T.ToTensor(), T.Normalize(mean=NORM_MEAN, std=NORM_STD)])
 
@@ -246,7 +289,8 @@ class InferenceGUI:
 
         except Exception as e:
             logging.error(f"Error: {e}")
-            self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
+            err_msg = str(e)
+            self.root.after(0, lambda: messagebox.showerror("Error", err_msg))
         finally:
             self.root.after(0, self.inference_complete)
 
