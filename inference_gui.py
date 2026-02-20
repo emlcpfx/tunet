@@ -196,7 +196,6 @@ class InferenceGUI:
             self._update_stride_state()
             self.half_res.set(s.get('half_res', False))
             self.skip_existing.set(s.get('skip_existing', True))
-            self.device.set(s.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
             # Restore queue
             for item in s.get('queue', []):
                 input_d = os.path.normpath(item.get('input_dir', ''))
@@ -218,7 +217,6 @@ class InferenceGUI:
             'auto_stride': self.auto_stride.get(),
             'half_res': self.half_res.get(),
             'skip_existing': self.skip_existing.get(),
-            'device': self.device.get(),
             'queue': [{'input_dir': q['input_dir'], 'output_dir': q['output_dir']}
                       for q in self.queue if q['status'] == 'pending'],
         }
