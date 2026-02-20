@@ -565,7 +565,7 @@ def cycle(iterable):
         except StopIteration: iterator = iter(iterable)
 
 # --- Preview Capture/Saving ---
-def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, preview_save_count, preview_refresh_rate, fixed_mask_batch=None, use_mask_input=False, use_bce_dice=False):
+def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, preview_save_count, preview_refresh_rate, fixed_mask_batch=None, use_mask_input=False, use_bce_dice=False, use_amp=False):
     if not is_main_process() or fixed_src_batch is None or fixed_dst_batch is None or fixed_src_batch.nelement() == 0: return
     has_mask = fixed_mask_batch is not None
     num_grid_cols = 4 if has_mask else 3
@@ -574,14 +574,11 @@ def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_e
     src_select, dst_select = fixed_src_batch[:num_samples].cpu(), fixed_dst_batch[:num_samples].cpu()
     mask_select = fixed_mask_batch[:num_samples].cpu() if has_mask else None
     model.eval(); device_type = device.type
-    use_amp_inf = scaler.is_enabled() if 'scaler' in globals() and scaler is not None else False
+    use_amp_inf = use_amp and device_type == 'cuda'
     pred_select = None
     try:
-        if device_type == 'cuda' and use_amp_inf:
-            ctx = autocast(device_type=device_type, enabled=True)
-        else:
-            ctx = torch.no_grad()
-        with ctx:
+        amp_ctx = autocast(device_type=device_type, enabled=use_amp_inf)
+        with torch.no_grad(), amp_ctx:
             src_dev = src_select.to(device)
             model_module = model.module if isinstance(model, DDP) else model
             if use_mask_input and mask_select is not None:
@@ -1017,7 +1014,12 @@ def train(config):
                  scaler.update()
             else:
                  loss.backward() # Standard backward if AMP is off
-                 optimizer.step() # Standard optimizer step
+                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf'))
+                 if not torch.isfinite(grad_norm):
+                     logging.warning(f"S{global_step}: NaN/Inf gradient (norm={grad_norm:.2e})! Skipping update.")
+                     optimizer.zero_grad(set_to_none=True)
+                 else:
+                     optimizer.step() # Standard optimizer step
 
             compute_time = time.time() - compute_start
 
@@ -1060,7 +1062,7 @@ def train(config):
                      if new_src is not None: fixed_src, fixed_dst, fixed_mask = new_src, new_dst, new_mask
                      elif fixed_src is None: logging.warning(f"S{global_step}: Preview refresh failed (no initial).")
                      else: logging.warning(f"S{global_step}: Preview refresh failed, using old.")
-                if fixed_src is not None: save_previews(model, fixed_src, fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, preview_count, config.logging.preview_refresh_rate, fixed_mask_batch=fixed_mask, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice); preview_count += 1
+                if fixed_src is not None: save_previews(model, fixed_src, fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, preview_count, config.logging.preview_refresh_rate, fixed_mask_batch=fixed_mask, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff); preview_count += 1
                 elif preview_count == 0: logging.warning(f"S{global_step}: Skipping preview (no batch).")
 
             save_interval = config.saving.save_iterations_interval; save_now = (save_interval > 0 and global_step % save_interval == 0)
