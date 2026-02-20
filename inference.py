@@ -327,11 +327,11 @@ def create_blend_mask(resolution, device):
 
 # --- Main Inference Function ---
 # ... (process_image remains the same) ...
-def process_image(model, image_path, output_path, resolution, stride, device, batch_size, transform, denormalize_fn, use_amp, half_res=False, mask_path=None, use_mask_input=False, loss_mode='l1'):
+def process_image(model, image_path, output_path, resolution, stride, device, batch_size, transform, denormalize_fn, use_amp, half_res=False, mask_path=None, use_mask_input=False, loss_mode='l1', src_image=None):
     logging.info(f"Processing: {os.path.basename(image_path)}")
     start_time = time.time()
     try:
-        img = load_image_any_format(image_path)
+        img = src_image if src_image is not None else load_image_any_format(image_path)
         orig_width, orig_height = img.size
 
         # Downscale to half resolution if requested
