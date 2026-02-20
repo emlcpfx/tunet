@@ -1,7 +1,7 @@
 data:
   src_dir: /home/elevy/Downloads/ACTS_roto/ACTS_roto_src
   dst_dir: /home/elevy/Downloads/ACTS_roto/ACTS_roto_dst
-  output_dir: /home/elevy/Documents/coding/tunet/models/ACTS_model_roto
+  output_dir: /home/elevy/Documents/coding/tunet/models/ACTS_model_roto_v2
   resolution: 512
 model:
   model_size_dims: 128
@@ -9,6 +9,8 @@ training:
   iterations_per_epoch: 500
   batch_size: 4
   use_amp: true
+  loss: bce+dice
+  lambda_lpips: 1.0
 logging:
   log_interval: 5
   preview_batch_interval: 35
