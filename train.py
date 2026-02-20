@@ -565,7 +565,7 @@ def cycle(iterable):
         except StopIteration: iterator = iter(iterable)
 
 # --- Preview Capture/Saving ---
-def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, preview_save_count, preview_refresh_rate, fixed_mask_batch=None, use_mask_input=False):
+def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, preview_save_count, preview_refresh_rate, fixed_mask_batch=None, use_mask_input=False, use_bce_dice=False):
     if not is_main_process() or fixed_src_batch is None or fixed_dst_batch is None or fixed_src_batch.nelement() == 0: return
     has_mask = fixed_mask_batch is not None
     num_grid_cols = 4 if has_mask else 3
@@ -590,10 +590,19 @@ def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_e
             else:
                 model_input = src_dev
             predicted_batch = model_module(model_input)
+            if use_bce_dice:
+                predicted_batch = torch.sigmoid(predicted_batch)
         pred_select = predicted_batch.cpu().float()
     except Exception as e: logging.error(f"Preview inference error (Step {global_step}): {e}"); model.train(); return
     model.train()
-    src_denorm, pred_denorm, dst_denorm = denormalize(src_select), denormalize(pred_select), denormalize(dst_select)
+    src_denorm = denormalize(src_select)
+    if use_bce_dice:
+        # Sigmoid output is already [0,1], skip denormalize (which assumes [-1,1] input)
+        pred_denorm = torch.clamp(pred_select, 0, 1)
+        dst_denorm = torch.clamp(denormalize(dst_select), 0, 1)
+    else:
+        pred_denorm = denormalize(pred_select)
+        dst_denorm = denormalize(dst_select)
     if src_denorm is None or pred_denorm is None or dst_denorm is None: logging.error(f"Preview denorm error (Step {global_step})"); return
     if has_mask:
         mask_3ch = mask_select.repeat(1, 3, 1, 1)  # (N, 3, H, W) for display
@@ -608,7 +617,9 @@ def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_e
     preview_filename = os.path.join(output_dir, "training_preview.jpg")
     try:
         os.makedirs(os.path.dirname(preview_filename), exist_ok=True)
-        img_pil.save(preview_filename, "JPEG", quality=90)
+        tmp_filename = preview_filename + ".tmp"
+        img_pil.save(tmp_filename, "JPEG", quality=90)
+        os.replace(tmp_filename, preview_filename)
         log_msg_base = f"Saved preview ({num_samples} samples)"; log_msg_details = f"(E{current_epoch+1}, S{global_step}, #{preview_save_count})"
         refreshed = preview_refresh_rate > 0 and preview_save_count > 0 and (preview_save_count % preview_refresh_rate == 0)
         # Keep INFO log for preview saving, but make it concise
@@ -758,10 +769,13 @@ def train(config):
         dataloader_iter = cycle(dataloader)
     except Exception as e: logging.error(f"FATAL: Dataset/DataLoader init failed: {e}. Exiting.", exc_info=True); cleanup_ddp(); return
 
-    # --- Model & LPIPS Setup ---
+    # --- Model & Loss Setup ---
     model, loss_fn_lpips = None, None
-    eff_size = config.model.model_size_dims; use_lpips = False; def_h, bump_h = 64, 96
-    if config.training.loss == 'l1+lpips':
+    eff_size = config.model.model_size_dims; use_lpips = False; use_bce_dice = False; def_h, bump_h = 64, 96
+    if config.training.loss == 'bce+dice':
+        use_bce_dice = True
+        if is_main_process(): logging.info(f"Using BCE+Dice loss (segmentation mode). Hidden size: {eff_size}.")
+    elif config.training.loss == 'l1+lpips':
         use_lpips = True
         if config.model.model_size_dims == def_h: eff_size = bump_h; msg = f"bumping effective hidden size to {eff_size}"
         else: msg = f"using configured hidden size {eff_size}"
@@ -812,6 +826,11 @@ def train(config):
         scaler = GradScaler(enabled=use_amp_eff) # Scaler is created based on effective usage
         if is_main_process(): logging.info(f"Optimizer: AdamW | AMP Enabled: {use_amp_eff}")
         criterion_l1 = nn.L1Loss()
+        criterion_bce = nn.BCEWithLogitsLoss() if use_bce_dice else None
+        def dice_loss(pred, target, smooth=1.0):
+            pred_flat = pred.reshape(-1); target_flat = target.reshape(-1)
+            intersection = (pred_flat * target_flat).sum()
+            return 1.0 - (2.0 * intersection + smooth) / (pred_flat.sum() + target_flat.sum() + smooth)
         latest_ckpt = os.path.join(config.data.output_dir, 'tunet_latest.pth')
         exists_list = [False];
         if is_main_process(): exists_list[0] = os.path.exists(latest_ckpt)
@@ -930,6 +949,51 @@ def train(config):
             if use_amp_eff:
                 with autocast(device_type=device_type, enabled=True):
                     out = model(model_input)
+                    if use_bce_dice:
+                        # Denormalize dst from [-1,1] back to [0,1] for BCE targets
+                        dst_01 = dst * 0.5 + 0.5
+                        # Per-channel BCE+Dice: preserves multi-channel mattes (R/G/B sections)
+                        bce_total = torch.tensor(0.0, device=device)
+                        dc_total = torch.tensor(0.0, device=device)
+                        n_ch = out.shape[1]
+                        for ch in range(n_ch):
+                            out_ch = out[:, ch:ch+1, :, :]
+                            dst_ch = dst_01[:, ch:ch+1, :, :]
+                            bce_total = bce_total + criterion_bce(out_ch, dst_ch)
+                            dc_total = dc_total + dice_loss(torch.sigmoid(out_ch), dst_ch)
+                        l1 = (bce_total + dc_total) / n_ch
+                        lp = torch.tensor(0.0, device=device)
+                        loss = l1
+                        out = torch.sigmoid(out)  # sigmoid for preview/metrics after loss
+                    else:
+                        if use_mask_loss and mask_batch is not None:
+                            weight_map = 1.0 + mask_batch * (config.mask.mask_weight - 1.0)
+                            l1 = (torch.abs(out - dst) * weight_map).mean()
+                        else:
+                            l1 = criterion_l1(out, dst)
+                        lp = torch.tensor(0.0, device=device)
+                        if use_lpips and loss_fn_lpips:
+                            try: lp = loss_fn_lpips(out, dst).mean()
+                            except Exception as e_lp: lp = torch.tensor(0.0, device=device)
+                        loss = l1 + config.training.lambda_lpips * lp
+            else:
+                out = model(model_input)
+                if use_bce_dice:
+                    # Denormalize dst from [-1,1] back to [0,1] for BCE targets
+                    dst_01 = dst * 0.5 + 0.5
+                    bce_total = torch.tensor(0.0, device=device)
+                    dc_total = torch.tensor(0.0, device=device)
+                    n_ch = out.shape[1]
+                    for ch in range(n_ch):
+                        out_ch = out[:, ch:ch+1, :, :]
+                        dst_ch = dst_01[:, ch:ch+1, :, :]
+                        bce_total = bce_total + criterion_bce(out_ch, dst_ch)
+                        dc_total = dc_total + dice_loss(torch.sigmoid(out_ch), dst_ch)
+                    l1 = (bce_total + dc_total) / n_ch
+                    lp = torch.tensor(0.0, device=device)
+                    loss = l1
+                    out = torch.sigmoid(out)
+                else:
                     if use_mask_loss and mask_batch is not None:
                         weight_map = 1.0 + mask_batch * (config.mask.mask_weight - 1.0)
                         l1 = (torch.abs(out - dst) * weight_map).mean()
@@ -940,18 +1004,6 @@ def train(config):
                         try: lp = loss_fn_lpips(out, dst).mean()
                         except Exception as e_lp: lp = torch.tensor(0.0, device=device)
                     loss = l1 + config.training.lambda_lpips * lp
-            else:
-                out = model(model_input)
-                if use_mask_loss and mask_batch is not None:
-                    weight_map = 1.0 + mask_batch * (config.mask.mask_weight - 1.0)
-                    l1 = (torch.abs(out - dst) * weight_map).mean()
-                else:
-                    l1 = criterion_l1(out, dst)
-                lp = torch.tensor(0.0, device=device)
-                if use_lpips and loss_fn_lpips:
-                    try: lp = loss_fn_lpips(out, dst).mean()
-                    except Exception as e_lp: lp = torch.tensor(0.0, device=device)
-                loss = l1 + config.training.lambda_lpips * lp
 
             if not torch.isfinite(loss):
                 logging.error(f"S{global_step}: NaN/Inf loss ({loss.item()})! Skip update.")
@@ -991,8 +1043,9 @@ def train(config):
                 avg_ep_l1 = ep_l1 / ep_steps if ep_steps > 0 else 0.0
                 avg_ep_lp = ep_lpips / ep_steps if use_lpips and ep_steps > 0 else 0.0
                 steps_in_ep = global_step % iter_epoch or iter_epoch
+                loss_label = 'BCE+Dice' if use_bce_dice else 'L1'
                 log_msg = (f'Epoch[{current_ep_idx + 1}] Step[{global_step}] ({steps_in_ep}/{iter_epoch}), '
-                           f'L1:{batch_l1:.4f}(Avg:{avg_ep_l1:.4f})')
+                           f'{loss_label}:{batch_l1:.4f}(Avg:{avg_ep_l1:.4f})')
                 if use_mask_loss and mask_batch is not None:
                     log_msg += f'[raw:{batch_l1_raw:.4f}]'
                 if use_lpips: log_msg += (f', LPIPS:{batch_lp:.4f}(Avg:{avg_ep_lp:.4f})')
@@ -1007,7 +1060,7 @@ def train(config):
                      if new_src is not None: fixed_src, fixed_dst, fixed_mask = new_src, new_dst, new_mask
                      elif fixed_src is None: logging.warning(f"S{global_step}: Preview refresh failed (no initial).")
                      else: logging.warning(f"S{global_step}: Preview refresh failed, using old.")
-                if fixed_src is not None: save_previews(model, fixed_src, fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, preview_count, config.logging.preview_refresh_rate, fixed_mask_batch=fixed_mask, use_mask_input=use_mask_input); preview_count += 1
+                if fixed_src is not None: save_previews(model, fixed_src, fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, preview_count, config.logging.preview_refresh_rate, fixed_mask_batch=fixed_mask, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice); preview_count += 1
                 elif preview_count == 0: logging.warning(f"S{global_step}: Skipping preview (no batch).")
 
             save_interval = config.saving.save_iterations_interval; save_now = (save_interval > 0 and global_step % save_interval == 0)
@@ -1196,7 +1249,7 @@ if __name__ == "__main__":
             if config.training.iterations_per_epoch <= 0: error_msgs.append("train.iter_epoch<=0")
             if config.training.batch_size <= 0: error_msgs.append("train.batch_size<=0")
             if not isinstance(config.training.lr, (int, float)) or config.training.lr <= 0: error_msgs.append("train.lr<=0")
-            if config.training.loss not in ['l1', 'l1+lpips']: error_msgs.append("train.loss invalid")
+            if config.training.loss not in ['l1', 'l1+lpips', 'bce+dice']: error_msgs.append("train.loss invalid")
             if config.training.lambda_lpips < 0: error_msgs.append("train.lambda_lpips<0")
             if not (0.0 <= config.data.overlap_factor < 1.0): error_msgs.append("data.overlap invalid")
             ds=16;

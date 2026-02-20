@@ -244,7 +244,7 @@ def load_mask_image(image_path):
 def load_model_and_config(checkpoint_path, device):
     """Loads TuNet, automatically detecting config from checkpoint.""" # Changed description
     logging.info(f"Loading checkpoint from: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     # Determine Config Source
     if 'config' in checkpoint:
@@ -316,7 +316,7 @@ def load_model_and_config(checkpoint_path, device):
     model.eval()
     logging.info("Model loaded successfully and set to evaluation mode.")
 
-    return model, resolution, use_mask_input
+    return model, resolution, use_mask_input, loss_mode
 
 # --- create_blend_mask ---
 # ... (remains the same) ...
@@ -327,7 +327,7 @@ def create_blend_mask(resolution, device):
 
 # --- Main Inference Function ---
 # ... (process_image remains the same) ...
-def process_image(model, image_path, output_path, resolution, stride, device, batch_size, transform, denormalize_fn, use_amp, half_res=False, mask_path=None, use_mask_input=False):
+def process_image(model, image_path, output_path, resolution, stride, device, batch_size, transform, denormalize_fn, use_amp, half_res=False, mask_path=None, use_mask_input=False, loss_mode='l1'):
     logging.info(f"Processing: {os.path.basename(image_path)}")
     start_time = time.time()
     try:
@@ -396,10 +396,15 @@ def process_image(model, image_path, output_path, resolution, stride, device, ba
                 batch_src_tensor = torch.cat([batch_src_tensor, batch_mask_tensor], dim=1)
             with autocast(device_type=device_type, enabled=use_amp):
                 batch_output_tensor = model(batch_src_tensor)
+                if loss_mode == 'bce+dice':
+                    batch_output_tensor = torch.sigmoid(batch_output_tensor)
             batch_output_tensor_cpu = batch_output_tensor.cpu().float()
             for j, coords in enumerate(batch_coords):
                 x, y, _, _ = coords
-                output_slice_cpu = denormalize_fn(batch_output_tensor_cpu[j].unsqueeze(0))[0]
+                if loss_mode == 'bce+dice':
+                    output_slice_cpu = torch.clamp(batch_output_tensor_cpu[j], 0, 1)
+                else:
+                    output_slice_cpu = denormalize_fn(batch_output_tensor_cpu[j].unsqueeze(0))[0]
                 output_canvas_cpu[0, :, y:y + resolution, x:x + resolution] += output_slice_cpu * blend_mask_cpu
                 weight_map_cpu[0, :, y:y + resolution, x:x + resolution] += blend_mask_cpu
             processed_count += len(batch_coords)
@@ -454,7 +459,7 @@ if __name__ == "__main__":
         args.use_amp = False
 
     try:
-        model, resolution, use_mask_input = load_model_and_config(args.checkpoint, device)
+        model, resolution, use_mask_input, loss_mode = load_model_and_config(args.checkpoint, device)
     except Exception as e:
         logging.error(f"Failed to load model: {e}", exc_info=True)
         exit(1)
@@ -508,7 +513,7 @@ if __name__ == "__main__":
 
         process_image(model, img_path, output_path, resolution, stride, device,
                       args.batch_size, transform, denormalize, args.use_amp, args.half_res,
-                      mask_path=mask_path, use_mask_input=use_mask_input)
+                      mask_path=mask_path, use_mask_input=use_mask_input, loss_mode=loss_mode)
 
     total_end_time = time.time()
     logging.info(f"--- Inference finished ---")

@@ -246,7 +246,7 @@ class InferenceGUI:
             logging.info(f"Using device: {device}")
             logging.info("Loading model...")
 
-            model, resolution, use_mask_input = load_model_and_config(self.checkpoint_path.get(), device)
+            model, resolution, use_mask_input, loss_mode = load_model_and_config(self.checkpoint_path.get(), device)
 
             transform = T.Compose([T.ToTensor(), T.Normalize(mean=NORM_MEAN, std=NORM_STD)])
 
@@ -282,7 +282,8 @@ class InferenceGUI:
                 output_path = os.path.join(self.output_dir.get(), output_filename)
 
                 process_image(model, img_path, output_path, resolution, stride, device,
-                              self.batch_size.get(), transform, denormalize, use_amp, self.half_res.get())
+                              self.batch_size.get(), transform, denormalize, use_amp, self.half_res.get(),
+                              loss_mode=loss_mode)
 
             logging.info("Inference complete!")
             self.root.after(0, lambda: messagebox.showinfo("Done", "Inference completed successfully!"))
