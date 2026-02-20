@@ -1,10 +1,29 @@
 {
-  "checkpoint_path": "D:/Work/Dropbox/Documents_DB/Work_DB/Bouffant_db/tunet_models/ACT_roto_tunet_latest.pth",
-  "input_dir": "Q:/Work/Bouffant_local/_for_tunet/A001_A008_0423HF_001_HandRightStab",
-  "output_dir": "Q:/Work/Bouffant_local/_for_tunet/output/A001_A008_0423HF_001_HandRightStab_tunet",
+  "checkpoint_path": "C:\\Users\\Eric\\Desktop\\ACT_roto_tunet_latest.pth",
+  "input_dir": "//DESKTOP-C1D7OF4/Bouffant_local/_for_tunet/A003_A005_0423IO_001_R",
+  "output_dir": "//DESKTOP-C1D7OF4/Work_DB/Bouffant_db/ML_inference/A003_A005_0423IO_001_R",
   "overlap_factor": 0.5,
-  "batch_size": 24,
+  "batch_size": 9,
   "use_amp": true,
   "half_res": false,
-  "device": "cuda"
+  "skip_existing": true,
+  "device": "cuda",
+  "queue": [
+    {
+      "input_dir": "\\\\DESKTOP-C1D7OF4\\Bouffant_local\\_for_tunet\\A003_A001_0423CI_001_L",
+      "output_dir": "\\\\DESKTOP-C1D7OF4\\Work_DB\\Bouffant_db\\ML_inference\\A003_A001_0423CI_001_L"
+    },
+    {
+      "input_dir": "\\\\DESKTOP-C1D7OF4\\Bouffant_local\\_for_tunet\\A003_A001_0423CI_001_R",
+      "output_dir": "\\\\DESKTOP-C1D7OF4\\Work_DB\\Bouffant_db\\ML_inference\\A003_A001_0423CI_001_R"
+    },
+    {
+      "input_dir": "\\\\DESKTOP-C1D7OF4\\Bouffant_local\\_for_tunet\\A003_A005_0423IO_001_L",
+      "output_dir": "\\\\DESKTOP-C1D7OF4\\Work_DB\\Bouffant_db\\ML_inference\\A003_A005_0423IO_001_L"
+    },
+    {
+      "input_dir": "\\\\DESKTOP-C1D7OF4\\Bouffant_local\\_for_tunet\\A003_A005_0423IO_001_R",
+      "output_dir": "\\\\DESKTOP-C1D7OF4\\Work_DB\\Bouffant_db\\ML_inference\\A003_A005_0423IO_001_R"
+    }
+  ]
 }
