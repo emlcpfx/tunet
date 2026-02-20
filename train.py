@@ -891,6 +891,7 @@ def train(config):
     except Exception as model_err: logging.error(f"FATAL: Model setup/resume error: {model_err}. Exiting.", exc_info=True); cleanup_ddp(); return
 
     # --- Training Loop Variables ---
+    max_steps = getattr(config.training, 'max_steps', 0)
     global_step = start_step; iter_epoch = config.training.iterations_per_epoch
     fixed_src, fixed_dst, fixed_mask = None, None, None; preview_count = 0
     ep_l1, ep_lpips, ep_steps = 0.0, 0.0, 0
@@ -908,6 +909,10 @@ def train(config):
         while True:
             if shutdown_requested:
                 if is_main_process(): logging.info(f"Shutdown requested @ step {global_step}.")
+                break
+
+            if max_steps > 0 and global_step >= max_steps:
+                if is_main_process(): logging.info(f"Reached max_steps ({max_steps}) @ step {global_step}. Stopping.")
                 break
 
             loop_iter_start = time.time()
@@ -1094,7 +1099,8 @@ def train(config):
         logging.error("FATAL Training loop error:", exc_info=True);
         shutdown_requested = True
     finally:
-        if shutdown_requested and is_main_process():
+        max_steps_reached = max_steps > 0 and final_global_step >= max_steps
+        if (shutdown_requested or max_steps_reached) and is_main_process():
             logging.info(f"Performing final checkpoint save (State @ Step {final_global_step})...")
             try:
                  final_ep = final_global_step // iter_epoch; latest_path = os.path.join(config.data.output_dir, 'tunet_latest.pth'); cfg_dict = config_to_dict(config)
@@ -1236,6 +1242,7 @@ if __name__ == "__main__":
     config.dataloader = getattr(config, 'dataloader', SimpleNamespace())
     def_work = 0 if CURRENT_OS == 'Windows' else 2; config.dataloader.num_workers = getattr(config.dataloader, 'num_workers', def_work)
     config.dataloader.prefetch_factor = getattr(config.dataloader, 'prefetch_factor', 2 if config.dataloader.num_workers > 0 else None)
+    config.training.max_steps = getattr(config.training, 'max_steps', 0)
     config.saving = getattr(config, 'saving', SimpleNamespace()); config.saving.save_iterations_interval = getattr(config.saving, 'save_iterations_interval', 0)
     config.logging = getattr(config, 'logging', SimpleNamespace()); config.logging.log_interval = getattr(config.logging, 'log_interval', 50)
     config.logging.preview_batch_interval = getattr(config.logging, 'preview_batch_interval', 500); config.logging.preview_refresh_rate = getattr(config.logging, 'preview_refresh_rate', 5)
