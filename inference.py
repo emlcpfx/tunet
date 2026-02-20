@@ -422,6 +422,99 @@ def process_image(model, image_path, output_path, resolution, stride, device, ba
         logging.error(f"Failed to save {output_path}: {e}")
 
 
+def process_image_batch(model, frame_imgs, write_paths, resolution, stride, device,
+                        transform, denormalize_fn, use_amp, half_res=False, loss_mode='l1'):
+    """Process multiple frames in a single GPU forward pass.
+
+    Most effective when each frame produces few tiles (e.g. 1 tile for 512×512 frames).
+    All tiles from all frames are stacked into one batch and run through the model once.
+
+    Args:
+        frame_imgs:  list of PIL Images (pre-loaded)
+        write_paths: list of output file paths, one per frame
+    """
+    frame_records = []   # per-frame metadata + accumulation canvas
+    all_tile_tensors = []
+    tile_frame_idx = []  # flat tile index -> frame index
+    tile_slice_idx = []  # flat tile index -> slice index within frame
+
+    for fi, img in enumerate(frame_imgs):
+        orig_w, orig_h = img.size
+        if half_res:
+            img_w, img_h = orig_w // 2, orig_h // 2
+            img = img.resize((img_w, img_h), Image.LANCZOS)
+        else:
+            img_w, img_h = orig_w, orig_h
+
+        if img_w < resolution or img_h < resolution:
+            logging.warning(f"Frame {fi} ({img_w}×{img_h}) smaller than resolution {resolution}, skipping.")
+            frame_records.append(None)
+            continue
+
+        possible_y = list(range(0, img_h - resolution, stride)) + ([img_h - resolution] if img_h > resolution else [0])
+        possible_x = list(range(0, img_w - resolution, stride)) + ([img_w - resolution] if img_w > resolution else [0])
+        slice_coords = [(x, y, x + resolution, y + resolution)
+                        for y in sorted(set(possible_y)) for x in sorted(set(possible_x))]
+
+        canvas = torch.zeros(1, 3, img_h, img_w, dtype=torch.float32)
+        weight_map = torch.zeros(1, 1, img_h, img_w, dtype=torch.float32)
+        frame_records.append({
+            'img_w': img_w, 'img_h': img_h,
+            'slice_coords': slice_coords,
+            'canvas': canvas, 'weight_map': weight_map,
+        })
+
+        for si, coords in enumerate(slice_coords):
+            all_tile_tensors.append(transform(img.crop(coords)))
+            tile_frame_idx.append(fi)
+            tile_slice_idx.append(si)
+
+    if not all_tile_tensors:
+        return
+
+    # One GPU call for all tiles across all frames
+    blend_mask_cpu = create_blend_mask(resolution, device).cpu()[0]
+    batch = torch.stack(all_tile_tensors).to(device, non_blocking=True)
+    device_type = device.type
+
+    with torch.no_grad():
+        with autocast(device_type=device_type, enabled=use_amp):
+            outputs = model(batch)
+            if loss_mode == 'bce+dice':
+                outputs = torch.sigmoid(outputs)
+
+    outputs_cpu = outputs.cpu().float()
+
+    # Scatter output tiles back to per-frame canvases
+    for ti in range(len(all_tile_tensors)):
+        fi = tile_frame_idx[ti]
+        rec = frame_records[fi]
+        if rec is None:
+            continue
+        x, y, _, _ = rec['slice_coords'][tile_slice_idx[ti]]
+        if loss_mode == 'bce+dice':
+            out_slice = torch.clamp(outputs_cpu[ti], 0, 1)
+        else:
+            out_slice = denormalize_fn(outputs_cpu[ti].unsqueeze(0))[0]
+        rec['canvas'][0, :, y:y + resolution, x:x + resolution] += out_slice * blend_mask_cpu
+        rec['weight_map'][0, :, y:y + resolution, x:x + resolution] += blend_mask_cpu
+
+    # Save each frame
+    for fi, (rec, write_path) in enumerate(zip(frame_records, write_paths)):
+        if rec is None:
+            continue
+        try:
+            weight_map = torch.clamp(rec['weight_map'], min=1e-8)
+            final = rec['canvas'] / weight_map
+            pil = to_pil_image(torch.clamp(final[0], 0, 1))
+            out_dir = os.path.dirname(write_path)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+            pil.save(write_path)
+        except Exception as e:
+            logging.error(f"Failed to save frame {fi} to {write_path}: {e}")
+
+
 # --- Main Execution ---
 # ... (remains the same) ...
 if __name__ == "__main__":

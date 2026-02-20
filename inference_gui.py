@@ -9,7 +9,7 @@ from tkinter import ttk, filedialog, messagebox
 import logging
 
 # Import inference functions
-from inference import load_model_and_config, process_image, denormalize, NORM_MEAN, NORM_STD, load_image_any_format
+from inference import load_model_and_config, process_image, process_image_batch, denormalize, NORM_MEAN, NORM_STD, load_image_any_format
 
 import torch
 import torchvision.transforms as T
@@ -33,6 +33,7 @@ class InferenceGUI:
         self.use_amp = tk.BooleanVar(value=True)
         self.half_res = tk.BooleanVar(value=False)
         self.skip_existing = tk.BooleanVar(value=True)
+        self.frames_per_batch = tk.IntVar(value=1)
         self.device = tk.StringVar(value="cuda" if torch.cuda.is_available() else "cpu")
 
         self.is_running = False
@@ -84,9 +85,13 @@ class InferenceGUI:
         ttk.Spinbox(options_frame, from_=0.0, to=0.9, increment=0.1,
                      textvariable=self.overlap_factor, width=10).grid(row=0, column=1, sticky=tk.W, padx=5)
 
-        ttk.Label(options_frame, text="Batch Size:").grid(row=0, column=2, sticky=tk.W, padx=5)
+        ttk.Label(options_frame, text="Tile Batch:").grid(row=0, column=2, sticky=tk.W, padx=5)
         ttk.Spinbox(options_frame, from_=1, to=32, increment=1,
-                     textvariable=self.batch_size, width=10).grid(row=0, column=3, sticky=tk.W, padx=5)
+                     textvariable=self.batch_size, width=8).grid(row=0, column=3, sticky=tk.W, padx=5)
+
+        ttk.Label(options_frame, text="Frame Batch:").grid(row=0, column=4, sticky=tk.W, padx=5)
+        ttk.Spinbox(options_frame, from_=1, to=64, increment=1,
+                     textvariable=self.frames_per_batch, width=8).grid(row=0, column=5, sticky=tk.W, padx=5)
 
         ttk.Label(options_frame, text="Device:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
         ttk.Combobox(options_frame, textvariable=self.device,
@@ -202,6 +207,7 @@ class InferenceGUI:
             self.use_amp.set(s.get('use_amp', True))
             self.half_res.set(s.get('half_res', False))
             self.skip_existing.set(s.get('skip_existing', True))
+            self.frames_per_batch.set(s.get('frames_per_batch', 1))
             self.device.set(s.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
             # Restore queue
             for item in s.get('queue', []):
@@ -225,6 +231,7 @@ class InferenceGUI:
             'use_amp': self.use_amp.get(),
             'half_res': self.half_res.get(),
             'skip_existing': self.skip_existing.get(),
+            'frames_per_batch': self.frames_per_batch.get(),
             'device': self.device.get(),
             'queue': [{'input_dir': q['input_dir'], 'output_dir': q['output_dir']}
                       for q in self.queue if q['status'] == 'pending'],
@@ -458,6 +465,16 @@ class InferenceGUI:
             logging.info(f"Using device: {device}")
             logging.info("Loading model...")
             model, resolution, use_mask_input, loss_mode = load_model_and_config(checkpoint, device)
+            # Compile the model for faster repeated inference (PyTorch 2.0+)
+            # torch.compile requires Triton which is not available on Windows
+            if os.name != 'nt':
+                try:
+                    model = torch.compile(model, mode='reduce-overhead')
+                    logging.info("torch.compile enabled (reduce-overhead) — first frame will warm up.")
+                except Exception as e:
+                    logging.warning(f"torch.compile unavailable, using eager mode: {e}")
+            else:
+                logging.info("torch.compile skipped (Triton not supported on Windows).")
             self._cached_model = model
             self._cached_checkpoint = checkpoint
             self._cached_resolution = resolution
@@ -583,51 +600,80 @@ class InferenceGUI:
 
         total = len(work_items)
         frame_times = []
+        fpb = self.frames_per_batch.get()  # frames per GPU batch
 
         try:
-            for i in range(total):
-                prefetched = prefetch_q.get()
-                if prefetched is None or self.stop_requested:
-                    remaining = total - i
-                    logging.info(f"Stopped. {i}/{total} processed this run, {remaining} remaining.")
+            i = 0          # items consumed from prefetch queue
+            processed = 0  # frames successfully completed
+            batch_buf = [] # pending: (img_path, output_path, pil_img, write_path)
+
+            def flush_batch():
+                nonlocal processed
+                if not batch_buf:
+                    return
+                t0 = time.perf_counter()
+                if len(batch_buf) > 1:
+                    pil_imgs = [b[2] for b in batch_buf]
+                    wpaths   = [b[3] for b in batch_buf]
+                    process_image_batch(model, pil_imgs, wpaths, resolution, stride, device,
+                                        transform, denormalize, use_amp, self.half_res.get(),
+                                        loss_mode=loss_mode)
+                    elapsed = time.perf_counter() - t0
+                    per_frame = elapsed / len(batch_buf)
+                else:
+                    img_p, out_p, pil, wp = batch_buf[0]
+                    process_image(model, img_p, wp, resolution, stride, device,
+                                  self.batch_size.get(), transform, denormalize, use_amp, self.half_res.get(),
+                                  loss_mode=loss_mode, src_image=pil)
+                    elapsed = time.perf_counter() - t0
+                    per_frame = elapsed
+
+                eta_str = ""
+                avg = per_frame
+                for b in batch_buf:
+                    img_p, out_p, _, wp = b
+                    frame_times.append(per_frame)
+                    processed += 1
+                    if use_async_copy:
+                        copy_queue.put((wp, out_p))
+                        qd = copy_queue.qsize()
+                        qi = f"  [copy queue: {qd}]" if qd > 1 else ""
+                    else:
+                        qi = ""
+                    avg = sum(frame_times) / len(frame_times)
+                    eta_str = self._format_eta(int(avg * (total - processed)))
+                    logging.info(f"[{processed}/{total}] {os.path.basename(img_p)}  "
+                                 f"{per_frame:.2f}s  avg {avg:.2f}s  ETA {eta_str}{qi}")
+
+                pct = int(processed / total * 100)
+                self.root.after(0, lambda p=pct, c=processed, t=total, e=eta_str, fr=per_frame, a=avg:
+                                self._update_progress(p, c, t, e, fr, a))
+                batch_buf.clear()
+
+            stop_early = False
+            while i < total:
+                if self.stop_requested:
+                    stop_early = True
                     break
-
+                prefetched = prefetch_q.get()
+                i += 1
+                if prefetched is None:
+                    stop_early = True  # unexpected early sentinel
+                    break
                 (img_path, output_path), pil_img = prefetched
-
                 if pil_img is None:
                     logging.error(f"Skipping {os.path.basename(img_path)} (load failed during prefetch)")
                     continue
+                write_path = (os.path.join(tmp_dir, os.path.basename(output_path))
+                              if use_async_copy else output_path)
+                batch_buf.append((img_path, output_path, pil_img, write_path))
+                if len(batch_buf) >= fpb:
+                    flush_batch()
 
-                # Write to local temp if network, else write directly
-                if use_async_copy:
-                    write_path = os.path.join(tmp_dir, os.path.basename(output_path))
-                else:
-                    write_path = output_path
-
-                t0 = time.perf_counter()
-                process_image(model, img_path, write_path, resolution, stride, device,
-                              self.batch_size.get(), transform, denormalize, use_amp, self.half_res.get(),
-                              loss_mode=loss_mode, src_image=pil_img)
-                elapsed = time.perf_counter() - t0
-                frame_times.append(elapsed)
-
-                if use_async_copy:
-                    copy_queue.put((write_path, output_path))
-                    queue_depth = copy_queue.qsize()
-                    queue_info = f"  [copy queue: {queue_depth}]" if queue_depth > 1 else ""
-                else:
-                    queue_info = ""
-
-                avg = sum(frame_times) / len(frame_times)
-                remaining = total - (i + 1)
-                eta_str = self._format_eta(int(avg * remaining))
-
-                logging.info(f"[{i+1}/{total}] {os.path.basename(img_path)}  "
-                             f"{elapsed:.2f}s  avg {avg:.2f}s  ETA {eta_str}{queue_info}")
-
-                pct = int((i + 1) / total * 100)
-                self.root.after(0, lambda p=pct, c=i+1, t=total, e=eta_str, fr=elapsed, a=avg:
-                                self._update_progress(p, c, t, e, fr, a))
+            if stop_early:
+                logging.info(f"Stopped. {processed}/{total} processed this run, {total - processed} remaining.")
+            else:
+                flush_batch()  # flush final partial batch
 
         finally:
             # Drain prefetch queue so the prefetch thread can exit (it may be blocked on put())
