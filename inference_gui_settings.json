@@ -2,12 +2,12 @@
   "checkpoint_path": "C:\\Users\\Eric\\Desktop\\ACT_roto_tunet_latest.pth",
   "input_dir": "//DESKTOP-C1D7OF4/Bouffant_local/_for_tunet/A003_A005_0423IO_001_R",
   "output_dir": "//DESKTOP-C1D7OF4/Work_DB/Bouffant_db/ML_inference/A003_A005_0423IO_001_R",
-  "overlap_factor": 0.5,
+  "stride": 400,
   "batch_size": 9,
   "use_amp": true,
   "half_res": false,
   "skip_existing": true,
-  "frames_per_batch": 8,
+  "frames_per_batch": 1,
   "device": "cuda",
   "queue": [
     {

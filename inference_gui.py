@@ -1,3 +1,4 @@
+import math
 import os
 import json
 import queue
@@ -9,7 +10,7 @@ from tkinter import ttk, filedialog, messagebox
 import logging
 
 # Import inference functions
-from inference import load_model_and_config, process_image, process_image_batch, denormalize, NORM_MEAN, NORM_STD, load_image_any_format
+from inference import load_model_and_config, process_image, denormalize, NORM_MEAN, NORM_STD, load_image_any_format
 
 import torch
 import torchvision.transforms as T
@@ -28,13 +29,10 @@ class InferenceGUI:
         self.checkpoint_path = tk.StringVar()
         self.input_dir = tk.StringVar()
         self.output_dir = tk.StringVar()
-        self.overlap_factor = tk.DoubleVar(value=0.5)
-        self.batch_size = tk.IntVar(value=1)
-        self.use_amp = tk.BooleanVar(value=True)
+        self.stride = tk.IntVar(value=256)
+        self.auto_stride = tk.BooleanVar(value=True)
         self.half_res = tk.BooleanVar(value=False)
         self.skip_existing = tk.BooleanVar(value=True)
-        self.frames_per_batch = tk.IntVar(value=1)
-        self.device = tk.StringVar(value="cuda" if torch.cuda.is_available() else "cpu")
 
         self.is_running = False
         self.stop_requested = False
@@ -81,29 +79,20 @@ class InferenceGUI:
         options_frame = ttk.LabelFrame(main_frame, text="Options", padding="5")
         options_frame.grid(row=row, column=0, columnspan=3, sticky=tk.EW, pady=10)
 
-        ttk.Label(options_frame, text="Overlap Factor:").grid(row=0, column=0, sticky=tk.W, padx=5)
-        ttk.Spinbox(options_frame, from_=0.0, to=0.9, increment=0.1,
-                     textvariable=self.overlap_factor, width=10).grid(row=0, column=1, sticky=tk.W, padx=5)
+        ttk.Label(options_frame, text="Stride:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        self.stride_spinbox = ttk.Spinbox(options_frame, from_=64, to=1024, increment=64,
+                     textvariable=self.stride, width=8)
+        self.stride_spinbox.grid(row=0, column=1, sticky=tk.W, padx=5)
+        ttk.Checkbutton(options_frame, text="Auto", variable=self.auto_stride,
+                        command=self._update_stride_state).grid(row=0, column=2, sticky=tk.W, padx=2)
 
-        ttk.Label(options_frame, text="Tile Batch:").grid(row=0, column=2, sticky=tk.W, padx=5)
-        ttk.Spinbox(options_frame, from_=1, to=32, increment=1,
-                     textvariable=self.batch_size, width=8).grid(row=0, column=3, sticky=tk.W, padx=5)
-
-        ttk.Label(options_frame, text="Frame Batch:").grid(row=0, column=4, sticky=tk.W, padx=5)
-        ttk.Spinbox(options_frame, from_=1, to=64, increment=1,
-                     textvariable=self.frames_per_batch, width=8).grid(row=0, column=5, sticky=tk.W, padx=5)
-
-        ttk.Label(options_frame, text="Device:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
-        ttk.Combobox(options_frame, textvariable=self.device,
-                     values=["cuda", "cpu"], width=8, state="readonly").grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
-
-        ttk.Checkbutton(options_frame, text="Use AMP (faster)", variable=self.use_amp).grid(
-            row=1, column=2, sticky=tk.W, padx=5, pady=5)
         ttk.Checkbutton(options_frame, text="Half-res (~4x faster)", variable=self.half_res).grid(
-            row=1, column=3, sticky=tk.W, padx=5, pady=5)
+            row=1, column=0, sticky=tk.W, padx=5, pady=5)
 
         ttk.Checkbutton(options_frame, text="Skip existing output files", variable=self.skip_existing).grid(
             row=2, column=0, columnspan=2, sticky=tk.W, padx=5, pady=5)
+
+        self._update_stride_state()
 
         # Queue section
         row += 1
@@ -202,12 +191,11 @@ class InferenceGUI:
             self.checkpoint_path.set(s.get('checkpoint_path', ''))
             self.input_dir.set(s.get('input_dir', ''))
             self.output_dir.set(s.get('output_dir', ''))
-            self.overlap_factor.set(s.get('overlap_factor', 0.5))
-            self.batch_size.set(s.get('batch_size', 1))
-            self.use_amp.set(s.get('use_amp', True))
+            self.stride.set(s.get('stride', 256))
+            self.auto_stride.set(s.get('auto_stride', True))
+            self._update_stride_state()
             self.half_res.set(s.get('half_res', False))
             self.skip_existing.set(s.get('skip_existing', True))
-            self.frames_per_batch.set(s.get('frames_per_batch', 1))
             self.device.set(s.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
             # Restore queue
             for item in s.get('queue', []):
@@ -226,12 +214,10 @@ class InferenceGUI:
             'checkpoint_path': self.checkpoint_path.get(),
             'input_dir': self.input_dir.get(),
             'output_dir': self.output_dir.get(),
-            'overlap_factor': self.overlap_factor.get(),
-            'batch_size': self.batch_size.get(),
-            'use_amp': self.use_amp.get(),
+            'stride': self.stride.get(),
+            'auto_stride': self.auto_stride.get(),
             'half_res': self.half_res.get(),
             'skip_existing': self.skip_existing.get(),
-            'frames_per_batch': self.frames_per_batch.get(),
             'device': self.device.get(),
             'queue': [{'input_dir': q['input_dir'], 'output_dir': q['output_dir']}
                       for q in self.queue if q['status'] == 'pending'],
@@ -354,9 +340,9 @@ class InferenceGUI:
     def _run_single_thread(self):
         self.save_settings()
         try:
-            model, resolution, loss_mode, device, use_amp, transform, stride = self._load_model()
+            model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch = self._load_model()
             self._process_folder(model, self.input_dir.get(), self.output_dir.get(),
-                                 resolution, stride, device, use_amp, transform, loss_mode)
+                                 resolution, stride, device, use_amp, transform, loss_mode, tile_batch)
             if not self.stop_requested:
                 logging.info("Inference complete!")
                 self.root.after(0, lambda: messagebox.showinfo("Done", "Inference completed successfully!"))
@@ -385,7 +371,7 @@ class InferenceGUI:
     def _run_queue_thread(self):
         self.save_settings()
         try:
-            model, resolution, loss_mode, device, use_amp, transform, stride = self._load_model()
+            model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch = self._load_model()
 
             pending = [q for q in self.queue if q['status'] == 'pending']
             total_items = len(pending)
@@ -401,7 +387,7 @@ class InferenceGUI:
 
                 try:
                     self._process_folder(model, item['input_dir'], item['output_dir'],
-                                         resolution, stride, device, use_amp, transform, loss_mode)
+                                         resolution, stride, device, use_amp, transform, loss_mode, tile_batch)
                     if not self.stop_requested:
                         item['status'] = 'done'
                     else:
@@ -446,12 +432,9 @@ class InferenceGUI:
 
     def _load_model(self):
         from glob import glob
-        device_str = self.device.get()
-        if device_str == 'cuda' and not torch.cuda.is_available():
-            logging.warning("CUDA not available, falling back to CPU")
-            device_str = 'cpu'
+        device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
         device = torch.device(device_str)
-        use_amp = self.use_amp.get() and device_str == 'cuda'
+        use_amp = device_str == 'cuda'
 
         checkpoint = self.checkpoint_path.get()
 
@@ -481,11 +464,45 @@ class InferenceGUI:
             self._cached_loss_mode = loss_mode
 
         transform = T.Compose([T.ToTensor(), T.Normalize(mean=NORM_MEAN, std=NORM_STD)])
-        overlap_pixels = int(resolution * self.overlap_factor.get())
-        stride = max(1, resolution - overlap_pixels)
-        logging.info(f"Resolution: {resolution}, Stride: {stride}")
+        stride = max(1, self.stride.get())
+        logging.info(f"Resolution: {resolution}, Stride: {stride} ({'auto' if self.auto_stride.get() else 'manual'})")
 
-        return model, resolution, loss_mode, device, use_amp, transform, stride
+        if device.type == 'cuda':
+            props = torch.cuda.get_device_properties(device)
+            vram_gb = props.total_memory / (1024 ** 3)
+            if vram_gb >= 20:
+                tile_batch = 16
+            elif vram_gb >= 10:
+                tile_batch = 8
+            elif vram_gb >= 6:
+                tile_batch = 4
+            else:
+                tile_batch = 2
+            logging.info(f"GPU: {props.name} ({vram_gb:.0f}GB) → tile batch = {tile_batch}")
+        else:
+            tile_batch = 1
+
+        return model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch
+
+    def _update_stride_state(self):
+        state = 'disabled' if self.auto_stride.get() else 'normal'
+        self.stride_spinbox.configure(state=state)
+
+    @staticmethod
+    def _compute_optimal_stride(img_w, img_h, resolution):
+        """Minimum stride that gives full pixel coverage with no gaps."""
+        if img_w <= resolution and img_h <= resolution:
+            return resolution
+        def min_stride_for_dim(dim):
+            excess = dim - resolution
+            k = math.ceil(excess / resolution)
+            return excess / k
+        strides = []
+        if img_w > resolution:
+            strides.append(min_stride_for_dim(img_w))
+        if img_h > resolution:
+            strides.append(min_stride_for_dim(img_h))
+        return max(1, int(math.floor(min(strides))))
 
     @staticmethod
     def _is_network_path(path):
@@ -519,7 +536,7 @@ class InferenceGUI:
                 copy_queue.task_done()
 
     def _process_folder(self, model, input_dir, output_dir, resolution, stride,
-                        device, use_amp, transform, loss_mode):
+                        device, use_amp, transform, loss_mode, tile_batch=4):
         from glob import glob
         import re
         import time
@@ -564,6 +581,23 @@ class InferenceGUI:
             logging.info("All files already processed, nothing to do.")
             return
 
+        # Auto-compute stride from first image dimensions
+        if self.auto_stride.get():
+            try:
+                from PIL import Image as _PIL
+                with _PIL.open(work_items[0][0]) as _img:
+                    first_w, first_h = _img.size
+                stride = self._compute_optimal_stride(first_w, first_h, resolution)
+                # Count tiles for the log
+                def _tile_pos(dim):
+                    return len(set(list(range(0, dim - resolution, stride)) +
+                                   ([dim - resolution] if dim > resolution else [0])))
+                tiles = _tile_pos(first_w) * _tile_pos(first_h)
+                logging.info(f"Auto-stride: {first_w}×{first_h} → stride={stride}, {tiles} tile(s)/frame")
+                self.root.after(0, lambda s=stride: self.stride.set(s))
+            except Exception as e:
+                logging.warning(f"Auto-stride failed ({e}), using manual stride={stride}")
+
         # Prefetch images from disk (hides network read latency behind GPU compute)
         prefetch_q = queue.Queue(maxsize=2)
 
@@ -600,65 +634,16 @@ class InferenceGUI:
 
         total = len(work_items)
         frame_times = []
-        fpb = self.frames_per_batch.get()  # frames per GPU batch
+        processed = 0
 
         try:
-            i = 0          # items consumed from prefetch queue
-            processed = 0  # frames successfully completed
-            batch_buf = [] # pending: (img_path, output_path, pil_img, write_path)
-
-            def flush_batch():
-                nonlocal processed
-                if not batch_buf:
-                    return
-                t0 = time.perf_counter()
-                if len(batch_buf) > 1:
-                    pil_imgs = [b[2] for b in batch_buf]
-                    wpaths   = [b[3] for b in batch_buf]
-                    process_image_batch(model, pil_imgs, wpaths, resolution, stride, device,
-                                        transform, denormalize, use_amp, self.half_res.get(),
-                                        loss_mode=loss_mode)
-                    elapsed = time.perf_counter() - t0
-                    per_frame = elapsed / len(batch_buf)
-                else:
-                    img_p, out_p, pil, wp = batch_buf[0]
-                    process_image(model, img_p, wp, resolution, stride, device,
-                                  self.batch_size.get(), transform, denormalize, use_amp, self.half_res.get(),
-                                  loss_mode=loss_mode, src_image=pil)
-                    elapsed = time.perf_counter() - t0
-                    per_frame = elapsed
-
-                eta_str = ""
-                avg = per_frame
-                for b in batch_buf:
-                    img_p, out_p, _, wp = b
-                    frame_times.append(per_frame)
-                    processed += 1
-                    if use_async_copy:
-                        copy_queue.put((wp, out_p))
-                        qd = copy_queue.qsize()
-                        qi = f"  [copy queue: {qd}]" if qd > 1 else ""
-                    else:
-                        qi = ""
-                    avg = sum(frame_times) / len(frame_times)
-                    eta_str = self._format_eta(int(avg * (total - processed)))
-                    logging.info(f"[{processed}/{total}] {os.path.basename(img_p)}  "
-                                 f"{per_frame:.2f}s  avg {avg:.2f}s  ETA {eta_str}{qi}")
-
-                pct = int(processed / total * 100)
-                self.root.after(0, lambda p=pct, c=processed, t=total, e=eta_str, fr=per_frame, a=avg:
-                                self._update_progress(p, c, t, e, fr, a))
-                batch_buf.clear()
-
             stop_early = False
-            while i < total:
+            while True:
                 if self.stop_requested:
                     stop_early = True
                     break
                 prefetched = prefetch_q.get()
-                i += 1
                 if prefetched is None:
-                    stop_early = True  # unexpected early sentinel
                     break
                 (img_path, output_path), pil_img = prefetched
                 if pil_img is None:
@@ -666,14 +651,33 @@ class InferenceGUI:
                     continue
                 write_path = (os.path.join(tmp_dir, os.path.basename(output_path))
                               if use_async_copy else output_path)
-                batch_buf.append((img_path, output_path, pil_img, write_path))
-                if len(batch_buf) >= fpb:
-                    flush_batch()
+
+                t0 = time.perf_counter()
+                process_image(model, img_path, write_path, resolution, stride, device,
+                              tile_batch, transform, denormalize, use_amp, self.half_res.get(),
+                              loss_mode=loss_mode, src_image=pil_img)
+                elapsed = time.perf_counter() - t0
+
+                processed += 1
+                frame_times.append(elapsed)
+                avg = sum(frame_times) / len(frame_times)
+                eta_str = self._format_eta(int(avg * (total - processed)))
+
+                if use_async_copy:
+                    copy_queue.put((write_path, output_path))
+                    qd = copy_queue.qsize()
+                    qi = f"  [copy queue: {qd}]" if qd > 1 else ""
+                else:
+                    qi = ""
+
+                logging.info(f"[{processed}/{total}] {os.path.basename(img_path)}  "
+                             f"{elapsed:.2f}s  avg {avg:.2f}s  ETA {eta_str}{qi}")
+                pct = int(processed / total * 100)
+                self.root.after(0, lambda p=pct, c=processed, t=total, e=eta_str, fr=elapsed, a=avg:
+                                self._update_progress(p, c, t, e, fr, a))
 
             if stop_early:
                 logging.info(f"Stopped. {processed}/{total} processed this run, {total - processed} remaining.")
-            else:
-                flush_batch()  # flush final partial batch
 
         finally:
             # Drain prefetch queue so the prefetch thread can exit (it may be blocked on put())
