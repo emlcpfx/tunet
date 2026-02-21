@@ -2,25 +2,9 @@
   "checkpoint_path": "D:\\Work\\Dropbox\\Documents_DB\\Work_DB\\Bouffant_db\\tunet_models\\tunet_latest_nub_29k.pth",
   "input_dir": "Q:\\Work\\Bouffant_local\\_for_tunet\\A003_A005_0423IO_001_R",
   "output_dir": "D:\\Work\\Dropbox\\Documents_DB\\Work_DB\\Bouffant_db\\ML_inference\\A003_A005_0423IO_001_R_nub_tunet",
-  "overlap_factor": 0.5,
-  "batch_size": 9,
-  "use_amp": true,
+  "stride": 138,
+  "auto_stride": true,
   "half_res": false,
   "skip_existing": true,
-  "frames_per_batch": 1,
-  "device": "cuda",
-  "queue": [
-    {
-      "input_dir": "Q:\\Work\\Bouffant_local\\_for_tunet\\A003_A001_0423CI_001_R",
-      "output_dir": "D:\\Work\\Dropbox\\Documents_DB\\Work_DB\\Bouffant_db\\ML_inference\\A003_A001_0423CI_001_R_nub_tunet"
-    },
-    {
-      "input_dir": "Q:\\Work\\Bouffant_local\\_for_tunet\\A003_A005_0423IO_001_L",
-      "output_dir": "D:\\Work\\Dropbox\\Documents_DB\\Work_DB\\Bouffant_db\\ML_inference\\A003_A005_0423IO_001_L_nub_tunet"
-    },
-    {
-      "input_dir": "Q:\\Work\\Bouffant_local\\_for_tunet\\A003_A005_0423IO_001_R",
-      "output_dir": "D:\\Work\\Dropbox\\Documents_DB\\Work_DB\\Bouffant_db\\ML_inference\\A003_A005_0423IO_001_R_nub_tunet"
-    }
-  ]
+  "queue": []
 }

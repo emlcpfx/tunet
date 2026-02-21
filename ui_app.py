@@ -74,6 +74,7 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 900, 700)
         self.process = None; self.utility_process = None; self.config_file_path = Path("config_from_ui.yaml")
         self.preview_image_path = None; self.original_pixmap = None; self.copy_thread = None; self.conversion_target = None
+        self.val_preview_image_path = None; self.val_original_pixmap = None
         self.central_widget = QWidget(); self.setCentralWidget(self.central_widget)
         self.main_layout = QVBoxLayout(self.central_widget)
         self.tabs = QTabWidget()
@@ -81,10 +82,10 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Vertical); splitter.addWidget(self.tabs); splitter.addWidget(self.console_output); splitter.setSizes([550, 150])
         self.main_layout.addWidget(splitter); self.main_layout.addLayout(self.create_control_panel())
         self.create_main_tab(); self.create_advanced_tab(); self.create_dataloader_tab()
-        self.create_preview_tab(); self.create_convert_tab(); self.create_about_tab()
-        self.file_watcher = QFileSystemWatcher(); self.file_watcher.fileChanged.connect(self.update_preview_image)
+        self.create_preview_tab(); self.create_val_preview_tab(); self.create_convert_tab(); self.create_about_tab()
+        self.file_watcher = QFileSystemWatcher(); self.file_watcher.fileChanged.connect(self.on_watched_file_changed)
         self.tabs.currentChanged.connect(self.on_tab_changed)
-        self.preview_timer = QTimer(self); self.preview_timer.setInterval(2500); self.preview_timer.timeout.connect(self.update_preview_image)
+        self.preview_timer = QTimer(self); self.preview_timer.setInterval(2500); self.preview_timer.timeout.connect(self.update_all_previews)
         self.process_monitor = QTimer(self); self.process_monitor.setInterval(500); self.process_monitor.timeout.connect(self.check_process_status)
         self.utility_monitor = QTimer(self); self.utility_monitor.setInterval(500); self.utility_monitor.timeout.connect(self.check_utility_status)
         self.populate_default_script_path()
@@ -101,7 +102,10 @@ class MainWindow(QMainWindow):
         tab = QWidget(); layout = QFormLayout(tab); layout.addRow(QLabel("--- Launcher Settings ---")); self.train_script_input = self.create_path_selector("Training Script (.py)", is_file=True); layout.addRow("Training Script:", self.train_script_input)
         if platform.system() == 'Linux': self.nproc_input = QSpinBox(minimum=1, maximum=16, value=1); layout.addRow("GPUs (nproc_per_node):", self.nproc_input)
         else: self.nproc_input = None
-        layout.addRow(QLabel(" ")); self.src_dir_input = self.create_path_selector("Source Directory"); self.dst_dir_input = self.create_path_selector("Destination Directory"); self.mask_dir_input = self.create_path_selector("Mask Directory"); self.model_folder_input = self.create_path_selector("Model Folder", is_output=True); self.resolution_input = QComboBox(); self.resolution_input.addItems(["512", "1024"]); self.model_size_dims_input = QComboBox(); self.model_size_dims_input.addItems(["64", "128", "256", "512"]); self.model_size_dims_input.setCurrentText("128"); layout.addRow(QLabel("--- Data Settings ---")); layout.addRow("Source Directory:", self.src_dir_input); layout.addRow("Destination Directory:", self.dst_dir_input); layout.addRow("Mask Directory (optional):", self.mask_dir_input); layout.addRow("Model Folder:", self.model_folder_input); layout.addRow("Resolution:", self.resolution_input); layout.addRow(QLabel("--- Model Settings ---")); layout.addRow("Model Size Dims:", self.model_size_dims_input); self.tabs.addTab(tab, "Main")
+        layout.addRow(QLabel(" ")); self.src_dir_input = self.create_path_selector("Source Directory"); self.dst_dir_input = self.create_path_selector("Destination Directory"); self.mask_dir_input = self.create_path_selector("Mask Directory"); self.model_folder_input = self.create_path_selector("Model Folder", is_output=True); self.resolution_input = QComboBox(); self.resolution_input.addItems(["512", "1024"]); self.model_size_dims_input = QComboBox(); self.model_size_dims_input.addItems(["64", "128", "256", "512"]); self.model_size_dims_input.setCurrentText("128"); layout.addRow(QLabel("--- Data Settings ---")); layout.addRow("Source Directory:", self.src_dir_input); layout.addRow("Destination Directory:", self.dst_dir_input); layout.addRow("Mask Directory (optional):", self.mask_dir_input); layout.addRow("Model Folder:", self.model_folder_input); layout.addRow("Resolution:", self.resolution_input)
+        self.val_src_dir_input = self.create_path_selector("Val Source Directory"); self.val_dst_dir_input = self.create_path_selector("Val Destination Directory")
+        layout.addRow(QLabel("--- Validation Data (optional) ---")); layout.addRow("Val Source Directory:", self.val_src_dir_input); layout.addRow("Val Destination Directory:", self.val_dst_dir_input)
+        layout.addRow(QLabel("--- Model Settings ---")); layout.addRow("Model Size Dims:", self.model_size_dims_input); self.tabs.addTab(tab, "Main")
     def create_path_selector(self, label_text, is_output=False, is_file=False):
         widget = QWidget(); layout = QHBoxLayout(widget); layout.setContentsMargins(0, 0, 0, 0); line_edit = QLineEdit(); button = QPushButton("Browse...")
         if is_file: button.clicked.connect(lambda: self.select_file(line_edit))
@@ -188,6 +192,21 @@ class MainWindow(QMainWindow):
         
     def create_preview_tab(self):
         self.preview_tab = QWidget(); main_layout = QVBoxLayout(self.preview_tab); self.scroll_area = QScrollArea(); self.scroll_area.setWidgetResizable(True); self.preview_label = QLabel("Waiting for preview image..."); self.preview_label.setAlignment(Qt.AlignCenter); self.scroll_area.setWidget(self.preview_label); controls_layout = QHBoxLayout(); self.zoom_combo = QComboBox(); self.zoom_combo.addItems(["Fit", "50%", "100%", "200%"]); self.zoom_combo.currentTextChanged.connect(self.apply_zoom); controls_layout.addStretch(); controls_layout.addWidget(QLabel("Zoom:")); controls_layout.addWidget(self.zoom_combo); controls_layout.addStretch(); self.labels_container = QWidget(); labels_layout = QHBoxLayout(self.labels_container); labels_layout.setContentsMargins(0,0,0,0); src_label = QLabel("src data"); dst_label = QLabel("dst data"); model_label = QLabel("Model result"); src_label.setAlignment(Qt.AlignLeft); dst_label.setAlignment(Qt.AlignCenter); model_label.setAlignment(Qt.AlignRight); labels_layout.addWidget(src_label); labels_layout.addWidget(dst_label); labels_layout.addWidget(model_label); main_layout.addWidget(self.scroll_area, stretch=1); main_layout.addLayout(controls_layout); main_layout.addWidget(self.labels_container); self.tabs.addTab(self.preview_tab, "Preview")
+    def create_val_preview_tab(self):
+        self.val_preview_tab = QWidget(); main_layout = QVBoxLayout(self.val_preview_tab)
+        self.val_scroll_area = QScrollArea(); self.val_scroll_area.setWidgetResizable(True)
+        self.val_preview_label = QLabel("Waiting for validation preview image..."); self.val_preview_label.setAlignment(Qt.AlignCenter)
+        self.val_scroll_area.setWidget(self.val_preview_label)
+        controls_layout = QHBoxLayout()
+        self.val_zoom_combo = QComboBox(); self.val_zoom_combo.addItems(["Fit", "50%", "100%", "200%"])
+        self.val_zoom_combo.currentTextChanged.connect(self.apply_val_zoom)
+        controls_layout.addStretch(); controls_layout.addWidget(QLabel("Zoom:")); controls_layout.addWidget(self.val_zoom_combo); controls_layout.addStretch()
+        self.val_labels_container = QWidget(); labels_layout = QHBoxLayout(self.val_labels_container); labels_layout.setContentsMargins(0,0,0,0)
+        src_label = QLabel("val src"); dst_label = QLabel("val dst"); model_label = QLabel("Model result")
+        src_label.setAlignment(Qt.AlignLeft); dst_label.setAlignment(Qt.AlignCenter); model_label.setAlignment(Qt.AlignRight)
+        labels_layout.addWidget(src_label); labels_layout.addWidget(dst_label); labels_layout.addWidget(model_label)
+        main_layout.addWidget(self.val_scroll_area, stretch=1); main_layout.addLayout(controls_layout); main_layout.addWidget(self.val_labels_container)
+        self.tabs.addTab(self.val_preview_tab, "Val Preview")
     def create_convert_tab(self):
         tab = QWidget(); layout = QVBoxLayout(tab); layout.addStretch(); self.convert_flame_btn = QPushButton("Convert to Autodesk Flame"); self.convert_flame_btn.clicked.connect(self.run_flame_conversion); self.convert_nuke_btn = QPushButton("Convert to Foundry Nuke"); self.convert_nuke_btn.clicked.connect(self.run_nuke_conversion); self.copy_before_convert_check = QCheckBox("Copy checkpoint to subfolder before converting"); self.copy_before_convert_check.setChecked(True); self.copy_before_convert_check.setStyleSheet("margin-top: 10px;"); layout.addWidget(self.convert_flame_btn); layout.addWidget(self.convert_nuke_btn); layout.addWidget(self.copy_before_convert_check, alignment=Qt.AlignCenter); layout.addStretch(); self.tabs.addTab(tab, "Convert")
     def create_about_tab(self):
@@ -248,6 +267,9 @@ class MainWindow(QMainWindow):
         data_config = {'src_dir': get_path(self.src_dir_input), 'dst_dir': get_path(self.dst_dir_input), 'output_dir': get_path(self.model_folder_input), 'resolution': int(self.resolution_input.currentText())}
         if mask_dir:
             data_config['mask_dir'] = mask_dir
+        val_src_dir = get_path(self.val_src_dir_input); val_dst_dir = get_path(self.val_dst_dir_input)
+        if val_src_dir: data_config['val_src_dir'] = val_src_dir
+        if val_dst_dir: data_config['val_dst_dir'] = val_dst_dir
         config = {'data': data_config, 'model': {'model_size_dims': int(self.model_size_dims_input.currentText())}, 'training': {'iterations_per_epoch': self.iter_per_epoch_input.value(), 'batch_size': self.batch_size_input.value(), 'max_steps': self.max_steps_input.value(), 'use_amp': self.use_amp_input.isChecked(), 'loss': self.loss_input.currentText(), 'lambda_lpips': self.lambda_lpips_input.value()}, 'logging': {'log_interval': self.log_interval_input.value(), 'preview_batch_interval': self.preview_interval_input.value(), 'preview_refresh_rate': self.preview_refresh_input.value()}, 'saving': {'keep_last_checkpoints': self.keep_checkpoints_input.value()}, 'dataloader': {'datasets': {'shared_augs': augs}}}
         if self.use_mask_loss_input.isChecked() or self.use_mask_input_input.isChecked():
             config['mask'] = {'use_mask_loss': self.use_mask_loss_input.isChecked(), 'mask_weight': self.mask_weight_input.value(), 'use_mask_input': self.use_mask_input_input.isChecked()}
@@ -260,7 +282,8 @@ class MainWindow(QMainWindow):
         if self.nproc_input: self.nproc_input.setValue(ui_settings.get('nproc_per_node', 1))
         get_path_widget(self.src_dir_input).setText(config.get('data', {}).get('src_dir', '')); get_path_widget(self.dst_dir_input).setText(config.get('data', {}).get('dst_dir', '')); get_path_widget(self.mask_dir_input).setText(config.get('data', {}).get('mask_dir', '')); get_path_widget(self.model_folder_input).setText(config.get('data', {}).get('output_dir', '')); self.resolution_input.setCurrentText(str(config.get('data', {}).get('resolution', 512))); self.model_size_dims_input.setCurrentText(str(config.get('model', {}).get('model_size_dims', 128))); self.iter_per_epoch_input.setValue(config.get('training', {}).get('iterations_per_epoch', 500)); self.batch_size_input.setValue(config.get('training', {}).get('batch_size', 4)); self.max_steps_input.setValue(config.get('training', {}).get('max_steps', 0)); self.use_amp_input.setChecked(config.get('training', {}).get('use_amp', True)); self.loss_input.setCurrentText(config.get('training', {}).get('loss', 'l1')); self.lambda_lpips_input.setValue(config.get('training', {}).get('lambda_lpips', 1.0)); self.log_interval_input.setValue(config.get('logging', {}).get('log_interval', 5)); self.preview_interval_input.setValue(config.get('logging', {}).get('preview_batch_interval', 35)); self.preview_refresh_input.setValue(config.get('logging', {}).get('preview_refresh_rate', 5)); self.keep_checkpoints_input.setValue(config.get('saving', {}).get('keep_last_checkpoints', 4))
         mask_config = config.get('mask', {}); self.use_mask_loss_input.setChecked(mask_config.get('use_mask_loss', False)); self.mask_weight_input.setValue(mask_config.get('mask_weight', 10.0)); self.use_mask_input_input.setChecked(mask_config.get('use_mask_input', False))
-        
+        get_path_widget(self.val_src_dir_input).setText(config.get('data', {}).get('val_src_dir', '')); get_path_widget(self.val_dst_dir_input).setText(config.get('data', {}).get('val_dst_dir', ''))
+
         # Reset augs before populating
         self.hflip_check.setChecked(False); self.affine_check.setChecked(False); self.gamma_check.setChecked(False)
         augs = config.get('dataloader', {}).get('datasets', {}).get('shared_augs', [])
@@ -318,7 +341,7 @@ class MainWindow(QMainWindow):
     def on_training_finished(self):
         self.preview_timer.stop(); self.console_output.append("\n--- Training Process Terminated ---")
         self.process = None; self.start_btn.setEnabled(True); self.stop_btn.setEnabled(False)
-        QTimer.singleShot(100, self.update_preview_image)
+        QTimer.singleShot(100, self.update_all_previews)
     def stop_training(self):
         if self.process and self.process.poll() is None:
             self.console_output.append("\n--- Sending stop signal ---")
@@ -389,9 +412,19 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def setup_preview_watcher(self, model_folder):
         if self.preview_image_path and self.file_watcher.files(): self.file_watcher.removePath(self.preview_image_path)
+        if self.val_preview_image_path and self.val_preview_image_path in self.file_watcher.files(): self.file_watcher.removePath(self.val_preview_image_path)
         if model_folder and Path(model_folder).is_dir():
             self.preview_image_path = str(Path(model_folder) / "training_preview.jpg")
-            self.file_watcher.addPath(self.preview_image_path); self.update_preview_image()
+            self.val_preview_image_path = str(Path(model_folder) / "val_preview.jpg")
+            self.file_watcher.addPath(self.preview_image_path)
+            self.file_watcher.addPath(self.val_preview_image_path)
+            self.update_preview_image(); self.update_val_preview_image()
+    def update_all_previews(self):
+        self.update_preview_image(); self.update_val_preview_image()
+    @Slot(str)
+    def on_watched_file_changed(self, path):
+        if self.preview_image_path and path == self.preview_image_path: self.update_preview_image()
+        elif self.val_preview_image_path and path == self.val_preview_image_path: self.update_val_preview_image()
     @Slot()
     def update_preview_image(self):
         if self.preview_image_path and Path(self.preview_image_path).exists():
@@ -418,11 +451,39 @@ class MainWindow(QMainWindow):
         image_width = scaled_pixmap.width(); container_width = self.scroll_area.viewport().width()
         margin = max(0, (container_width - image_width) // 2)
         self.labels_container.setContentsMargins(margin, 0, margin, 0)
+    @Slot()
+    def update_val_preview_image(self):
+        if self.val_preview_image_path and Path(self.val_preview_image_path).exists():
+            try:
+                with open(self.val_preview_image_path, 'rb') as f: image_data = f.read()
+                pixmap = QPixmap(); pixmap.loadFromData(image_data)
+                if not pixmap.isNull(): self.val_original_pixmap = pixmap; self.apply_val_zoom()
+                else: self.val_preview_label.setText("Loading val preview...")
+            except Exception: pass
+        else: self.val_original_pixmap = None; self.apply_val_zoom()
+    @Slot()
+    def apply_val_zoom(self):
+        if not self.val_original_pixmap:
+            self.val_preview_label.setText("Waiting for validation preview image..."); self.val_labels_container.setVisible(False)
+            return
+        self.val_labels_container.setVisible(True); zoom_text = self.val_zoom_combo.currentText()
+        if zoom_text == "Fit":
+            scaled_pixmap = self.val_original_pixmap.scaled(self.val_scroll_area.viewport().size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        else:
+            factor = float(zoom_text.replace('%', '')) / 100.0
+            new_width = int(self.val_original_pixmap.width() * factor); new_height = int(self.val_original_pixmap.height() * factor)
+            scaled_pixmap = self.val_original_pixmap.scaled(new_width, new_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.val_preview_label.setPixmap(scaled_pixmap); self.val_preview_label.adjustSize()
+        image_width = scaled_pixmap.width(); container_width = self.val_scroll_area.viewport().width()
+        margin = max(0, (container_width - image_width) // 2)
+        self.val_labels_container.setContentsMargins(margin, 0, margin, 0)
     @Slot(int)
     def on_tab_changed(self, index):
-        if self.tabs.tabText(index) == "Preview": self.update_preview_image()
+        tab_name = self.tabs.tabText(index)
+        if tab_name == "Preview": self.update_preview_image()
+        elif tab_name == "Val Preview": self.update_val_preview_image()
     def resizeEvent(self, event):
-        super().resizeEvent(event); self.apply_zoom()
+        super().resizeEvent(event); self.apply_zoom(); self.apply_val_zoom()
     def save_config_to_file(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save Config As", "", "YAML Files (*.yaml *.yml)")
         if path:
