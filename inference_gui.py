@@ -18,6 +18,32 @@ import torchvision.transforms as T
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'inference_gui_settings.json')
 
 
+class _ToolTip:
+    """Simple hover tooltip for any tkinter widget."""
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip = None
+        widget.bind("<Enter>", self._show)
+        widget.bind("<Leave>", self._hide)
+
+    def _show(self, event=None):
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{x}+{y}")
+        lbl = tk.Label(self.tip, text=self.text, justify='left',
+                       background="#ffffe0", relief='solid', borderwidth=1,
+                       font=('TkDefaultFont', 9), wraplength=340)
+        lbl.pack(ipadx=5, ipady=3)
+
+    def _hide(self, event=None):
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+
 class InferenceGUI:
     def __init__(self, root):
         self.root = root
@@ -28,7 +54,7 @@ class InferenceGUI:
         # Variables
         self.checkpoint_path = tk.StringVar()
         self.input_dir = tk.StringVar()
-        self.output_dir = tk.StringVar()
+        self.output_root = tk.StringVar()
         self.stride = tk.IntVar(value=256)
         self.auto_stride = tk.BooleanVar(value=True)
         self.half_res = tk.BooleanVar(value=False)
@@ -68,11 +94,18 @@ class InferenceGUI:
         ttk.Entry(main_frame, textvariable=self.input_dir, width=50).grid(row=row, column=1, sticky=tk.EW, pady=5)
         ttk.Button(main_frame, text="Browse", command=self.browse_input).grid(row=row, column=2, padx=5, pady=5)
 
-        # Output directory
+        # Output root directory
         row += 1
-        ttk.Label(main_frame, text="Output Directory:").grid(row=row, column=0, sticky=tk.W, pady=5)
-        ttk.Entry(main_frame, textvariable=self.output_dir, width=50).grid(row=row, column=1, sticky=tk.EW, pady=5)
+        ttk.Label(main_frame, text="Output Root:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        output_entry = ttk.Entry(main_frame, textvariable=self.output_root, width=50)
+        output_entry.grid(row=row, column=1, sticky=tk.EW, pady=5)
         ttk.Button(main_frame, text="Browse", command=self.browse_output).grid(row=row, column=2, padx=5, pady=5)
+        _ToolTip(output_entry,
+                 "Subfolders are created automatically here, named:\n"
+                 "  inputname_modelname_v001\n\n"
+                 "Each new run increments the version (v002, v003…).\n"
+                 "With 'Skip existing' on, an existing versioned folder\n"
+                 "is reused so you can resume a partial run.")
 
         # Options frame
         row += 1
@@ -190,7 +223,8 @@ class InferenceGUI:
                 s = json.load(f)
             self.checkpoint_path.set(s.get('checkpoint_path', ''))
             self.input_dir.set(s.get('input_dir', ''))
-            self.output_dir.set(s.get('output_dir', ''))
+            # Support legacy 'output_dir' key from older settings files
+            self.output_root.set(s.get('output_root', s.get('output_dir', '')))
             self.stride.set(s.get('stride', 256))
             self.auto_stride.set(s.get('auto_stride', True))
             self._update_stride_state()
@@ -199,10 +233,13 @@ class InferenceGUI:
             # Restore queue
             for item in s.get('queue', []):
                 input_d = os.path.normpath(item.get('input_dir', ''))
-                output_d = os.path.normpath(item.get('output_dir', ''))
+                # Support legacy 'output_dir' key in queue items
+                output_r = item.get('output_root', item.get('output_dir', ''))
+                if output_r:
+                    output_r = os.path.normpath(output_r)
                 if os.path.isdir(input_d):
                     self.queue.append({'input_dir': input_d,
-                                       'output_dir': output_d,
+                                       'output_root': output_r,
                                        'status': 'pending'})
             self.refresh_queue_display()
         except (FileNotFoundError, json.JSONDecodeError):
@@ -212,12 +249,12 @@ class InferenceGUI:
         s = {
             'checkpoint_path': self.checkpoint_path.get(),
             'input_dir': self.input_dir.get(),
-            'output_dir': self.output_dir.get(),
+            'output_root': self.output_root.get(),
             'stride': self.stride.get(),
             'auto_stride': self.auto_stride.get(),
             'half_res': self.half_res.get(),
             'skip_existing': self.skip_existing.get(),
-            'queue': [{'input_dir': q['input_dir'], 'output_dir': q['output_dir']}
+            'queue': [{'input_dir': q['input_dir'], 'output_root': q['output_root']}
                       for q in self.queue if q['status'] == 'pending'],
         }
         try:
@@ -246,24 +283,24 @@ class InferenceGUI:
             self.input_dir.set(os.path.normpath(path))
 
     def browse_output(self):
-        path = filedialog.askdirectory(title="Select Output Directory")
+        path = filedialog.askdirectory(title="Select Output Root Directory")
         if path:
-            self.output_dir.set(os.path.normpath(path))
+            self.output_root.set(os.path.normpath(path))
 
     # ─── Queue management ───
 
     def add_to_queue(self):
         input_d = self.input_dir.get()
-        output_d = self.output_dir.get()
+        output_r = self.output_root.get()
         if not input_d or not os.path.isdir(input_d):
             messagebox.showerror("Error", "Input directory is invalid.")
             return
-        if not output_d:
-            messagebox.showerror("Error", "Output directory is empty.")
+        if not output_r:
+            messagebox.showerror("Error", "Output Root is empty.")
             return
-        self.queue.append({'input_dir': input_d, 'output_dir': output_d, 'status': 'pending'})
+        self.queue.append({'input_dir': input_d, 'output_root': output_r, 'status': 'pending'})
         self.refresh_queue_display()
-        logging.info(f"Added to queue: {os.path.basename(input_d)} -> {os.path.basename(output_d)}")
+        logging.info(f"Added to queue: {os.path.basename(input_d)} -> {os.path.basename(output_r)}/auto")
 
     def remove_from_queue(self):
         selected = list(self.queue_listbox.curselection())
@@ -284,7 +321,14 @@ class InferenceGUI:
         for i, item in enumerate(self.queue):
             status = item['status']
             prefix = {'pending': '   ', 'processing': '>> ', 'done': 'OK ', 'error': '!! '}
-            display = f"{prefix.get(status, '   ')}{os.path.basename(item['input_dir'])} -> {os.path.basename(item['output_dir'])}"
+            input_name = os.path.basename(item['input_dir'])
+            # Show resolved output name if known, otherwise show root/auto
+            resolved = item.get('resolved_output', '')
+            if resolved:
+                dest = os.path.basename(resolved)
+            else:
+                dest = f"{os.path.basename(item['output_root'])}/auto"
+            display = f"{prefix.get(status, '   ')}{input_name} -> {dest}"
             self.queue_listbox.insert(tk.END, display)
             if status == 'processing':
                 self.queue_listbox.itemconfigure(i, fg='#4488ff')
@@ -313,8 +357,8 @@ class InferenceGUI:
         if not os.path.isdir(self.input_dir.get()):
             messagebox.showerror("Error", "Input directory not found.")
             return False
-        if not self.output_dir.get():
-            messagebox.showerror("Error", "Please select an output directory.")
+        if not self.output_root.get():
+            messagebox.showerror("Error", "Please select an Output Root directory.")
             return False
         return True
 
@@ -339,7 +383,11 @@ class InferenceGUI:
         self.save_settings()
         try:
             model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch = self._load_model()
-            self._process_folder(model, self.input_dir.get(), self.output_dir.get(),
+            output_dir = self._resolve_output_dir(
+                self.input_dir.get(), self.output_root.get(),
+                self.checkpoint_path.get(), self.skip_existing.get())
+            logging.info(f"Output folder: {output_dir}")
+            self._process_folder(model, self.input_dir.get(), output_dir,
                                  resolution, stride, device, use_amp, transform, loss_mode, tile_batch)
             if not self.stop_requested:
                 logging.info("Inference complete!")
@@ -384,7 +432,13 @@ class InferenceGUI:
                 self.root.after(0, self.refresh_queue_display)
 
                 try:
-                    self._process_folder(model, item['input_dir'], item['output_dir'],
+                    output_dir = self._resolve_output_dir(
+                        item['input_dir'], item['output_root'],
+                        self.checkpoint_path.get(), self.skip_existing.get())
+                    item['resolved_output'] = output_dir
+                    self.root.after(0, self.refresh_queue_display)
+                    logging.info(f"Output folder: {output_dir}")
+                    self._process_folder(model, item['input_dir'], output_dir,
                                          resolution, stride, device, use_amp, transform, loss_mode, tile_batch)
                     if not self.stop_requested:
                         item['status'] = 'done'
@@ -481,6 +535,39 @@ class InferenceGUI:
             tile_batch = 1
 
         return model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch
+
+    @staticmethod
+    def _resolve_output_dir(input_dir, output_root, checkpoint_path, skip_existing=False):
+        """Build a versioned output subfolder: {output_root}/{input_name}_{model_name}_v###.
+
+        With skip_existing=True the latest existing versioned folder is reused so
+        partial runs can be resumed.  With skip_existing=False a fresh folder is
+        always created (next unused version number).
+        """
+        input_name = os.path.basename(os.path.normpath(input_dir))
+        model_name = os.path.splitext(os.path.basename(checkpoint_path))[0]
+        base = f"{input_name}_{model_name}"
+
+        if skip_existing:
+            # Find the latest existing version to resume into
+            latest = None
+            v = 1
+            while True:
+                candidate = os.path.join(output_root, f"{base}_v{v:03d}")
+                if os.path.exists(candidate):
+                    latest = candidate
+                    v += 1
+                else:
+                    break
+            return latest if latest else os.path.join(output_root, f"{base}_v001")
+        else:
+            # Find the first unused version number
+            v = 1
+            while True:
+                candidate = os.path.join(output_root, f"{base}_v{v:03d}")
+                if not os.path.exists(candidate):
+                    return candidate
+                v += 1
 
     def _update_stride_state(self):
         state = 'disabled' if self.auto_stride.get() else 'normal'
