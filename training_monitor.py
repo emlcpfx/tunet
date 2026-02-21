@@ -53,6 +53,8 @@ COLORS = {
     'l1_raw': '#ff6b6b',
     'lpips': '#4ecdc4',
     'lpips_raw': '#4ecdc4',
+    'val_l1': '#ffa726',
+    'val_l1_raw': '#ffa726',
     'accent': '#61afef',
     'best_marker': '#98c379',
     'crosshair': '#888888',
@@ -76,6 +78,14 @@ class TrainingMonitor:
         self.lpips_losses = deque(maxlen=self.max_points)
         self.has_lpips = False
         self.loss_label = 'Loss'  # Updated from first parsed log line
+
+        # Validation data
+        self.val_steps = deque(maxlen=self.max_points)
+        self.val_l1_losses = deque(maxlen=self.max_points)
+        self.val_lpips_losses = deque(maxlen=self.max_points)
+        self.has_val_data = False
+        self.best_val_l1 = float('inf')
+        self.best_val_l1_epoch = 0
 
         # Timing data
         self.epoch_start_times = {}  # epoch_num -> first_seen_time
@@ -268,6 +278,12 @@ class TrainingMonitor:
         self.lpips_line, = self.ax2.plot([], [], '-', color=COLORS['lpips'],
                                           linewidth=1.8, alpha=0.95, label='LPIPS Loss', zorder=3)
 
+        # Validation lines
+        self.val_l1_raw_line, = self.ax.plot([], [], '-', color=COLORS['val_l1_raw'],
+                                              linewidth=0.5, alpha=0.25, zorder=1)
+        self.val_l1_line, = self.ax.plot([], [], '-o', color=COLORS['val_l1'],
+                                          linewidth=1.8, alpha=0.95, markersize=4, label='Val Loss', zorder=4)
+
         # Best loss markers (initialized empty)
         self.best_l1_marker, = self.ax.plot([], [], '*', color=COLORS['best_marker'],
                                              markersize=14, zorder=5, label='Best L1')
@@ -345,6 +361,8 @@ class TrainingMonitor:
             ('l1_cur', 'L1 Current', '--'),
             ('l1_best', 'L1 Best', '--'),
             ('l1_best_ep', 'Best @ Epoch', '--'),
+            ('val_l1_cur', 'Val L1', '--'),
+            ('val_l1_best', 'Val Best', '--'),
             ('lpips_cur', 'LPIPS Current', '--'),
             ('lpips_best', 'LPIPS Best', '--'),
             ('points', 'Data Points', '0'),
@@ -422,6 +440,7 @@ class TrainingMonitor:
         if HAS_MATPLOTLIB:
             self.l1_raw_line.set_visible(self.show_raw)
             self.lpips_raw_line.set_visible(self.show_raw and self.has_lpips)
+            self.val_l1_raw_line.set_visible(self.show_raw and self.has_val_data)
             self.canvas.draw_idle()
 
     def toggle_grid(self):
@@ -624,6 +643,8 @@ class TrainingMonitor:
         pattern = r'Epoch\[(\d+)\]\s*Step\[(\d+)\].*?\b(L1|BCE\+Dice):([\d.]+)'
         lpips_pattern = r'LPIPS:([\d.]+)'
         time_pattern = r'T/Step:([\d.]+)s'
+        val_pattern = r'Val Epoch\[(\d+)\]\s*Step\[(\d+)\].*?Val_(L1|BCE\+Dice):([\d.]+)'
+        val_lpips_pattern = r'Val_LPIPS:([\d.]+)'
 
         lines = content.split('\n')
         new_data = False
@@ -678,6 +699,25 @@ class TrainingMonitor:
                     self.lpips_losses.append(self.lpips_losses[-1] if self.lpips_losses else 0)
 
                 new_data = True
+                continue  # Don't also try val pattern on same line
+
+            # Check for validation line
+            val_match = re.search(val_pattern, line)
+            if val_match:
+                val_epoch = int(val_match.group(1))
+                val_step = int(val_match.group(2))
+                val_l1_loss = float(val_match.group(4))
+                val_x_value = val_epoch  # Val is logged at epoch boundaries
+                self.val_steps.append(val_x_value)
+                self.val_l1_losses.append(val_l1_loss)
+                self.has_val_data = True
+                if val_l1_loss < self.best_val_l1:
+                    self.best_val_l1 = val_l1_loss
+                    self.best_val_l1_epoch = val_x_value
+                val_lp_match = re.search(val_lpips_pattern, line)
+                if val_lp_match:
+                    self.val_lpips_losses.append(float(val_lp_match.group(1)))
+                new_data = True
 
         if new_data:
             self.update_graph()
@@ -707,6 +747,9 @@ class TrainingMonitor:
         if self.has_lpips:
             lines.append(self.lpips_line)
             labels.append('LPIPS Loss')
+        if self.has_val_data:
+            lines.append(self.val_l1_line)
+            labels.append('Val Loss')
         lines.append(self.best_l1_marker)
         labels.append('Best')
 
@@ -762,6 +805,19 @@ class TrainingMonitor:
             self.lpips_raw_line.set_visible(False)
             self.ax2.set_visible(False)
 
+        # Update validation lines
+        if self.has_val_data and self.val_steps:
+            val_steps = list(self.val_steps)
+            val_l1_raw = list(self.val_l1_losses)
+            val_l1_smooth = self.apply_smoothing(self.val_l1_losses)
+            self.val_l1_raw_line.set_data(val_steps, val_l1_raw)
+            self.val_l1_raw_line.set_visible(self.show_raw)
+            self.val_l1_line.set_data(val_steps, val_l1_smooth)
+            self.val_l1_line.set_visible(True)
+        else:
+            self.val_l1_line.set_visible(False)
+            self.val_l1_raw_line.set_visible(False)
+
         # Update best loss marker
         if self.best_l1 < float('inf'):
             self.best_l1_marker.set_data([self.best_l1_epoch], [self.best_l1])
@@ -780,6 +836,10 @@ class TrainingMonitor:
                 y_vals = view_l1_smooth
                 if self.show_raw:
                     y_vals = y_vals + view_l1_raw
+                # Include val data in Y-axis range
+                if self.has_val_data and self.val_steps:
+                    val_in_view = [v for s, v in zip(self.val_steps, self.val_l1_losses) if x_min <= s <= x_max]
+                    if val_in_view: y_vals = y_vals + val_in_view
                 y_min, y_max = min(y_vals), max(y_vals)
                 margin = (y_max - y_min) * 0.1 or 0.01
                 self.ax.set_ylim(max(0, y_min - margin), y_max + margin)
@@ -822,6 +882,11 @@ class TrainingMonitor:
         if self.best_l1 < float('inf'):
             self.stat_labels['l1_best'].configure(text=f"{self.best_l1:.5f}")
             self.stat_labels['l1_best_ep'].configure(text=f"{self.best_l1_epoch:.1f}")
+
+        if self.has_val_data and self.val_l1_losses:
+            self.stat_labels['val_l1_cur'].configure(text=f"{self.val_l1_losses[-1]:.5f}")
+            if self.best_val_l1 < float('inf'):
+                self.stat_labels['val_l1_best'].configure(text=f"{self.best_val_l1:.5f}")
 
         if self.has_lpips and self.lpips_losses:
             self.stat_labels['lpips_cur'].configure(text=f"{self.lpips_losses[-1]:.5f}")
@@ -867,12 +932,20 @@ class TrainingMonitor:
         self.best_lpips = float('inf')
         self.best_lpips_epoch = 0
         self.time_per_step.clear()
+        self.val_steps.clear()
+        self.val_l1_losses.clear()
+        self.val_lpips_losses.clear()
+        self.has_val_data = False
+        self.best_val_l1 = float('inf')
+        self.best_val_l1_epoch = 0
 
         if HAS_MATPLOTLIB:
             self.l1_line.set_data([], [])
             self.l1_raw_line.set_data([], [])
             self.lpips_line.set_data([], [])
             self.lpips_raw_line.set_data([], [])
+            self.val_l1_line.set_data([], [])
+            self.val_l1_raw_line.set_data([], [])
             self.best_l1_marker.set_data([], [])
             self.best_lpips_marker.set_data([], [])
             self.best_l1_annot.set_visible(False)

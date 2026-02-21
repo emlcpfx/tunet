@@ -564,6 +564,11 @@ def cycle(iterable):
         try: yield next(iterator)
         except StopIteration: iterator = iter(iterable)
 
+def dice_loss(pred, target, smooth=1.0):
+    pred_flat = pred.reshape(-1); target_flat = target.reshape(-1)
+    intersection = (pred_flat * target_flat).sum()
+    return 1.0 - (2.0 * intersection + smooth) / (pred_flat.sum() + target_flat.sum() + smooth)
+
 # --- Preview Capture/Saving ---
 def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, preview_save_count, preview_refresh_rate, fixed_mask_batch=None, use_mask_input=False, use_bce_dice=False, use_amp=False):
     if not is_main_process() or fixed_src_batch is None or fixed_dst_batch is None or fixed_src_batch.nelement() == 0: return
@@ -650,6 +655,111 @@ def capture_preview_batch(config, src_transforms, dst_transforms, shared_transfo
     except StopIteration: logging.error("Preview DataLoader StopIteration."); return None, None, None
     except ValueError as dataset_ve: logging.error(f"Failed creating preview dataset: {dataset_ve}"); return None, None, None
     except Exception as e: logging.exception(f"Error capturing preview batch: {e}"); return None, None, None
+
+# --- Validation ---
+def run_validation(model, val_dataloader, device, device_type, use_amp, use_lpips, loss_fn_lpips, use_bce_dice, criterion_l1, current_ep_idx, global_step, lambda_lpips=1.0):
+    """Run validation over entire val dataset, return avg losses."""
+    if not is_main_process() or val_dataloader is None: return None, None
+    model.eval()
+    model_module = model.module if isinstance(model, DDP) else model
+    total_l1, total_lp, count = 0.0, 0.0, 0
+    use_amp_inf = use_amp and device_type == 'cuda'
+    try:
+        with torch.no_grad():
+            for batch in val_dataloader:
+                if batch is None: continue
+                src, dst = batch[0].to(device), batch[1].to(device)
+                amp_ctx = autocast(device_type=device_type, enabled=use_amp_inf)
+                with amp_ctx:
+                    out = model_module(src)
+                    if use_bce_dice:
+                        dst_01 = dst * 0.5 + 0.5
+                        n_ch = out.shape[1]
+                        bce_total = torch.tensor(0.0, device=device)
+                        dc_total = torch.tensor(0.0, device=device)
+                        criterion_bce = nn.BCEWithLogitsLoss()
+                        for ch in range(n_ch):
+                            out_ch, dst_ch = out[:, ch:ch+1, :, :], dst_01[:, ch:ch+1, :, :]
+                            bce_total = bce_total + criterion_bce(out_ch, dst_ch)
+                            dc_total = dc_total + dice_loss(torch.sigmoid(out_ch), dst_ch)
+                        l1 = (bce_total + dc_total) / n_ch
+                        lp = torch.tensor(0.0, device=device)
+                    else:
+                        l1 = criterion_l1(out, dst)
+                        lp = torch.tensor(0.0, device=device)
+                        if use_lpips and loss_fn_lpips:
+                            try: lp = loss_fn_lpips(out, dst).mean()
+                            except: lp = torch.tensor(0.0, device=device)
+                total_l1 += l1.item(); total_lp += lp.item(); count += 1
+    except Exception as e:
+        logging.error(f"Validation error: {e}"); model.train(); return None, None
+    model.train()
+    if count == 0: return None, None
+    avg_l1, avg_lp = total_l1 / count, total_lp / count
+    loss_label = 'BCE+Dice' if use_bce_dice else 'L1'
+    log_msg = f'Val Epoch[{current_ep_idx + 1}] Step[{global_step}], Val_{loss_label}:{avg_l1:.4f}'
+    if use_lpips: log_msg += f', Val_LPIPS:{avg_lp:.4f}'
+    logging.info(log_msg)
+    return avg_l1, avg_lp
+
+def save_val_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, use_bce_dice=False, use_amp=False):
+    """Save validation preview grid to val_preview.jpg."""
+    if not is_main_process() or fixed_src_batch is None or fixed_dst_batch is None or fixed_src_batch.nelement() == 0: return
+    num_samples = min(fixed_src_batch.size(0), 3)
+    if num_samples == 0: return
+    src_select, dst_select = fixed_src_batch[:num_samples].cpu(), fixed_dst_batch[:num_samples].cpu()
+    model.eval(); device_type = device.type
+    use_amp_inf = use_amp and device_type == 'cuda'
+    try:
+        amp_ctx = autocast(device_type=device_type, enabled=use_amp_inf)
+        with torch.no_grad(), amp_ctx:
+            model_module = model.module if isinstance(model, DDP) else model
+            predicted_batch = model_module(src_select.to(device))
+            if use_bce_dice: predicted_batch = torch.sigmoid(predicted_batch)
+        pred_select = predicted_batch.cpu().float()
+    except Exception as e: logging.error(f"Val preview inference error (Step {global_step}): {e}"); model.train(); return
+    model.train()
+    src_denorm = denormalize(src_select)
+    if use_bce_dice:
+        pred_denorm = torch.clamp(pred_select, 0, 1)
+        dst_denorm = torch.clamp(denormalize(dst_select), 0, 1)
+    else:
+        pred_denorm = denormalize(pred_select)
+        dst_denorm = denormalize(dst_select)
+    if src_denorm is None or pred_denorm is None or dst_denorm is None: return
+    combined = [item for i in range(num_samples) for item in [src_denorm[i], dst_denorm[i], pred_denorm[i]]]
+    if not combined: return
+    try: grid_tensor = torch.stack(combined); grid = make_grid(grid_tensor, nrow=3, padding=2, normalize=False)
+    except Exception as e: logging.error(f"Val preview grid error: {e}"); return
+    try: img_pil = T.functional.to_pil_image(grid)
+    except Exception as e: logging.error(f"Val preview PIL error: {e}"); return
+    preview_filename = os.path.join(output_dir, "val_preview.jpg")
+    try:
+        tmp_filename = preview_filename + ".tmp"
+        img_pil.save(tmp_filename, "JPEG", quality=90)
+        os.replace(tmp_filename, preview_filename)
+        logging.debug(f"Saved val preview ({num_samples} samples) E{current_epoch+1} S{global_step}")
+    except Exception as e: logging.error(f"Failed to save val preview: {e}")
+
+def capture_val_preview_batch(config, standard_transform):
+    """Capture a fixed batch from the validation dataset for previews."""
+    if not is_main_process(): return None, None
+    if not config.data.val_src_dir or not config.data.val_dst_dir: return None, None
+    num_preview_samples = 3
+    try:
+        val_preview_dataset = AugmentedImagePairSlicingDataset(
+            config.data.val_src_dir, config.data.val_dst_dir, config.data.resolution,
+            config.data.overlap_factor, None, None, None, standard_transform)
+        if len(val_preview_dataset) == 0: return None, None
+        num_to_load = min(num_preview_samples, len(val_preview_dataset))
+        loader = DataLoader(val_preview_dataset, batch_size=num_to_load, shuffle=True, num_workers=0, collate_fn=collate_skip_none)
+        batch_data = next(iter(loader))
+        if batch_data is None: return None, None
+        fixed_src, fixed_dst = batch_data
+        if fixed_src is not None and fixed_dst is not None and fixed_src.size(0) > 0:
+            return fixed_src.cpu(), fixed_dst.cpu()
+        return None, None
+    except Exception as e: logging.error(f"Val preview capture error: {e}"); return None, None
 
 # --- Signal Handler ---
 shutdown_requested = False
@@ -766,6 +876,20 @@ def train(config):
         dataloader_iter = cycle(dataloader)
     except Exception as e: logging.error(f"FATAL: Dataset/DataLoader init failed: {e}. Exiting.", exc_info=True); cleanup_ddp(); return
 
+    # --- Validation Dataset & DataLoader ---
+    val_dataloader = None
+    has_val = config.data.val_src_dir and config.data.val_dst_dir
+    if has_val and is_main_process():
+        try:
+            val_dataset = AugmentedImagePairSlicingDataset(
+                config.data.val_src_dir, config.data.val_dst_dir, config.data.resolution,
+                config.data.overlap_factor, None, None, None, standard_transform)
+            logging.info(f"Validation Dataset Size: {len(val_dataset)} slices.")
+            val_dataloader = DataLoader(val_dataset, batch_size=config.training.batch_size, shuffle=False, num_workers=0, collate_fn=collate_skip_none, drop_last=False)
+        except Exception as e:
+            logging.warning(f"Validation dataset init failed: {e}. Validation disabled.")
+            val_dataloader = None
+
     # --- Model & Loss Setup ---
     model, loss_fn_lpips = None, None
     eff_size = config.model.model_size_dims; use_lpips = False; use_bce_dice = False; def_h, bump_h = 64, 96
@@ -824,10 +948,6 @@ def train(config):
         if is_main_process(): logging.info(f"Optimizer: AdamW | AMP Enabled: {use_amp_eff}")
         criterion_l1 = nn.L1Loss()
         criterion_bce = nn.BCEWithLogitsLoss() if use_bce_dice else None
-        def dice_loss(pred, target, smooth=1.0):
-            pred_flat = pred.reshape(-1); target_flat = target.reshape(-1)
-            intersection = (pred_flat * target_flat).sum()
-            return 1.0 - (2.0 * intersection + smooth) / (pred_flat.sum() + target_flat.sum() + smooth)
         latest_ckpt = os.path.join(config.data.output_dir, 'tunet_latest.pth')
         exists_list = [False];
         if is_main_process(): exists_list[0] = os.path.exists(latest_ckpt)
@@ -894,14 +1014,19 @@ def train(config):
     max_steps = getattr(config.training, 'max_steps', 0)
     global_step = start_step; iter_epoch = config.training.iterations_per_epoch
     fixed_src, fixed_dst, fixed_mask = None, None, None; preview_count = 0
+    val_fixed_src, val_fixed_dst = None, None
     ep_l1, ep_lpips, ep_steps = 0.0, 0.0, 0
     batch_times = []
+    val_interval = config.logging.val_interval
 
     # --- Capture Initial Preview Batch ---
     preview_interval = config.logging.preview_batch_interval
     if is_main_process() and preview_interval > 0:
         fixed_src, fixed_dst, fixed_mask = capture_preview_batch(config, src_transforms, dst_transforms, shared_transforms, standard_transform, use_masks=use_masks)
         if fixed_src is None: logging.warning("Initial preview batch capture failed.")
+        if has_val:
+            val_fixed_src, val_fixed_dst = capture_val_preview_batch(config, standard_transform)
+            if val_fixed_src is None: logging.warning("Initial val preview batch capture failed.")
 
     # --- Main Training Loop ---
     model.train()
@@ -1090,6 +1215,17 @@ def train(config):
                           if hasattr(config.saving, 'keep_last_checkpoints') and config.saving.keep_last_checkpoints >= 0:
                               prune_checkpoints(config.data.output_dir, config.saving.keep_last_checkpoints)
                  except Exception as e: logging.error(f"Checkpoint save failed @ Step {global_step}: {e}", exc_info=True)
+
+            # --- Validation ---
+            run_val_now = False
+            if is_main_process() and val_dataloader is not None:
+                if epoch_end_now: run_val_now = True
+                elif val_interval > 0 and global_step % val_interval == 0: run_val_now = True
+            if run_val_now:
+                run_validation(model, val_dataloader, device, device_type, use_amp_eff, use_lpips, loss_fn_lpips, use_bce_dice, criterion_l1, current_ep_idx, global_step, lambda_lpips=config.training.lambda_lpips)
+                if val_fixed_src is not None:
+                    save_val_previews(model, val_fixed_src, val_fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, use_bce_dice=use_bce_dice, use_amp=use_amp_eff)
+
         # --- End of Training Loop ---
         training_successful = True
     except KeyboardInterrupt:
@@ -1252,6 +1388,10 @@ if __name__ == "__main__":
     config.mask.use_mask_loss = getattr(config.mask, 'use_mask_loss', False)
     config.mask.mask_weight = getattr(config.mask, 'mask_weight', 10.0)
     config.mask.use_mask_input = getattr(config.mask, 'use_mask_input', False)
+    # Validation defaults
+    config.data.val_src_dir = getattr(config.data, 'val_src_dir', None)
+    config.data.val_dst_dir = getattr(config.data, 'val_dst_dir', None)
+    config.logging.val_interval = getattr(config.logging, 'val_interval', 0)
     # Final Value Checks
     if not missing:
         try: # Combine checks for brevity
@@ -1278,6 +1418,10 @@ if __name__ == "__main__":
                 if not config.data.mask_dir: error_msgs.append("mask_dir required when mask features enabled")
                 elif not os.path.isdir(config.data.mask_dir): error_msgs.append(f"data.mask_dir missing: {config.data.mask_dir}")
             if config.mask.mask_weight < 1.0: error_msgs.append("mask.mask_weight must be >= 1.0")
+            # Validation dir checks
+            if config.data.val_src_dir and not os.path.isdir(config.data.val_src_dir): error_msgs.append(f"data.val_src_dir missing: {config.data.val_src_dir}")
+            if config.data.val_dst_dir and not os.path.isdir(config.data.val_dst_dir): error_msgs.append(f"data.val_dst_dir missing: {config.data.val_dst_dir}")
+            if bool(config.data.val_src_dir) != bool(config.data.val_dst_dir): error_msgs.append("val_src_dir and val_dst_dir must both be set or both be null")
         except Exception as e: error_msgs.append(f"Validation error: {e}")
     # Abort on Errors
     if error_msgs or missing:

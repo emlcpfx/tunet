@@ -8,6 +8,8 @@ data:
   resolution: 512                     # 512 or 1024
   overlap_factor: 0.25                # default 0.25, range 0.0 to 1.0
   mask_dir: null                       # Optional: directory with grayscale mask images
+  val_src_dir: null                    # Optional: validation source directory
+  val_dst_dir: null                    # Optional: validation destination directory
 
 # --- Mask Settings ---
 mask:
@@ -92,6 +94,7 @@ logging:
   log_interval: 5                   # Log training status every N batches
   preview_batch_interval: 35        # Save preview image every N batches (0=disable)
   preview_refresh_rate: 5           # Refresh preview images every N preview saves (0=disable)
+  val_interval: 0                  # Run validation every N steps (0=epoch-end only)
 
 saving:
   keep_last_checkpoints: 4           # Number of checkpoints to keep (excluding latest)

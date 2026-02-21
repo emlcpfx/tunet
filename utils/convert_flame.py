@@ -1,9 +1,16 @@
 # converter.py (Revised for Cross-Platform support - Minimal Change)
 
 import os
+import sys
 import argparse
 import json
 import logging
+
+# Force UTF-8 stdout/stderr on Windows so PyTorch's emoji prints don't crash
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import torch
 import torch.nn as nn
 import torch.onnx
@@ -118,18 +125,22 @@ class UNet(nn.Module):
 
 # --- Normalization Wrapper ---
 class NormalizedUNet(nn.Module):
-    # ... definition remains the same ...
-    def __init__(self, unet_model):
+    def __init__(self, unet_model, use_sigmoid=False):
         super().__init__()
         self.unet = unet_model
+        self.use_sigmoid = use_sigmoid
         self.register_buffer('mean', torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1))
         self.register_buffer('std', torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1))
     def forward(self, x):
         normalized_x = (x - self.mean) / self.std
         unet_output = self.unet(normalized_x)
-        denormalized_output = (unet_output * self.std) + self.mean
-        clamped_output = torch.clamp(denormalized_output, 0.0, 1.0)
-        return clamped_output
+        if self.use_sigmoid:
+            # BCE+Dice models output logits — apply sigmoid to get [0,1]
+            return torch.sigmoid(unet_output)
+        else:
+            # L1/LPIPS models output in [-1,1] — linear denormalize to [0,1]
+            denormalized_output = (unet_output * self.std) + self.mean
+            return torch.clamp(denormalized_output, 0.0, 1.0)
 
 # --- Modified load_model_for_export ---
 def load_model_for_export(checkpoint_path, device):
@@ -230,8 +241,9 @@ def load_model_for_export(checkpoint_path, device):
         raise RuntimeError("Could not load model state_dict.") from e
 
     # --- Instantiate the WRAPPER ---
-    logging.info("Wrapping UNet model with Normalization layer...")
-    wrapped_model = NormalizedUNet(base_model)
+    use_sigmoid = (loss_mode == 'bce+dice')
+    logging.info(f"Wrapping UNet model with Normalization layer (use_sigmoid={use_sigmoid})...")
+    wrapped_model = NormalizedUNet(base_model, use_sigmoid=use_sigmoid)
     logging.info(f"Moving wrapped model to device: {device}")
     wrapped_model.to(device)
     wrapped_model.eval()
@@ -295,7 +307,6 @@ def convert(args):
         generate_flame_json( onnx_base_name=json_base_name, resolution=resolution, output_json_path=output_json_path, model_name=args.model_name, model_desc=args.model_desc )
         logging.info("Conversion process finished successfully.")
         return 0
-    except torch.onnx.errors.CheckerError as ce: logging.error(f"ONNX CheckerError during export: {ce}\nModel may be invalid.", exc_info=True); return 1
     except Exception as e:
         logging.error(f"ONNX export or JSON generation failed: {e}", exc_info=True)
         # --- Attempt to clean up potentially incomplete ONNX file ---
@@ -314,7 +325,7 @@ if __name__ == "__main__":
     parser.add_argument('--output_onnx', type=str, default=None, help='Path to save the output ONNX model (.onnx). Defaults to same name/dir.')
     parser.add_argument('--output_json', type=str, default=None, help='Path to save the Flame JSON sidecar file (.json). Defaults to same name/dir.')
     parser.add_argument('--output_dir', type=str, default=None, help='Optional directory to save outputs if specific paths not given.')
-    parser.add_argument('--opset', type=int, default=14, help='ONNX opset version. Default: 14')
+    parser.add_argument('--opset', type=int, default=18, help='ONNX opset version. Default: 18')
     parser.add_argument('--use_gpu', action='store_true', help='Use GPU for loading model if available.')
     parser.add_argument('--dynamic_batch', action='store_true', help='Enable dynamic batch size in the exported ONNX model.')
     parser.add_argument('--model_name', type=str, default=None, help='Name for the model in Flame UI (defaults to ONNX filename base).')
