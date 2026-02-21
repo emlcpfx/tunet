@@ -75,6 +75,7 @@ class TrainingMonitor:
         self.l1_losses = deque(maxlen=self.max_points)
         self.lpips_losses = deque(maxlen=self.max_points)
         self.has_lpips = False
+        self.loss_label = 'Loss'  # Updated from first parsed log line
 
         # Timing data
         self.epoch_start_times = {}  # epoch_num -> first_seen_time
@@ -241,7 +242,7 @@ class TrainingMonitor:
         self.ax = self.fig.add_subplot(111)
         self.ax.set_facecolor(COLORS['bg_light'])
         self.ax.set_xlabel('Epoch', color=COLORS['text'], fontsize=10)
-        self.ax.set_ylabel('L1 Loss', color=COLORS['l1'], fontsize=10)
+        self.ax.set_ylabel('Loss', color=COLORS['l1'], fontsize=10)
         self.ax.tick_params(axis='x', colors=COLORS['text'], labelsize=9)
         self.ax.tick_params(axis='y', colors=COLORS['l1'], labelsize=9)
         for spine in self.ax.spines.values():
@@ -619,7 +620,8 @@ class TrainingMonitor:
             pass
 
     def parse_log_content(self, content):
-        pattern = r'Epoch\[(\d+)\]\s*Step\[(\d+)\].*?L1:([\d.]+)'
+        # Matches both L1 and BCE+Dice loss labels from train.py log format
+        pattern = r'Epoch\[(\d+)\]\s*Step\[(\d+)\].*?\b(L1|BCE\+Dice):([\d.]+)'
         lpips_pattern = r'LPIPS:([\d.]+)'
         time_pattern = r'T/Step:([\d.]+)s'
 
@@ -631,7 +633,15 @@ class TrainingMonitor:
             if match:
                 epoch = int(match.group(1))
                 step = int(match.group(2))
-                l1_loss = float(match.group(3))
+                detected_label = match.group(3)   # 'L1' or 'BCE+Dice'
+                l1_loss = float(match.group(4))
+
+                # Update displayed loss label on first data point
+                if not self.steps and detected_label != self.loss_label:
+                    self.loss_label = detected_label
+                    if HAS_MATPLOTLIB:
+                        self.ax.set_ylabel(f'{detected_label} Loss',
+                                           color=COLORS['l1'], fontsize=10)
 
                 lpips_match = re.search(lpips_pattern, line)
                 lpips_loss = float(lpips_match.group(1)) if lpips_match else None
@@ -693,7 +703,7 @@ class TrainingMonitor:
 
     def _update_legend(self):
         lines = [self.l1_line]
-        labels = ['L1 Loss']
+        labels = [f'{self.loss_label} Loss']
         if self.has_lpips:
             lines.append(self.lpips_line)
             labels.append('LPIPS Loss')
@@ -850,6 +860,7 @@ class TrainingMonitor:
         self.l1_losses.clear()
         self.lpips_losses.clear()
         self.has_lpips = False
+        self.loss_label = 'Loss'
         self.last_position = 0
         self.best_l1 = float('inf')
         self.best_l1_epoch = 0
