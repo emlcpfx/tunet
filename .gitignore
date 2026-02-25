@@ -34,3 +34,10 @@ Thumbs.db
 Miniconda3-latest-Linux-x86_64.sh
 inference_gui_settings.json
 inference_gui_settings.json
+
+build/
+build/tunet/
+dist/
+build/tunet/Analysis-00.toc
+
+*.zip
