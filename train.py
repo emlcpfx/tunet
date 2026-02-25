@@ -1012,6 +1012,12 @@ def train(config):
         criterion_bce = nn.BCEWithLogitsLoss() if use_bce_dice else None
         ckpt_prefix = os.path.basename(os.path.normpath(config.data.output_dir))
         latest_ckpt = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth')
+        # Fallback to old naming convention if new name not found
+        if is_main_process() and not os.path.exists(latest_ckpt):
+            legacy_ckpt = os.path.join(config.data.output_dir, 'tunet_latest.pth')
+            if os.path.exists(legacy_ckpt):
+                logging.info(f"Found legacy checkpoint: tunet_latest.pth (new name not found)")
+                latest_ckpt = legacy_ckpt
         exists_list = [False];
         if is_main_process(): exists_list[0] = os.path.exists(latest_ckpt)
         if world_size > 1: dist.broadcast_object_list(exists_list, src=0)
@@ -1350,9 +1356,11 @@ def prune_checkpoints(output_dir, keep_last):
     if keep_last == 0: logging.info("Pruning all epoch checkpoints (keep=0).") # Keep INFO for this case
     try:
         dir_prefix = os.path.basename(os.path.normpath(output_dir))
-        ckpt_files_info = []; pattern = os.path.join(output_dir, f'{dir_prefix}_tunet_epoch_*.pth'); epoch_files = glob.glob(pattern)
+        ckpt_files_info = []; epoch_files = glob.glob(os.path.join(output_dir, f'{dir_prefix}_tunet_epoch_*.pth'))
+        epoch_files += glob.glob(os.path.join(output_dir, 'tunet_epoch_*.pth'))  # legacy fallback
+        epoch_files = list(set(epoch_files))  # deduplicate
         for f_path in epoch_files:
-            basename = os.path.basename(f_path); match = re.match(r".+_tunet_epoch_(\d+)\.pth", basename)
+            basename = os.path.basename(f_path); match = re.match(r"(?:.+_)?tunet_epoch_(\d+)\.pth", basename)
             if match:
                 epoch_num = int(match.group(1))
                 try: mtime = os.path.getmtime(f_path); ckpt_files_info.append({'path': f_path, 'epoch': epoch_num, 'mtime': mtime})
