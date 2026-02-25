@@ -948,7 +948,8 @@ def train(config):
         if is_main_process(): logging.info(f"Optimizer: AdamW | AMP Enabled: {use_amp_eff}")
         criterion_l1 = nn.L1Loss()
         criterion_bce = nn.BCEWithLogitsLoss() if use_bce_dice else None
-        latest_ckpt = os.path.join(config.data.output_dir, 'tunet_latest.pth')
+        ckpt_prefix = os.path.basename(os.path.normpath(config.data.output_dir))
+        latest_ckpt = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth')
         exists_list = [False];
         if is_main_process(): exists_list[0] = os.path.exists(latest_ckpt)
         if world_size > 1: dist.broadcast_object_list(exists_list, src=0)
@@ -1198,8 +1199,8 @@ def train(config):
             save_interval = config.saving.save_iterations_interval; save_now = (save_interval > 0 and global_step % save_interval == 0)
             epoch_end_now = (global_step % iter_epoch == 0) and global_step > 0
             if is_main_process() and (save_now or epoch_end_now):
-                 ckpt_ep = global_step // iter_epoch; ep_ckpt_path = os.path.join(config.data.output_dir, f'tunet_epoch_{ckpt_ep:09d}.pth') if epoch_end_now else None
-                 latest_path = os.path.join(config.data.output_dir, 'tunet_latest.pth'); cfg_dict = config_to_dict(config)
+                 ckpt_ep = global_step // iter_epoch; ep_ckpt_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_epoch_{ckpt_ep:09d}.pth') if epoch_end_now else None
+                 latest_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth'); cfg_dict = config_to_dict(config)
                  m_state = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
                  # Save scaler state only if AMP was effectively used
                  scaler_state = scaler.state_dict() if use_amp_eff else None
@@ -1239,7 +1240,7 @@ def train(config):
         if (shutdown_requested or max_steps_reached) and is_main_process():
             logging.info(f"Performing final checkpoint save (State @ Step {final_global_step})...")
             try:
-                 final_ep = final_global_step // iter_epoch; latest_path = os.path.join(config.data.output_dir, 'tunet_latest.pth'); cfg_dict = config_to_dict(config)
+                 final_ep = final_global_step // iter_epoch; latest_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth'); cfg_dict = config_to_dict(config)
                  if model and optimizer and scaler:
                      m_state = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
                      scaler_state = scaler.state_dict() if use_amp_eff else None # Check effective use
@@ -1284,9 +1285,10 @@ def prune_checkpoints(output_dir, keep_last):
     if keep_last < 0: logging.debug(f"Pruning disabled (keep={keep_last})."); return
     if keep_last == 0: logging.info("Pruning all epoch checkpoints (keep=0).") # Keep INFO for this case
     try:
-        ckpt_files_info = []; pattern = os.path.join(output_dir, 'tunet_epoch_*.pth'); epoch_files = glob.glob(pattern)
+        dir_prefix = os.path.basename(os.path.normpath(output_dir))
+        ckpt_files_info = []; pattern = os.path.join(output_dir, f'{dir_prefix}_tunet_epoch_*.pth'); epoch_files = glob.glob(pattern)
         for f_path in epoch_files:
-            basename = os.path.basename(f_path); match = re.match(r"tunet_epoch_(\d+)\.pth", basename)
+            basename = os.path.basename(f_path); match = re.match(r".+_tunet_epoch_(\d+)\.pth", basename)
             if match:
                 epoch_num = int(match.group(1))
                 try: mtime = os.path.getmtime(f_path); ckpt_files_info.append({'path': f_path, 'epoch': epoch_num, 'mtime': mtime})
