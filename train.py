@@ -552,6 +552,40 @@ class AugmentedImagePairSlicingDataset(Dataset):
             return src_tensor, dst_tensor
         except Exception as e: logging.error(f"Item {idx}: Transform error ({os.path.basename(src_path)}): {e}", exc_info=False); return None
 
+# --- Source-Only Dataset (for val preview without dst) ---
+class SourceOnlySlicingDataset(Dataset):
+    """Loads source images only. For validation preview when no dst is available."""
+    def __init__(self, src_dir, resolution, overlap_factor=0.0, final_transform=None):
+        self.src_dir = os.path.abspath(src_dir); self.resolution = resolution; self.final_transform = final_transform
+        self.slice_info = []
+        overlap_pixels = int(resolution * overlap_factor); self.stride = max(1, resolution - overlap_pixels)
+        src_files = sorted(glob.glob(os.path.join(self.src_dir, '*.*')))
+        for src_path in src_files:
+            try:
+                img = load_image_any_format(src_path); w, h = img.size; img.close()
+                if w < resolution or h < resolution: continue
+                y_coords = list(range(0, max(0, h - resolution) + 1, self.stride)); x_coords = list(range(0, max(0, w - resolution) + 1, self.stride))
+                if (h > resolution) and ((h - resolution) % self.stride != 0): y_coords.append(h - resolution)
+                if (w > resolution) and ((w - resolution) % self.stride != 0): x_coords.append(w - resolution)
+                for y in sorted(set(y_coords)):
+                    if not (0 <= y <= h - resolution): continue
+                    for x in sorted(set(x_coords)):
+                        if not (0 <= x <= w - resolution): continue
+                        self.slice_info.append({'src_path': src_path, 'crop_box': (x, y, x + resolution, y + resolution)})
+            except Exception: continue
+        if not self.slice_info: raise ValueError(f"No valid slices from source files in {src_dir}")
+        logging.info(f"Val preview dataset (src-only): {len(self.slice_info)} slices from {src_dir}")
+
+    def __len__(self): return len(self.slice_info)
+    def __getitem__(self, idx):
+        info = self.slice_info[idx]
+        try:
+            src_img = load_image_any_format(info['src_path']); src_slice = src_img.crop(info['crop_box']); src_img.close()
+            if self.final_transform: src_tensor = self.final_transform(src_slice)
+            else: src_np = np.array(src_slice); src_tensor = torch.from_numpy(src_np.transpose(2, 0, 1)).float() / 255.0; norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist()); src_tensor = norm(src_tensor)
+            return src_tensor
+        except Exception as e: logging.error(f"SrcOnly item {idx} error: {e}"); return None
+
 # --- Helper Functions ---
 NORM_MEAN = torch.tensor([0.5, 0.5, 0.5]); NORM_STD = torch.tensor([0.5, 0.5, 0.5])
 def denormalize(tensor):
@@ -703,11 +737,13 @@ def run_validation(model, val_dataloader, device, device_type, use_amp, use_lpip
     return avg_l1, avg_lp
 
 def save_val_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, use_bce_dice=False, use_amp=False):
-    """Save validation preview grid to val_preview.jpg."""
-    if not is_main_process() or fixed_src_batch is None or fixed_dst_batch is None or fixed_src_batch.nelement() == 0: return
+    """Save validation preview grid to val_preview.jpg. Works with or without dst."""
+    if not is_main_process() or fixed_src_batch is None or fixed_src_batch.nelement() == 0: return
+    has_dst = fixed_dst_batch is not None
     num_samples = min(fixed_src_batch.size(0), 3)
     if num_samples == 0: return
-    src_select, dst_select = fixed_src_batch[:num_samples].cpu(), fixed_dst_batch[:num_samples].cpu()
+    src_select = fixed_src_batch[:num_samples].cpu()
+    dst_select = fixed_dst_batch[:num_samples].cpu() if has_dst else None
     model.eval(); device_type = device.type
     use_amp_inf = use_amp and device_type == 'cuda'
     try:
@@ -722,14 +758,19 @@ def save_val_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, curre
     src_denorm = denormalize(src_select)
     if use_bce_dice:
         pred_denorm = torch.clamp(pred_select, 0, 1)
-        dst_denorm = torch.clamp(denormalize(dst_select), 0, 1)
+        dst_denorm = torch.clamp(denormalize(dst_select), 0, 1) if has_dst else None
     else:
         pred_denorm = denormalize(pred_select)
-        dst_denorm = denormalize(dst_select)
-    if src_denorm is None or pred_denorm is None or dst_denorm is None: return
-    combined = [item for i in range(num_samples) for item in [src_denorm[i], dst_denorm[i], pred_denorm[i]]]
+        dst_denorm = denormalize(dst_select) if has_dst else None
+    if src_denorm is None or pred_denorm is None: return
+    if has_dst:
+        combined = [item for i in range(num_samples) for item in [src_denorm[i], dst_denorm[i], pred_denorm[i]]]
+        nrow = 3
+    else:
+        combined = [item for i in range(num_samples) for item in [src_denorm[i], pred_denorm[i]]]
+        nrow = 2
     if not combined: return
-    try: grid_tensor = torch.stack(combined); grid = make_grid(grid_tensor, nrow=3, padding=2, normalize=False)
+    try: grid_tensor = torch.stack(combined); grid = make_grid(grid_tensor, nrow=nrow, padding=2, normalize=False)
     except Exception as e: logging.error(f"Val preview grid error: {e}"); return
     try: img_pil = T.functional.to_pil_image(grid)
     except Exception as e: logging.error(f"Val preview PIL error: {e}"); return
@@ -742,23 +783,35 @@ def save_val_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, curre
     except Exception as e: logging.error(f"Failed to save val preview: {e}")
 
 def capture_val_preview_batch(config, standard_transform):
-    """Capture a fixed batch from the validation dataset for previews."""
+    """Capture a fixed batch from the validation dataset for previews. Works with src-only or src+dst."""
     if not is_main_process(): return None, None
-    if not config.data.val_src_dir or not config.data.val_dst_dir: return None, None
+    if not config.data.val_src_dir: return None, None
     num_preview_samples = 3
     try:
-        val_preview_dataset = AugmentedImagePairSlicingDataset(
-            config.data.val_src_dir, config.data.val_dst_dir, config.data.resolution,
-            config.data.overlap_factor, None, None, None, standard_transform)
-        if len(val_preview_dataset) == 0: return None, None
-        num_to_load = min(num_preview_samples, len(val_preview_dataset))
-        loader = DataLoader(val_preview_dataset, batch_size=num_to_load, shuffle=True, num_workers=0, collate_fn=collate_skip_none)
-        batch_data = next(iter(loader))
-        if batch_data is None: return None, None
-        fixed_src, fixed_dst = batch_data
-        if fixed_src is not None and fixed_dst is not None and fixed_src.size(0) > 0:
-            return fixed_src.cpu(), fixed_dst.cpu()
-        return None, None
+        if config.data.val_dst_dir:
+            val_preview_dataset = AugmentedImagePairSlicingDataset(
+                config.data.val_src_dir, config.data.val_dst_dir, config.data.resolution,
+                config.data.overlap_factor, None, None, None, standard_transform)
+            if len(val_preview_dataset) == 0: return None, None
+            num_to_load = min(num_preview_samples, len(val_preview_dataset))
+            loader = DataLoader(val_preview_dataset, batch_size=num_to_load, shuffle=True, num_workers=0, collate_fn=collate_skip_none)
+            batch_data = next(iter(loader))
+            if batch_data is None: return None, None
+            fixed_src, fixed_dst = batch_data
+            if fixed_src is not None and fixed_dst is not None and fixed_src.size(0) > 0:
+                return fixed_src.cpu(), fixed_dst.cpu()
+            return None, None
+        else:
+            val_preview_dataset = SourceOnlySlicingDataset(
+                config.data.val_src_dir, config.data.resolution,
+                config.data.overlap_factor, standard_transform)
+            if len(val_preview_dataset) == 0: return None, None
+            num_to_load = min(num_preview_samples, len(val_preview_dataset))
+            loader = DataLoader(val_preview_dataset, batch_size=num_to_load, shuffle=True, num_workers=0, collate_fn=collate_skip_none)
+            fixed_src = next(iter(loader))
+            if fixed_src is not None and fixed_src.size(0) > 0:
+                return fixed_src.cpu(), None
+            return None, None
     except Exception as e: logging.error(f"Val preview capture error: {e}"); return None, None
 
 # --- Signal Handler ---
@@ -878,8 +931,9 @@ def train(config):
 
     # --- Validation Dataset & DataLoader ---
     val_dataloader = None
-    has_val = config.data.val_src_dir and config.data.val_dst_dir
-    if has_val and is_main_process():
+    has_val_preview = bool(config.data.val_src_dir)
+    has_val_loss = bool(config.data.val_src_dir and config.data.val_dst_dir)
+    if has_val_loss and is_main_process():
         try:
             val_dataset = AugmentedImagePairSlicingDataset(
                 config.data.val_src_dir, config.data.val_dst_dir, config.data.resolution,
@@ -1025,7 +1079,7 @@ def train(config):
     if is_main_process() and preview_interval > 0:
         fixed_src, fixed_dst, fixed_mask = capture_preview_batch(config, src_transforms, dst_transforms, shared_transforms, standard_transform, use_masks=use_masks)
         if fixed_src is None: logging.warning("Initial preview batch capture failed.")
-        if has_val:
+        if has_val_preview:
             val_fixed_src, val_fixed_dst = capture_val_preview_batch(config, standard_transform)
             if val_fixed_src is None: logging.warning("Initial val preview batch capture failed.")
 
@@ -1218,14 +1272,16 @@ def train(config):
                  except Exception as e: logging.error(f"Checkpoint save failed @ Step {global_step}: {e}", exc_info=True)
 
             # --- Validation ---
-            run_val_now = False
+            run_val_loss_now = False
             if is_main_process() and val_dataloader is not None:
-                if epoch_end_now: run_val_now = True
-                elif val_interval > 0 and global_step % val_interval == 0: run_val_now = True
-            if run_val_now:
+                if epoch_end_now: run_val_loss_now = True
+                elif val_interval > 0 and global_step % val_interval == 0: run_val_loss_now = True
+            if run_val_loss_now:
                 run_validation(model, val_dataloader, device, device_type, use_amp_eff, use_lpips, loss_fn_lpips, use_bce_dice, criterion_l1, current_ep_idx, global_step, lambda_lpips=config.training.lambda_lpips)
-                if val_fixed_src is not None:
-                    save_val_previews(model, val_fixed_src, val_fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, use_bce_dice=use_bce_dice, use_amp=use_amp_eff)
+            # Val preview runs on its own schedule (epoch end or val_interval), even without dst
+            run_val_preview_now = is_main_process() and has_val_preview and val_fixed_src is not None and (epoch_end_now or (val_interval > 0 and global_step % val_interval == 0))
+            if run_val_preview_now:
+                save_val_previews(model, val_fixed_src, val_fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, use_bce_dice=use_bce_dice, use_amp=use_amp_eff)
 
         # --- End of Training Loop ---
         training_successful = True
@@ -1423,7 +1479,7 @@ if __name__ == "__main__":
             # Validation dir checks
             if config.data.val_src_dir and not os.path.isdir(config.data.val_src_dir): error_msgs.append(f"data.val_src_dir missing: {config.data.val_src_dir}")
             if config.data.val_dst_dir and not os.path.isdir(config.data.val_dst_dir): error_msgs.append(f"data.val_dst_dir missing: {config.data.val_dst_dir}")
-            if bool(config.data.val_src_dir) != bool(config.data.val_dst_dir): error_msgs.append("val_src_dir and val_dst_dir must both be set or both be null")
+            # val_src_dir alone enables preview-only validation; both enables preview + loss
         except Exception as e: error_msgs.append(f"Validation error: {e}")
     # Abort on Errors
     if error_msgs or missing:
