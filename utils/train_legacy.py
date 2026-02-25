@@ -184,8 +184,9 @@ def dict_to_namespace(d):
 
 # --- Checkpoint Helper Functions ---
 #
-CHECKPOINT_FILENAME_PATTERN = "tunet_{epoch:09d}.pth"
-LATEST_CHECKPOINT_FILENAME = "tunet_latest.pth"
+def _ckpt_prefix(output_dir): return os.path.basename(os.path.normpath(output_dir))
+CHECKPOINT_FILENAME_PATTERN = "{prefix}_tunet_{epoch:09d}.pth"
+LATEST_CHECKPOINT_FILENAME_FMT = "{prefix}_tunet_latest.pth"
 def save_checkpoint(model, optimizer, scaler, config, global_step, current_epoch, output_dir):
     if not is_main_process(): return
     # Ensure config is serializable (SimpleNamespace might not be directly)
@@ -207,9 +208,10 @@ def save_checkpoint(model, optimizer, scaler, config, global_step, current_epoch
         'model_state_dict': model_state_to_save, 'optimizer_state_dict': optimizer.state_dict(),
         'scaler_state_dict': scaler.state_dict() if config.training.use_amp else None,
         'config': config_to_save } # Save the converted dict
-    filename = CHECKPOINT_FILENAME_PATTERN.format(epoch=current_epoch + 1) # Save based on completed epoch
+    prefix = _ckpt_prefix(output_dir)
+    filename = CHECKPOINT_FILENAME_PATTERN.format(prefix=prefix, epoch=current_epoch + 1) # Save based on completed epoch
     checkpoint_path = os.path.join(output_dir, filename)
-    latest_path = os.path.join(output_dir, LATEST_CHECKPOINT_FILENAME)
+    latest_path = os.path.join(output_dir, LATEST_CHECKPOINT_FILENAME_FMT.format(prefix=prefix))
     try:
         torch.save(checkpoint, checkpoint_path)
         logging.info(f"Checkpoint saved: {checkpoint_path}")
@@ -220,12 +222,14 @@ def save_checkpoint(model, optimizer, scaler, config, global_step, current_epoch
 def manage_checkpoints(output_dir, keep_last):
     if not is_main_process() or keep_last <= 0: return
     try:
-        checkpoint_files = glob(os.path.join(output_dir, "tunet_*.pth"))
+        prefix = _ckpt_prefix(output_dir)
+        checkpoint_files = glob(os.path.join(output_dir, f"{prefix}_tunet_*.pth"))
         numbered_checkpoints = []
+        latest_filename = LATEST_CHECKPOINT_FILENAME_FMT.format(prefix=prefix)
         for f in checkpoint_files:
             basename = os.path.basename(f)
-            if basename == LATEST_CHECKPOINT_FILENAME: continue
-            match = re.match(r"tunet_(\d+)\.pth", basename)
+            if basename == latest_filename: continue
+            match = re.match(r".+_tunet_(\d+)\.pth", basename)
             if match:
                 epoch_num = int(match.group(1))
                 # Use file modification time as a secondary sort key for robustness
@@ -490,7 +494,7 @@ def train(config):
 
     # --- Resume Logic ---
     start_iteration = 0
-    latest_checkpoint_path = os.path.join(config.data.output_dir, LATEST_CHECKPOINT_FILENAME)
+    latest_checkpoint_path = os.path.join(config.data.output_dir, LATEST_CHECKPOINT_FILENAME_FMT.format(prefix=_ckpt_prefix(config.data.output_dir)))
     resume_flag = [False] * 1 # Use list for broadcast
     if is_main_process(): resume_flag[0] = os.path.exists(latest_checkpoint_path)
     if world_size > 1: dist.broadcast_object_list(resume_flag, src=0) # Broadcast existence status
