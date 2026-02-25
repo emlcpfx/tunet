@@ -782,36 +782,44 @@ def save_val_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, curre
         logging.debug(f"Saved val preview ({num_samples} samples) E{current_epoch+1} S{global_step}")
     except Exception as e: logging.error(f"Failed to save val preview: {e}")
 
+def _capture_val_src_only(config, standard_transform, num_preview_samples=3):
+    """Fallback: capture val preview from src-only dataset."""
+    val_preview_dataset = SourceOnlySlicingDataset(
+        config.data.val_src_dir, config.data.resolution,
+        config.data.overlap_factor, standard_transform)
+    if len(val_preview_dataset) == 0: return None, None
+    num_to_load = min(num_preview_samples, len(val_preview_dataset))
+    loader = DataLoader(val_preview_dataset, batch_size=num_to_load, shuffle=True, num_workers=0, collate_fn=collate_skip_none)
+    fixed_src = next(iter(loader))
+    if fixed_src is not None and fixed_src.size(0) > 0:
+        return fixed_src.cpu(), None
+    return None, None
+
 def capture_val_preview_batch(config, standard_transform):
-    """Capture a fixed batch from the validation dataset for previews. Works with src-only or src+dst."""
+    """Capture a fixed batch from the validation dataset for previews. Falls back to src-only if paired fails."""
     if not is_main_process(): return None, None
     if not config.data.val_src_dir: return None, None
     num_preview_samples = 3
     try:
         if config.data.val_dst_dir:
-            val_preview_dataset = AugmentedImagePairSlicingDataset(
-                config.data.val_src_dir, config.data.val_dst_dir, config.data.resolution,
-                config.data.overlap_factor, None, None, None, standard_transform)
-            if len(val_preview_dataset) == 0: return None, None
-            num_to_load = min(num_preview_samples, len(val_preview_dataset))
-            loader = DataLoader(val_preview_dataset, batch_size=num_to_load, shuffle=True, num_workers=0, collate_fn=collate_skip_none)
-            batch_data = next(iter(loader))
-            if batch_data is None: return None, None
-            fixed_src, fixed_dst = batch_data
-            if fixed_src is not None and fixed_dst is not None and fixed_src.size(0) > 0:
-                return fixed_src.cpu(), fixed_dst.cpu()
-            return None, None
+            try:
+                val_preview_dataset = AugmentedImagePairSlicingDataset(
+                    config.data.val_src_dir, config.data.val_dst_dir, config.data.resolution,
+                    config.data.overlap_factor, None, None, None, standard_transform)
+                if len(val_preview_dataset) > 0:
+                    num_to_load = min(num_preview_samples, len(val_preview_dataset))
+                    loader = DataLoader(val_preview_dataset, batch_size=num_to_load, shuffle=True, num_workers=0, collate_fn=collate_skip_none)
+                    batch_data = next(iter(loader))
+                    if batch_data is not None:
+                        fixed_src, fixed_dst = batch_data
+                        if fixed_src is not None and fixed_dst is not None and fixed_src.size(0) > 0:
+                            return fixed_src.cpu(), fixed_dst.cpu()
+            except Exception as e:
+                logging.info(f"Val paired dataset failed ({e}), falling back to src-only preview.")
+            # Fallback to src-only
+            return _capture_val_src_only(config, standard_transform, num_preview_samples)
         else:
-            val_preview_dataset = SourceOnlySlicingDataset(
-                config.data.val_src_dir, config.data.resolution,
-                config.data.overlap_factor, standard_transform)
-            if len(val_preview_dataset) == 0: return None, None
-            num_to_load = min(num_preview_samples, len(val_preview_dataset))
-            loader = DataLoader(val_preview_dataset, batch_size=num_to_load, shuffle=True, num_workers=0, collate_fn=collate_skip_none)
-            fixed_src = next(iter(loader))
-            if fixed_src is not None and fixed_src.size(0) > 0:
-                return fixed_src.cpu(), None
-            return None, None
+            return _capture_val_src_only(config, standard_transform, num_preview_samples)
     except Exception as e: logging.error(f"Val preview capture error: {e}"); return None, None
 
 # --- Signal Handler ---
