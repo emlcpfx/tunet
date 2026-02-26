@@ -184,7 +184,8 @@ def dict_to_namespace(d):
 
 # --- Checkpoint Helper Functions ---
 #
-def _ckpt_prefix(output_dir): return os.path.basename(os.path.normpath(output_dir))
+def _ckpt_prefix(output_dir, config=None):
+    return getattr(config, '_config_stem', None) or os.path.basename(os.path.normpath(output_dir))
 CHECKPOINT_FILENAME_PATTERN = "{prefix}_tunet_{epoch:09d}.pth"
 LATEST_CHECKPOINT_FILENAME_FMT = "{prefix}_tunet_latest.pth"
 def save_checkpoint(model, optimizer, scaler, config, global_step, current_epoch, output_dir):
@@ -208,7 +209,7 @@ def save_checkpoint(model, optimizer, scaler, config, global_step, current_epoch
         'model_state_dict': model_state_to_save, 'optimizer_state_dict': optimizer.state_dict(),
         'scaler_state_dict': scaler.state_dict() if config.training.use_amp else None,
         'config': config_to_save } # Save the converted dict
-    prefix = _ckpt_prefix(output_dir)
+    prefix = _ckpt_prefix(output_dir, config)
     filename = CHECKPOINT_FILENAME_PATTERN.format(prefix=prefix, epoch=current_epoch + 1) # Save based on completed epoch
     checkpoint_path = os.path.join(output_dir, filename)
     latest_path = os.path.join(output_dir, LATEST_CHECKPOINT_FILENAME_FMT.format(prefix=prefix))
@@ -219,10 +220,10 @@ def save_checkpoint(model, optimizer, scaler, config, global_step, current_epoch
         torch.save(checkpoint, latest_path) # Overwrite latest
     except Exception as e: logging.error(f"Failed to save checkpoint {checkpoint_path}: {e}")
 
-def manage_checkpoints(output_dir, keep_last):
+def manage_checkpoints(output_dir, keep_last, config=None):
     if not is_main_process() or keep_last <= 0: return
     try:
-        prefix = _ckpt_prefix(output_dir)
+        prefix = _ckpt_prefix(output_dir, config)
         checkpoint_files = glob(os.path.join(output_dir, f"{prefix}_tunet_*.pth"))
         numbered_checkpoints = []
         latest_filename = LATEST_CHECKPOINT_FILENAME_FMT.format(prefix=prefix)
@@ -494,7 +495,19 @@ def train(config):
 
     # --- Resume Logic ---
     start_iteration = 0
-    latest_checkpoint_path = os.path.join(config.data.output_dir, LATEST_CHECKPOINT_FILENAME_FMT.format(prefix=_ckpt_prefix(config.data.output_dir)))
+    prefix = _ckpt_prefix(config.data.output_dir, config)
+    latest_checkpoint_path = os.path.join(config.data.output_dir, LATEST_CHECKPOINT_FILENAME_FMT.format(prefix=prefix))
+    # Fallback chain: config_stem name → folder name → legacy tunet_
+    if is_main_process() and not os.path.exists(latest_checkpoint_path):
+        folder_prefix = os.path.basename(os.path.normpath(config.data.output_dir))
+        folder_ckpt = os.path.join(config.data.output_dir, LATEST_CHECKPOINT_FILENAME_FMT.format(prefix=folder_prefix))
+        legacy_ckpt = os.path.join(config.data.output_dir, 'tunet_latest.pth')
+        if os.path.exists(folder_ckpt):
+            logging.info(f"Found checkpoint with folder name: {os.path.basename(folder_ckpt)}")
+            latest_checkpoint_path = folder_ckpt
+        elif os.path.exists(legacy_ckpt):
+            logging.info(f"Found legacy checkpoint: tunet_latest.pth")
+            latest_checkpoint_path = legacy_ckpt
     resume_flag = [False] * 1 # Use list for broadcast
     if is_main_process(): resume_flag[0] = os.path.exists(latest_checkpoint_path)
     if world_size > 1: dist.broadcast_object_list(resume_flag, src=0) # Broadcast existence status
@@ -791,7 +804,7 @@ def train(config):
                          completed_epoch_number = (global_step // config.training.iterations_per_epoch) - 1 # Epoch that just finished
                          logging.info(f"Epoch {completed_epoch_number + 1} finished at step {global_step}.")
                          save_checkpoint(model, optimizer, scaler, config, global_step, completed_epoch_number, config.data.output_dir)
-                         manage_checkpoints(config.data.output_dir, config.saving.keep_last_checkpoints)
+                         manage_checkpoints(config.data.output_dir, config.saving.keep_last_checkpoints, config)
 
 
                 # --- Check if epoch completed to advance epoch counter and potentially break inner loop ---
