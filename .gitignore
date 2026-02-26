@@ -17,8 +17,8 @@ ENV/
 *.swo
 *~
 
-# Generated configs
-config_from_ui.yaml
+# Generated configs (written to root by UI before training)
+/*.yaml
 
 # Model outputs
 *.pth

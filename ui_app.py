@@ -414,6 +414,7 @@ class MainWindow(QMainWindow):
         if not model_folder.is_dir(): QMessageBox.warning(self, "Error", f"Model Folder does not exist:\n{model_folder}"); return False
         self.setup_preview_watcher(str(model_folder))
         script_config = {k: v for k, v in full_config.items() if k != '_ui_settings'}
+        self.config_file_path = Path(f"{model_folder.name}.yaml")
         with open(self.config_file_path, 'w') as f:
             yaml.dump(script_config, f, Dumper=IndentDumper, sort_keys=False, default_flow_style=False, indent=2)
         current_os = platform.system(); command = []
