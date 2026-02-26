@@ -621,8 +621,8 @@ def diff_heatmap(a_denorm, b_denorm, amplify=5.0):
     return torch.cat([r, g, b], dim=0)  # (3, H, W)
 
 # --- Auto Mask ---
-def compute_auto_mask(src, dst, blur_kernel=31, gamma=0.4):
-    """Compute auto-mask from |src - dst|: blur to spread, gamma to expand coverage.
+def compute_auto_mask(src, dst, blur_kernel=31, gamma=0.5, noise_floor=0.1):
+    """Compute auto-mask from |src - dst|: blur to spread, threshold to kill noise, gamma to expand.
     Returns (B, 1, H, W) mask in [0, 1] ready for weight_map formula."""
     diff = (src - dst).abs().mean(dim=1, keepdim=True)  # (B, 1, H, W)
     # Gaussian blur to spread mask beyond exact diff pixels
@@ -630,7 +630,11 @@ def compute_auto_mask(src, dst, blur_kernel=31, gamma=0.4):
     # Normalize per-sample to [0, 1]
     max_vals = diff.amax(dim=(-2, -1), keepdim=True) + 1e-8
     diff = diff / max_vals
-    # Gamma < 1 expands coverage: pushes low values up (0.04 -> 0.2, 0.1 -> 0.32)
+    # Kill noise floor: subtract threshold, re-clamp, re-normalize
+    diff = (diff - noise_floor).clamp(0)
+    max_vals2 = diff.amax(dim=(-2, -1), keepdim=True) + 1e-8
+    diff = diff / max_vals2
+    # Gamma < 1 expands remaining signal outward
     diff = diff.pow(gamma)
     return diff
 
