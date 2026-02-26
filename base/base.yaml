@@ -21,6 +21,8 @@ mask:
 # --- Model Settings ---
 model:
   model_size_dims: 64                # hidden_unet_size, default 64 or 128 or 256 or 512
+  model_type: unet                   # "unet" (standard) or "msrn" (recurrent + attention, better for subtle detail)
+  recurrence_steps: 2                # Recurrence depth for msrn model (ignored for unet). 2 or 3 recommended.
 
 
 
