@@ -732,7 +732,7 @@ def capture_preview_batch(config, src_transforms, dst_transforms, shared_transfo
     except Exception as e: logging.exception(f"Error capturing preview batch: {e}"); return None, None, None
 
 # --- Validation ---
-def run_validation(model, val_dataloader, device, device_type, use_amp, use_lpips, loss_fn_lpips, use_bce_dice, criterion_l1, current_ep_idx, global_step, lambda_lpips=1.0):
+def run_validation(model, val_dataloader, device, device_type, use_amp, use_lpips, loss_fn_lpips, use_bce_dice, criterion_l1, current_ep_idx, global_step, lambda_lpips=1.0, use_mask_input=False):
     """Run validation over entire val dataset, return avg losses."""
     if not is_main_process() or val_dataloader is None: return None, None
     model.eval()
@@ -746,7 +746,11 @@ def run_validation(model, val_dataloader, device, device_type, use_amp, use_lpip
                 src, dst = batch[0].to(device), batch[1].to(device)
                 amp_ctx = autocast(device_type=device_type, enabled=use_amp_inf)
                 with amp_ctx:
-                    out = model_module(src)
+                    model_in = src
+                    if use_mask_input:
+                        dummy_mask = torch.zeros(src.shape[0], 1, src.shape[2], src.shape[3], device=device)
+                        model_in = torch.cat([model_in, dummy_mask], dim=1)
+                    out = model_module(model_in)
                     if use_bce_dice:
                         dst_01 = dst * 0.5 + 0.5
                         n_ch = out.shape[1]
@@ -777,7 +781,7 @@ def run_validation(model, val_dataloader, device, device_type, use_amp, use_lpip
     logging.info(log_msg)
     return avg_l1, avg_lp
 
-def save_val_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, use_bce_dice=False, use_amp=False, use_auto_mask=False):
+def save_val_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, use_bce_dice=False, use_amp=False, use_auto_mask=False, use_mask_input=False):
     """Save validation preview grid to val_preview.jpg. Works with or without dst."""
     if not is_main_process() or fixed_src_batch is None or fixed_src_batch.nelement() == 0: return
     has_dst = fixed_dst_batch is not None
@@ -791,7 +795,11 @@ def save_val_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, curre
         amp_ctx = autocast(device_type=device_type, enabled=use_amp_inf)
         with torch.no_grad(), amp_ctx:
             model_module = model.module if isinstance(model, DDP) else model
-            predicted_batch = model_module(src_select.to(device))
+            model_input = src_select.to(device)
+            if use_mask_input:
+                dummy_mask = torch.zeros(num_samples, 1, src_select.shape[2], src_select.shape[3], device=device)
+                model_input = torch.cat([model_input, dummy_mask], dim=1)
+            predicted_batch = model_module(model_input)
             if use_bce_dice: predicted_batch = torch.sigmoid(predicted_batch)
         pred_select = predicted_batch.cpu().float()
     except Exception as e: logging.error(f"Val preview inference error (Step {global_step}): {e}"); model.train(); return
@@ -1361,11 +1369,11 @@ def train(config):
                 if epoch_end_now: run_val_loss_now = True
                 elif val_interval > 0 and global_step % val_interval == 0: run_val_loss_now = True
             if run_val_loss_now:
-                run_validation(model, val_dataloader, device, device_type, use_amp_eff, use_lpips, loss_fn_lpips, use_bce_dice, criterion_l1, current_ep_idx, global_step, lambda_lpips=config.training.lambda_lpips)
+                run_validation(model, val_dataloader, device, device_type, use_amp_eff, use_lpips, loss_fn_lpips, use_bce_dice, criterion_l1, current_ep_idx, global_step, lambda_lpips=config.training.lambda_lpips, use_mask_input=use_mask_input)
             # Val preview runs on its own schedule (epoch end or val_interval), even without dst
             run_val_preview_now = is_main_process() and has_val_preview and val_fixed_src is not None and (epoch_end_now or (val_interval > 0 and global_step % val_interval == 0))
             if run_val_preview_now:
-                save_val_previews(model, val_fixed_src, val_fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask)
+                save_val_previews(model, val_fixed_src, val_fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, use_mask_input=use_mask_input)
 
         # --- End of Training Loop ---
         training_successful = True
