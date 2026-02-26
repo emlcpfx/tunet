@@ -977,6 +977,7 @@ def train(config):
     standard_transform = T.Compose([ T.ToTensor(), T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist()) ])
 
     # --- Create Augmentation Pipelines ---
+    use_auto_mask = config.mask.use_auto_mask
     src_transforms, dst_transforms, shared_transforms = None, None, None
     try:
         datasets_config = getattr(config, 'dataloader', SimpleNamespace()).datasets
@@ -991,7 +992,6 @@ def train(config):
     use_masks = config.data.mask_dir is not None and (config.mask.use_mask_loss or config.mask.use_mask_input)
     use_mask_loss = use_masks and config.mask.use_mask_loss
     use_mask_input = use_masks and config.mask.use_mask_input
-    use_auto_mask = config.mask.use_auto_mask
     n_input_ch = 4 if use_mask_input else 3
     if is_main_process() and use_masks:
         logging.info(f"Mask enabled: loss_weighting={use_mask_loss} (weight={config.mask.mask_weight}), input_channel={use_mask_input}")
