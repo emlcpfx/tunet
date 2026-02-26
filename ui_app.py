@@ -77,11 +77,16 @@ class MainWindow(QMainWindow):
         self.val_preview_image_path = None; self.val_original_pixmap = None
         self.training_queue = []; self.queue_running = False; self.queue_stop_requested = False
         self.central_widget = QWidget(); self.setCentralWidget(self.central_widget)
-        self.main_layout = QVBoxLayout(self.central_widget)
+        self.main_layout = QHBoxLayout(self.central_widget)
+        # Left side: tabs + console + controls
+        left_layout = QVBoxLayout()
         self.tabs = QTabWidget()
         self.console_output = QTextEdit(); self.console_output.setReadOnly(True); self.console_output.setFontFamily("monospace")
         splitter = QSplitter(Qt.Vertical); splitter.addWidget(self.tabs); splitter.addWidget(self.console_output); splitter.setSizes([550, 150])
-        self.main_layout.addWidget(splitter); self.main_layout.addLayout(self.create_queue_section()); self.main_layout.addLayout(self.create_control_panel())
+        left_layout.addWidget(splitter); left_layout.addLayout(self.create_control_panel())
+        self.main_layout.addLayout(left_layout, stretch=1)
+        # Right side: queue sidebar
+        self.main_layout.addLayout(self.create_queue_section())
         self.create_main_tab(); self.create_advanced_tab(); self.create_dataloader_tab()
         self.create_preview_tab(); self.create_val_preview_tab(); self.create_convert_tab(); self.create_about_tab()
         self.file_watcher = QFileSystemWatcher(); self.file_watcher.fileChanged.connect(self.on_watched_file_changed)
@@ -234,16 +239,15 @@ class MainWindow(QMainWindow):
     def create_about_tab(self):
         tab = QWidget(); layout = QVBoxLayout(tab); layout.setAlignment(Qt.AlignCenter); title = QLabel("Tunet by tpo.comp"); title.setStyleSheet("font-size: 18px; font-weight: bold;"); desc_text = ("A direct, pixel-level mapping from src to dst images via an encoder-decoder network.\n" "Supports training, inference, and export to VFX tools."); description = QLabel(desc_text); description.setAlignment(Qt.AlignCenter); description.setWordWrap(True); support_text = "Native inference support in Autodesk Flame or Foundry Nuke."; support = QLabel(support_text); support.setAlignment(Qt.AlignCenter); source_title = QLabel("Source:"); source_link = QLabel('<a href="https://github.com/tpc2233/tunet">https://github.com/tpc2233/tunet</a>'); source_link.setOpenExternalLinks(True); source_link.setAlignment(Qt.AlignCenter); layout.addStretch(); layout.addWidget(title); layout.addSpacing(15); layout.addWidget(description); layout.addSpacing(10); layout.addWidget(support); layout.addSpacing(25); layout.addWidget(source_title); layout.addWidget(source_link); layout.addStretch(); self.tabs.addTab(tab, "About")
     def create_queue_section(self):
-        layout = QHBoxLayout()
-        self.queue_listbox = QListWidget(); self.queue_listbox.setMaximumHeight(90); self.queue_listbox.setStyleSheet("font-family: monospace; font-size: 10px;"); self.queue_listbox.setSelectionMode(QListWidget.ExtendedSelection)
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Training Queue"))
+        self.queue_listbox = QListWidget(); self.queue_listbox.setMinimumWidth(200); self.queue_listbox.setMaximumWidth(280); self.queue_listbox.setStyleSheet("font-family: monospace; font-size: 10px;"); self.queue_listbox.setSelectionMode(QListWidget.ExtendedSelection)
         layout.addWidget(self.queue_listbox, stretch=1)
-        btn_layout = QVBoxLayout()
-        self.queue_add_btn = QPushButton("Add to Queue"); self.queue_add_btn.clicked.connect(self.add_to_queue); self.queue_add_btn.setStyleSheet("background-color: #ffe0b2;")
+        self.queue_add_btn = QPushButton("Add to Queue"); self.queue_add_btn.clicked.connect(self.add_to_queue)
         self.queue_remove_btn = QPushButton("Remove"); self.queue_remove_btn.clicked.connect(self.remove_from_queue)
         self.queue_clear_btn = QPushButton("Clear"); self.queue_clear_btn.clicked.connect(self.clear_queue)
-        self.queue_run_btn = QPushButton("Run Queue"); self.queue_run_btn.clicked.connect(self.run_queue); self.queue_run_btn.setStyleSheet("background-color: #c8e6c9;")
-        btn_layout.addWidget(self.queue_add_btn); btn_layout.addWidget(self.queue_remove_btn); btn_layout.addWidget(self.queue_clear_btn); btn_layout.addWidget(self.queue_run_btn)
-        layout.addLayout(btn_layout)
+        self.queue_run_btn = QPushButton("Run Queue"); self.queue_run_btn.clicked.connect(self.run_queue); self.queue_run_btn.setStyleSheet("background-color: #a8e6cf;")
+        layout.addWidget(self.queue_add_btn); layout.addWidget(self.queue_remove_btn); layout.addWidget(self.queue_clear_btn); layout.addWidget(self.queue_run_btn)
         return layout
 
     def create_control_panel(self):
