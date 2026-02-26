@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QLabel, QLineEdit, QPushButton, QComboBox, QSpinBox, QCheckBox,
     QTextEdit, QFileDialog, QFormLayout, QMessageBox, QSizePolicy, QScrollArea,
-    QSplitter, QProgressDialog, QDoubleSpinBox
+    QSplitter, QProgressDialog, QDoubleSpinBox, QListWidget
 )
 from PySide6.QtCore import Qt, QObject, Signal, Slot, QFileSystemWatcher, QTimer, QThread
 from PySide6.QtGui import QPixmap, QTextCursor
@@ -75,12 +75,13 @@ class MainWindow(QMainWindow):
         self.process = None; self.utility_process = None; self.config_file_path = Path("config_from_ui.yaml")
         self.preview_image_path = None; self.original_pixmap = None; self.copy_thread = None; self.conversion_target = None
         self.val_preview_image_path = None; self.val_original_pixmap = None
+        self.training_queue = []; self.queue_running = False; self.queue_stop_requested = False
         self.central_widget = QWidget(); self.setCentralWidget(self.central_widget)
         self.main_layout = QVBoxLayout(self.central_widget)
         self.tabs = QTabWidget()
         self.console_output = QTextEdit(); self.console_output.setReadOnly(True); self.console_output.setFontFamily("monospace")
         splitter = QSplitter(Qt.Vertical); splitter.addWidget(self.tabs); splitter.addWidget(self.console_output); splitter.setSizes([550, 150])
-        self.main_layout.addWidget(splitter); self.main_layout.addLayout(self.create_control_panel())
+        self.main_layout.addWidget(splitter); self.main_layout.addLayout(self.create_queue_section()); self.main_layout.addLayout(self.create_control_panel())
         self.create_main_tab(); self.create_advanced_tab(); self.create_dataloader_tab()
         self.create_preview_tab(); self.create_val_preview_tab(); self.create_convert_tab(); self.create_about_tab()
         self.file_watcher = QFileSystemWatcher(); self.file_watcher.fileChanged.connect(self.on_watched_file_changed)
@@ -232,6 +233,19 @@ class MainWindow(QMainWindow):
         tab = QWidget(); layout = QVBoxLayout(tab); layout.addStretch(); self.convert_flame_btn = QPushButton("Convert to Autodesk Flame / After Effects"); self.convert_flame_btn.clicked.connect(self.run_flame_conversion); self.convert_nuke_btn = QPushButton("Convert to Foundry Nuke"); self.convert_nuke_btn.clicked.connect(self.run_nuke_conversion); self.copy_before_convert_check = QCheckBox("Copy checkpoint to subfolder before converting"); self.copy_before_convert_check.setChecked(True); self.copy_before_convert_check.setStyleSheet("margin-top: 10px;"); layout.addWidget(self.convert_flame_btn); layout.addWidget(self.convert_nuke_btn); layout.addWidget(self.copy_before_convert_check, alignment=Qt.AlignCenter); layout.addStretch(); self.tabs.addTab(tab, "Convert")
     def create_about_tab(self):
         tab = QWidget(); layout = QVBoxLayout(tab); layout.setAlignment(Qt.AlignCenter); title = QLabel("Tunet by tpo.comp"); title.setStyleSheet("font-size: 18px; font-weight: bold;"); desc_text = ("A direct, pixel-level mapping from src to dst images via an encoder-decoder network.\n" "Supports training, inference, and export to VFX tools."); description = QLabel(desc_text); description.setAlignment(Qt.AlignCenter); description.setWordWrap(True); support_text = "Native inference support in Autodesk Flame or Foundry Nuke."; support = QLabel(support_text); support.setAlignment(Qt.AlignCenter); source_title = QLabel("Source:"); source_link = QLabel('<a href="https://github.com/tpc2233/tunet">https://github.com/tpc2233/tunet</a>'); source_link.setOpenExternalLinks(True); source_link.setAlignment(Qt.AlignCenter); layout.addStretch(); layout.addWidget(title); layout.addSpacing(15); layout.addWidget(description); layout.addSpacing(10); layout.addWidget(support); layout.addSpacing(25); layout.addWidget(source_title); layout.addWidget(source_link); layout.addStretch(); self.tabs.addTab(tab, "About")
+    def create_queue_section(self):
+        layout = QHBoxLayout()
+        self.queue_listbox = QListWidget(); self.queue_listbox.setMaximumHeight(90); self.queue_listbox.setStyleSheet("font-family: monospace; font-size: 10px;"); self.queue_listbox.setSelectionMode(QListWidget.ExtendedSelection)
+        layout.addWidget(self.queue_listbox, stretch=1)
+        btn_layout = QVBoxLayout()
+        self.queue_add_btn = QPushButton("Add to Queue"); self.queue_add_btn.clicked.connect(self.add_to_queue); self.queue_add_btn.setStyleSheet("background-color: #ffe0b2;")
+        self.queue_remove_btn = QPushButton("Remove"); self.queue_remove_btn.clicked.connect(self.remove_from_queue)
+        self.queue_clear_btn = QPushButton("Clear"); self.queue_clear_btn.clicked.connect(self.clear_queue)
+        self.queue_run_btn = QPushButton("Run Queue"); self.queue_run_btn.clicked.connect(self.run_queue); self.queue_run_btn.setStyleSheet("background-color: #c8e6c9;")
+        btn_layout.addWidget(self.queue_add_btn); btn_layout.addWidget(self.queue_remove_btn); btn_layout.addWidget(self.queue_clear_btn); btn_layout.addWidget(self.queue_run_btn)
+        layout.addLayout(btn_layout)
+        return layout
+
     def create_control_panel(self):
         control_layout = QHBoxLayout(); self.load_btn = QPushButton("Load Config"); self.save_btn = QPushButton("Save Config"); self.monitor_btn = QPushButton("Training Monitor"); self.start_btn = QPushButton("Start Training"); self.stop_btn = QPushButton("Stop Training"); self.load_btn.clicked.connect(self.load_config_from_file); self.save_btn.clicked.connect(self.save_config_to_file); self.monitor_btn.clicked.connect(self.launch_training_monitor); self.start_btn.clicked.connect(self.start_training); self.stop_btn.clicked.connect(self.stop_training); self.stop_btn.setEnabled(False); self.start_btn.setStyleSheet("background-color: #a8e6cf;"); self.stop_btn.setStyleSheet("background-color: #ff8a80;"); self.monitor_btn.setStyleSheet("background-color: #b3e5fc;"); control_layout.addWidget(self.load_btn); control_layout.addWidget(self.save_btn); control_layout.addWidget(self.monitor_btn); control_layout.addStretch(); control_layout.addWidget(self.start_btn); control_layout.addWidget(self.stop_btn); return control_layout
 
@@ -342,22 +356,23 @@ class MainWindow(QMainWindow):
                 self.gamma_p.setValue(int(aug.get('p', 0.2) * 100))
                 limit = aug.get('gamma_limit', [40, 160]); self.gamma_limit_min.setValue(limit[0]); self.gamma_limit_max.setValue(limit[1])
 
-    def start_training(self):
-        full_config = self.gather_config_from_ui(); train_script = full_config['_ui_settings']['train_script_path']
-        if not train_script or not Path(train_script).is_file(): QMessageBox.warning(self, "Error", "Training script path is invalid."); return
+    def _launch_training(self, full_config):
+        """Launch a training subprocess from a full config dict. Returns True if started."""
+        train_script = full_config['_ui_settings']['train_script_path']
+        if not train_script or not Path(train_script).is_file(): QMessageBox.warning(self, "Error", "Training script path is invalid."); return False
         model_folder = Path(full_config['data']['output_dir'])
-        if not model_folder.is_dir(): QMessageBox.warning(self, "Error", "Model Folder does not exist."); return
+        if not model_folder.is_dir(): QMessageBox.warning(self, "Error", f"Model Folder does not exist:\n{model_folder}"); return False
         self.setup_preview_watcher(str(model_folder))
         script_config = {k: v for k, v in full_config.items() if k != '_ui_settings'}
         with open(self.config_file_path, 'w') as f:
             yaml.dump(script_config, f, Dumper=IndentDumper, sort_keys=False, default_flow_style=False, indent=2)
-        self.console_output.clear(); current_os = platform.system(); command = []
+        current_os = platform.system(); command = []
         if current_os == 'Linux':
             nproc = full_config['_ui_settings']['nproc_per_node']
             command = ['torchrun', '--standalone', '--nnodes=1', f'--nproc_per_node={nproc}', train_script, '--config', str(self.config_file_path)]
         elif current_os in ['Windows', 'Darwin']:
             command = [sys.executable, train_script, '--config', str(self.config_file_path)]
-        else: QMessageBox.critical(self, "Unsupported OS", f"'{current_os}' is not supported."); return
+        else: QMessageBox.critical(self, "Unsupported OS", f"'{current_os}' is not supported."); return False
         self.console_output.append(f"OS Detected: {current_os}\nRunning command:\n{' '.join(command)}\n\n")
         creation_flags = 0
         if platform.system() == "Windows": creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -365,10 +380,16 @@ class MainWindow(QMainWindow):
             self.process = subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, creationflags=creation_flags, encoding='utf-8', errors='replace'
             )
-        except Exception as e: QMessageBox.critical(self, "Process Error", f"Failed to start process: {e}"); return
+        except Exception as e: QMessageBox.critical(self, "Process Error", f"Failed to start process: {e}"); return False
         self.stream_reader = ProcessStreamReader(self.process.stdout); self.stream_reader.new_text.connect(self.append_text)
-        self.start_btn.setEnabled(False); self.stop_btn.setEnabled(True)
+        self.start_btn.setEnabled(False); self.stop_btn.setEnabled(True); self.queue_run_btn.setEnabled(False); self.queue_add_btn.setEnabled(False)
         self.preview_timer.start(); self.process_monitor.start()
+        return True
+
+    def start_training(self):
+        full_config = self.gather_config_from_ui()
+        self.console_output.clear()
+        self._launch_training(full_config)
     @Slot()
     def check_process_status(self):
         if not self.process: return
@@ -376,14 +397,98 @@ class MainWindow(QMainWindow):
             self.process_monitor.stop(); self.on_training_finished()
     def on_training_finished(self):
         self.preview_timer.stop(); self.console_output.append("\n--- Training Process Terminated ---")
-        self.process = None; self.start_btn.setEnabled(True); self.stop_btn.setEnabled(False)
+        self.process = None
         QTimer.singleShot(100, self.update_all_previews)
+        if self.queue_running:
+            # Mark current item as done
+            for item in self.training_queue:
+                if item['status'] == 'processing':
+                    item['status'] = 'done'; break
+            self.refresh_queue_display()
+            if self.queue_stop_requested:
+                self._finish_queue(); return
+            # Run next pending item
+            self._run_next_queue_item()
+        else:
+            self.start_btn.setEnabled(True); self.stop_btn.setEnabled(False); self.queue_run_btn.setEnabled(True); self.queue_add_btn.setEnabled(True)
     def stop_training(self):
         if self.process and self.process.poll() is None:
             self.console_output.append("\n--- Sending stop signal ---")
             if platform.system() == "Windows": self.process.send_signal(signal.CTRL_BREAK_EVENT)
             else: self.process.send_signal(signal.SIGINT)
+            if self.queue_running:
+                self.queue_stop_requested = True
+                self.console_output.append("Queue will stop after current item finishes.")
         else: self.console_output.append("Stop clicked, but no active process found.\n")
+
+    # --- Training Queue ---
+    def add_to_queue(self):
+        full_config = self.gather_config_from_ui()
+        label = os.path.basename(full_config['data'].get('output_dir', 'untitled'))
+        max_steps = full_config.get('training', {}).get('max_steps', 0)
+        if max_steps == 0:
+            QMessageBox.warning(self, "Max Steps Required", "Set Max Steps > 0 for queue items so training knows when to stop.")
+            return
+        self.training_queue.append({'config': full_config, 'status': 'pending', 'label': label})
+        self.refresh_queue_display()
+        self.console_output.append(f"Added to queue: {label} (max_steps={max_steps})")
+
+    def remove_from_queue(self):
+        selected = sorted(self.queue_listbox.selectedIndexes(), key=lambda x: x.row(), reverse=True)
+        for idx in selected:
+            row = idx.row()
+            if row < len(self.training_queue) and self.training_queue[row]['status'] != 'processing':
+                self.training_queue.pop(row)
+        self.refresh_queue_display()
+
+    def clear_queue(self):
+        self.training_queue = [q for q in self.training_queue if q['status'] == 'processing']
+        self.refresh_queue_display()
+
+    def refresh_queue_display(self):
+        self.queue_listbox.clear()
+        prefix_map = {'pending': '   ', 'processing': '>> ', 'done': 'OK ', 'error': '!! '}
+        for item in self.training_queue:
+            prefix = prefix_map.get(item['status'], '   ')
+            max_s = item['config'].get('training', {}).get('max_steps', 0)
+            text = f"{prefix}{item['label']}  (max_steps={max_s})"
+            self.queue_listbox.addItem(text)
+        # Color items
+        for i, item in enumerate(self.training_queue):
+            list_item = self.queue_listbox.item(i)
+            if item['status'] == 'processing': list_item.setForeground(Qt.blue)
+            elif item['status'] == 'done': list_item.setForeground(Qt.darkGreen)
+            elif item['status'] == 'error': list_item.setForeground(Qt.red)
+
+    def run_queue(self):
+        if self.process: QMessageBox.warning(self, "Busy", "Training is already running."); return
+        pending = [q for q in self.training_queue if q['status'] == 'pending']
+        if not pending: QMessageBox.information(self, "Queue Empty", "No pending items in the queue."); return
+        self.queue_running = True; self.queue_stop_requested = False
+        self.console_output.clear()
+        self.console_output.append(f"=== Starting Queue ({len(pending)} items) ===\n")
+        self._run_next_queue_item()
+
+    def _run_next_queue_item(self):
+        pending = [q for q in self.training_queue if q['status'] == 'pending']
+        if not pending:
+            self._finish_queue(); return
+        item = pending[0]; item['status'] = 'processing'
+        self.refresh_queue_display()
+        done_count = sum(1 for q in self.training_queue if q['status'] == 'done')
+        total_count = sum(1 for q in self.training_queue if q['status'] in ('pending', 'processing', 'done'))
+        self.console_output.append(f"\n=== Queue item {done_count + 1}/{total_count}: {item['label']} ===\n")
+        if not self._launch_training(item['config']):
+            item['status'] = 'error'; self.refresh_queue_display()
+            self._run_next_queue_item()
+
+    def _finish_queue(self):
+        self.queue_running = False; self.queue_stop_requested = False
+        self.start_btn.setEnabled(True); self.stop_btn.setEnabled(False); self.queue_run_btn.setEnabled(True); self.queue_add_btn.setEnabled(True)
+        done_count = sum(1 for q in self.training_queue if q['status'] == 'done')
+        total_count = len(self.training_queue)
+        self.console_output.append(f"\n=== Queue finished ({done_count}/{total_count} completed) ===\n")
+        self.refresh_queue_display()
     def run_flame_conversion(self): self.start_conversion_process('flame')
     def run_nuke_conversion(self): self.start_conversion_process('nuke')
     def start_conversion_process(self, target_type):
