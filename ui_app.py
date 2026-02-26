@@ -120,7 +120,17 @@ class MainWindow(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select Python Script", "", "Python Files (*.py)");
         if file_path: line_edit.setText(file_path)
     def create_advanced_tab(self):
-        tab = QWidget(); layout = QFormLayout(tab); self.iter_per_epoch_input = QSpinBox(minimum=1, maximum=10000, value=500); self.batch_size_input = QSpinBox(minimum=1, maximum=256, value=4); self.max_steps_input = QSpinBox(minimum=0, maximum=10000000, value=0); self.max_steps_input.setSpecialValueText("Unlimited"); self.use_amp_input = QCheckBox("Enable fp16 Mixed-precision"); self.use_amp_input.setChecked(True); self.loss_input = QComboBox(); self.loss_input.addItems(["l1", "l1+lpips", "bce+dice"]); self.lambda_lpips_input = QDoubleSpinBox(decimals=2, minimum=0.0, maximum=10.0, value=1.0, singleStep=0.1); self.lambda_lpips_input.setEnabled(False); self.loss_input.currentTextChanged.connect(lambda t: self.lambda_lpips_input.setEnabled(t == "l1+lpips"))
+        tab = QWidget(); layout = QFormLayout(tab); self.iter_per_epoch_input = QSpinBox(minimum=1, maximum=10000, value=500); self.batch_size_input = QSpinBox(minimum=1, maximum=256, value=4); self.max_steps_input = QSpinBox(minimum=0, maximum=10000000, value=0); self.max_steps_input.setSpecialValueText("Unlimited"); self.use_amp_input = QCheckBox("Enable fp16 Mixed-precision"); self.use_amp_input.setChecked(True); self.loss_input = QComboBox(); self.loss_input.addItems(["l1", "l1+lpips", "bce+dice"]); self.lambda_lpips_input = QComboBox()
+        self.lambda_presets = [
+            ("Subtle (0.01) - Mostly pixel accuracy, hint of perceptual", 0.01),
+            ("Low (0.05) - Pixel-focused with light perceptual guidance", 0.05),
+            ("Moderate (0.1) - Balanced pixel + perceptual quality", 0.1),
+            ("Default (1.0) - Equal weight pixel and perceptual", 1.0),
+            ("Perceptual (2.0) - Prioritize texture/structure over pixel match", 2.0),
+        ]
+        for label, _ in self.lambda_presets: self.lambda_lpips_input.addItem(label)
+        self.lambda_lpips_input.setCurrentIndex(3)
+        self.lambda_lpips_input.setEnabled(False); self.loss_input.currentTextChanged.connect(lambda t: self.lambda_lpips_input.setEnabled(t == "l1+lpips"))
         self.lr_input = QComboBox()
         self.lr_presets = [
             ("Slow (5e-5) - Preserving very fine texture, lots of data", 5e-5),
@@ -282,7 +292,8 @@ class MainWindow(QMainWindow):
         if val_src_dir: data_config['val_src_dir'] = val_src_dir
         if val_dst_dir: data_config['val_dst_dir'] = val_dst_dir
         lr_value = self.lr_presets[self.lr_input.currentIndex()][1]
-        config = {'data': data_config, 'model': {'model_size_dims': int(self.model_size_dims_input.currentText())}, 'training': {'iterations_per_epoch': self.iter_per_epoch_input.value(), 'batch_size': self.batch_size_input.value(), 'max_steps': self.max_steps_input.value(), 'use_amp': self.use_amp_input.isChecked(), 'loss': self.loss_input.currentText(), 'lambda_lpips': self.lambda_lpips_input.value(), 'lr': lr_value}, 'logging': {'log_interval': self.log_interval_input.value(), 'preview_batch_interval': self.preview_interval_input.value(), 'preview_refresh_rate': self.preview_refresh_input.value()}, 'saving': {'keep_last_checkpoints': self.keep_checkpoints_input.value()}, 'dataloader': {'datasets': {'shared_augs': augs}}}
+        lambda_value = self.lambda_presets[self.lambda_lpips_input.currentIndex()][1]
+        config = {'data': data_config, 'model': {'model_size_dims': int(self.model_size_dims_input.currentText())}, 'training': {'iterations_per_epoch': self.iter_per_epoch_input.value(), 'batch_size': self.batch_size_input.value(), 'max_steps': self.max_steps_input.value(), 'use_amp': self.use_amp_input.isChecked(), 'loss': self.loss_input.currentText(), 'lambda_lpips': lambda_value, 'lr': lr_value}, 'logging': {'log_interval': self.log_interval_input.value(), 'preview_batch_interval': self.preview_interval_input.value(), 'preview_refresh_rate': self.preview_refresh_input.value()}, 'saving': {'keep_last_checkpoints': self.keep_checkpoints_input.value()}, 'dataloader': {'datasets': {'shared_augs': augs}}}
         if self.use_mask_loss_input.isChecked() or self.use_mask_input_input.isChecked():
             config['mask'] = {'use_mask_loss': self.use_mask_loss_input.isChecked(), 'mask_weight': self.mask_weight_input.value(), 'use_mask_input': self.use_mask_input_input.isChecked()}
         config['_ui_settings'] = {'train_script_path': get_path(self.train_script_input), 'nproc_per_node': self.nproc_input.value() if self.nproc_input else 1}
@@ -292,7 +303,13 @@ class MainWindow(QMainWindow):
         def get_path_widget(widget): return widget.findChild(QLineEdit)
         ui_settings = config.get('_ui_settings', {}); get_path_widget(self.train_script_input).setText(ui_settings.get('train_script_path', ''))
         if self.nproc_input: self.nproc_input.setValue(ui_settings.get('nproc_per_node', 1))
-        get_path_widget(self.src_dir_input).setText(config.get('data', {}).get('src_dir', '')); get_path_widget(self.dst_dir_input).setText(config.get('data', {}).get('dst_dir', '')); get_path_widget(self.mask_dir_input).setText(config.get('data', {}).get('mask_dir', '')); get_path_widget(self.model_folder_input).setText(config.get('data', {}).get('output_dir', '')); self.resolution_input.setCurrentText(str(config.get('data', {}).get('resolution', 512))); self.model_size_dims_input.setCurrentText(str(config.get('model', {}).get('model_size_dims', 128))); self.iter_per_epoch_input.setValue(config.get('training', {}).get('iterations_per_epoch', 500)); self.batch_size_input.setValue(config.get('training', {}).get('batch_size', 4)); self.max_steps_input.setValue(config.get('training', {}).get('max_steps', 0)); self.use_amp_input.setChecked(config.get('training', {}).get('use_amp', True)); self.loss_input.setCurrentText(config.get('training', {}).get('loss', 'l1')); self.lambda_lpips_input.setValue(config.get('training', {}).get('lambda_lpips', 1.0))
+        get_path_widget(self.src_dir_input).setText(config.get('data', {}).get('src_dir', '')); get_path_widget(self.dst_dir_input).setText(config.get('data', {}).get('dst_dir', '')); get_path_widget(self.mask_dir_input).setText(config.get('data', {}).get('mask_dir', '')); get_path_widget(self.model_folder_input).setText(config.get('data', {}).get('output_dir', '')); self.resolution_input.setCurrentText(str(config.get('data', {}).get('resolution', 512))); self.model_size_dims_input.setCurrentText(str(config.get('model', {}).get('model_size_dims', 128))); self.iter_per_epoch_input.setValue(config.get('training', {}).get('iterations_per_epoch', 500)); self.batch_size_input.setValue(config.get('training', {}).get('batch_size', 4)); self.max_steps_input.setValue(config.get('training', {}).get('max_steps', 0)); self.use_amp_input.setChecked(config.get('training', {}).get('use_amp', True)); self.loss_input.setCurrentText(config.get('training', {}).get('loss', 'l1'))
+        # Restore lambda preset from config
+        saved_lambda = config.get('training', {}).get('lambda_lpips', 1.0)
+        best_lambda_idx = 3  # Default (1.0)
+        for i, (_, val) in enumerate(self.lambda_presets):
+            if abs(val - saved_lambda) < 1e-6: best_lambda_idx = i; break
+        self.lambda_lpips_input.setCurrentIndex(best_lambda_idx)
         # Restore learning rate preset from config
         saved_lr = config.get('training', {}).get('lr', 1e-4)
         best_idx = 1  # Default
