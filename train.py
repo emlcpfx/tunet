@@ -528,8 +528,10 @@ class AugmentedImagePairSlicingDataset(Dataset):
 
             # Compute auto-mask raw diff BEFORE augmentation (no border artifacts)
             auto_mask_slice = None
-            if self.use_auto_mask and use_numpy:
-                auto_mask_slice = np.abs(src_slice_current.astype(np.float32) - dst_slice_current.astype(np.float32)).mean(axis=2) / 255.0
+            if self.use_auto_mask:
+                src_np = src_slice_current if use_numpy else np.array(src_slice_current)
+                dst_np = dst_slice_current if use_numpy else np.array(dst_slice_current)
+                auto_mask_slice = np.abs(src_np.astype(np.float32) - dst_np.astype(np.float32)).mean(axis=2) / 255.0
 
             if self.shared_transforms:
                 if isinstance(self.shared_transforms, A.Compose):
