@@ -1,6 +1,7 @@
 # Cross-Platform support
 
 import os
+import warnings
 import argparse
 import math
 import glob
@@ -563,7 +564,9 @@ class SourceOnlySlicingDataset(Dataset):
         for src_path in src_files:
             try:
                 img = load_image_any_format(src_path); w, h = img.size; img.close()
-                if w < resolution or h < resolution: continue
+                if w < resolution or h < resolution:
+                    self.slice_info.append({'src_path': src_path, 'crop_box': None})
+                    continue
                 y_coords = list(range(0, max(0, h - resolution) + 1, self.stride)); x_coords = list(range(0, max(0, w - resolution) + 1, self.stride))
                 if (h > resolution) and ((h - resolution) % self.stride != 0): y_coords.append(h - resolution)
                 if (w > resolution) and ((w - resolution) % self.stride != 0): x_coords.append(w - resolution)
@@ -580,7 +583,10 @@ class SourceOnlySlicingDataset(Dataset):
     def __getitem__(self, idx):
         info = self.slice_info[idx]
         try:
-            src_img = load_image_any_format(info['src_path']); src_slice = src_img.crop(info['crop_box']); src_img.close()
+            src_img = load_image_any_format(info['src_path'])
+            if info['crop_box'] is not None: src_slice = src_img.crop(info['crop_box'])
+            else: src_slice = src_img.resize((self.resolution, self.resolution), Image.LANCZOS)
+            src_img.close()
             if self.final_transform: src_tensor = self.final_transform(src_slice)
             else: src_np = np.array(src_slice); src_tensor = torch.from_numpy(src_np.transpose(2, 0, 1)).float() / 255.0; norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist()); src_tensor = norm(src_tensor)
             return src_tensor
@@ -968,11 +974,18 @@ def train(config):
             try:
                 # <<< LPIPS por device >>>
                 if device_type != 'cuda': logging.debug(f"LPIPS running on {device_type}. May be slow.")
-                loss_fn_lpips = lpips.LPIPS(net='vgg').to(device).eval(); [p.requires_grad_(False) for p in loss_fn_lpips.parameters()]; status['success'] = True; logging.info("LPIPS model initialized.")
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=UserWarning, module="torchvision")
+                    loss_fn_lpips = lpips.LPIPS(net='vgg').to(device).eval()
+                [p.requires_grad_(False) for p in loss_fn_lpips.parameters()]; status['success'] = True; logging.info("LPIPS model initialized.")
             except Exception as e: logging.error(f"LPIPS init failed: {e}. Disabling.", exc_info=True); status['error'] = str(e); use_lpips = False
         if world_size > 1: dist.broadcast_object_list([status], src=0); status = status[0]; use_lpips = status['success']
         if rank > 0 and use_lpips:
-             try: loss_fn_lpips = lpips.LPIPS(net='vgg').to(device).eval(); [p.requires_grad_(False) for p in loss_fn_lpips.parameters()]
+             try:
+                 with warnings.catch_warnings():
+                     warnings.filterwarnings("ignore", category=UserWarning, module="torchvision")
+                     loss_fn_lpips = lpips.LPIPS(net='vgg').to(device).eval()
+                 [p.requires_grad_(False) for p in loss_fn_lpips.parameters()]
              except Exception as e_rank_n: logging.error(f"LPIPS init Rank {rank} failed: {e_rank_n}. Inconsistency likely!", exc_info=True); logging.warning(f"Rank {rank} proceeding with LPIPS potentially uninitialized!")
         if not use_lpips and config.training.loss == 'l1+lpips':
              if is_main_process(): logging.warning(f"LPIPS disabled due to init failure. Using L1 ONLY.")
@@ -1010,13 +1023,18 @@ def train(config):
         if is_main_process(): logging.info(f"Optimizer: AdamW | AMP Enabled: {use_amp_eff}")
         criterion_l1 = nn.L1Loss()
         criterion_bce = nn.BCEWithLogitsLoss() if use_bce_dice else None
-        ckpt_prefix = os.path.basename(os.path.normpath(config.data.output_dir))
+        ckpt_prefix = getattr(config, '_config_stem', os.path.basename(os.path.normpath(config.data.output_dir)))
         latest_ckpt = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth')
-        # Fallback to old naming convention if new name not found
+        # Fallback chain: config_stem name → folder name → legacy tunet_
         if is_main_process() and not os.path.exists(latest_ckpt):
+            folder_prefix = os.path.basename(os.path.normpath(config.data.output_dir))
+            folder_ckpt = os.path.join(config.data.output_dir, f'{folder_prefix}_tunet_latest.pth')
             legacy_ckpt = os.path.join(config.data.output_dir, 'tunet_latest.pth')
-            if os.path.exists(legacy_ckpt):
-                logging.info(f"Found legacy checkpoint: tunet_latest.pth (new name not found)")
+            if os.path.exists(folder_ckpt):
+                logging.info(f"Found checkpoint with folder name: {folder_prefix}_tunet_latest.pth")
+                latest_ckpt = folder_ckpt
+            elif os.path.exists(legacy_ckpt):
+                logging.info(f"Found legacy checkpoint: tunet_latest.pth")
                 latest_ckpt = legacy_ckpt
         exists_list = [False];
         if is_main_process(): exists_list[0] = os.path.exists(latest_ckpt)
@@ -1282,7 +1300,7 @@ def train(config):
                           torch.save(ckpt_data, ep_ckpt_path)
                           logging.info(f"Saved epoch checkpoint: {os.path.basename(ep_ckpt_path)}")
                           if hasattr(config.saving, 'keep_last_checkpoints') and config.saving.keep_last_checkpoints >= 0:
-                              prune_checkpoints(config.data.output_dir, config.saving.keep_last_checkpoints)
+                              prune_checkpoints(config.data.output_dir, config.saving.keep_last_checkpoints, ckpt_prefix)
                  except Exception as e: logging.error(f"Checkpoint save failed @ Step {global_step}: {e}", exc_info=True)
 
             # --- Validation ---
@@ -1351,11 +1369,11 @@ def merge_configs(base, user):
 
 # --- Checkpoint Pruning Helper ---
 # Checar macos deleta cache prune_checkpoints
-def prune_checkpoints(output_dir, keep_last):
+def prune_checkpoints(output_dir, keep_last, ckpt_prefix=None):
     if keep_last < 0: logging.debug(f"Pruning disabled (keep={keep_last})."); return
     if keep_last == 0: logging.info("Pruning all epoch checkpoints (keep=0).") # Keep INFO for this case
     try:
-        dir_prefix = os.path.basename(os.path.normpath(output_dir))
+        dir_prefix = ckpt_prefix or os.path.basename(os.path.normpath(output_dir))
         ckpt_files_info = []; epoch_files = glob.glob(os.path.join(output_dir, f'{dir_prefix}_tunet_epoch_*.pth'))
         epoch_files += glob.glob(os.path.join(output_dir, 'tunet_epoch_*.pth'))  # legacy fallback
         epoch_files = list(set(epoch_files))  # deduplicate
@@ -1380,6 +1398,48 @@ def prune_checkpoints(output_dir, keep_last):
         # Keep INFO for pruning summary
         if removed_count > 0: logging.info(f"Pruning finished. Removed {removed_count} checkpoint(s).")
     except Exception as e: logging.error(f"Checkpoint pruning error in '{output_dir}': {e}", exc_info=True) # Keep Error
+
+
+# --- Auto-detect num_workers ---
+def auto_detect_num_workers(resolution, current_os):
+    """Auto-detect optimal num_workers based on GPU VRAM, resolution, and CPU cores."""
+    cpu_count = os.cpu_count() or 4
+    max_from_cpu = max(1, cpu_count - 2)
+
+    if torch.cuda.is_available():
+        try:
+            props = torch.cuda.get_device_properties(0)
+            vram_gb = props.total_memory / (1024 ** 3)
+            gpu_name = props.name
+        except Exception:
+            vram_gb = 0
+            gpu_name = "unknown"
+
+        if vram_gb >= 20:
+            gpu_workers = 8
+        elif vram_gb >= 10:
+            gpu_workers = 4
+        elif vram_gb >= 6:
+            gpu_workers = 2
+        else:
+            gpu_workers = 1
+
+        reason = f"CUDA {gpu_name} ({vram_gb:.0f}GB VRAM)"
+    elif current_os == 'Darwin' and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        gpu_workers = 2
+        reason = "MPS (Apple Silicon)"
+    else:
+        return 0, "CPU-only (no GPU acceleration)"
+
+    res_factor = 1.5 if resolution >= 1024 else (1.0 if resolution >= 512 else 0.75)
+    ideal = int(gpu_workers * res_factor)
+    workers = max(1, min(ideal, max_from_cpu))
+
+    if current_os == 'Windows':
+        workers = min(workers, 4)
+
+    reason += f" | CPUs={cpu_count}, res={resolution} -> {workers} workers"
+    return workers, reason
 
 
 # --- Main Execution (`if __name__ == "__main__":`) ---
@@ -1450,7 +1510,14 @@ if __name__ == "__main__":
 
     # Defaulting (use simple getattr with default, avoid extra logs here)
     config.dataloader = getattr(config, 'dataloader', SimpleNamespace())
-    def_work = 0 if CURRENT_OS == 'Windows' else 2; config.dataloader.num_workers = getattr(config.dataloader, 'num_workers', def_work)
+    raw_workers = getattr(config.dataloader, 'num_workers', -1)
+    if raw_workers == -1:
+        resolved_workers, auto_reason = auto_detect_num_workers(config.data.resolution, CURRENT_OS)
+        config.dataloader.num_workers = resolved_workers
+        logging.info(f"num_workers auto-detected: {resolved_workers} ({auto_reason})")
+    else:
+        config.dataloader.num_workers = raw_workers
+        logging.info(f"num_workers from config: {raw_workers}")
     config.dataloader.prefetch_factor = getattr(config.dataloader, 'prefetch_factor', 2 if config.dataloader.num_workers > 0 else None)
     config.training.max_steps = getattr(config.training, 'max_steps', 0)
     config.saving = getattr(config, 'saving', SimpleNamespace()); config.saving.save_iterations_interval = getattr(config.saving, 'save_iterations_interval', 0)
@@ -1507,6 +1574,9 @@ if __name__ == "__main__":
     # DDP Env Var Check (Keep as Warning)
     if os.environ.get("WORLD_SIZE", "1") != "1" and os.environ.get("LOCAL_RANK", None) is None:
         logging.warning("DDP run detected (WORLD_SIZE>1) but LOCAL_RANK not set. Use 'torchrun' or ensure env vars are set.") # Keep Warning
+
+    # --- Store config file stem for checkpoint naming ---
+    config._config_stem = os.path.splitext(os.path.basename(cli_args.config))[0]
 
     # --- Start Training ---
     try: train(config)

@@ -28,6 +28,7 @@ model:
 ###############################################
 # --- dataloader ---
 dataloader:
+  num_workers: -1                    # -1 = auto-detect based on GPU/CPU, or set 0/2/4/8
   datasets:
     src_augs: [] 
       # - _target_: albumentations.SomeSrcOnlyAug
@@ -86,8 +87,6 @@ training:
   loss: l1                           #loss
   lambda_lpips: 1.0                  #loss_lambda
   use_amp: false                     # false or True. To enable fp16 Mixed-precision training
-  num_workers: 4                     # Dataloader workers per GPU
-  prefetch_factor: 2                 # Dataloader prefetch factor
 
 # --- Logging & Saving Settings ---
 logging:

@@ -67,6 +67,30 @@ class FileCopyWorker(QObject):
         except Exception as e: self.error.emit(f"File copy failed: {e}")
     def cancel(self): self._is_cancelled = True
 
+class ZoomPanScrollArea(QScrollArea):
+    zoom_changed = Signal(float)
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        factor = 1.15 if delta > 0 else (1.0 / 1.15)
+        self.zoom_changed.emit(factor)
+        event.accept()
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MiddleButton:
+            self._panning = True; self._pan_start = event.position().toPoint()
+            self.setCursor(Qt.ClosedHandCursor); event.accept()
+        else: super().mousePressEvent(event)
+    def mouseMoveEvent(self, event):
+        if getattr(self, '_panning', False) and self._pan_start is not None:
+            delta = event.position().toPoint() - self._pan_start; self._pan_start = event.position().toPoint()
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            event.accept()
+        else: super().mouseMoveEvent(event)
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MiddleButton:
+            self._panning = False; self.setCursor(Qt.ArrowCursor); event.accept()
+        else: super().mouseReleaseEvent(event)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -74,8 +98,8 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 900, 700)
         self.process = None; self.utility_process = None; self.config_file_path = Path("config_from_ui.yaml")
         self.preview_image_path = None; self.original_pixmap = None; self.copy_thread = None; self.conversion_target = None
-        self.val_preview_image_path = None; self.val_original_pixmap = None
-        self.training_queue = []; self.queue_running = False; self.queue_stop_requested = False
+        self.val_preview_image_path = None; self.val_original_pixmap = None; self._preview_zoom_factor = None; self._val_preview_zoom_factor = None
+        self.training_queue = []; self.queue_running = False; self.queue_stop_requested = False; self._last_config_dir = ""
         self.central_widget = QWidget(); self.setCentralWidget(self.central_widget)
         self.main_layout = QHBoxLayout(self.central_widget)
         # Left side: tabs + console + controls
@@ -108,7 +132,7 @@ class MainWindow(QMainWindow):
         tab = QWidget(); layout = QFormLayout(tab); layout.addRow(QLabel("--- Launcher Settings ---")); self.train_script_input = self.create_path_selector("Training Script (.py)", is_file=True); layout.addRow("Training Script:", self.train_script_input)
         if platform.system() == 'Linux': self.nproc_input = QSpinBox(minimum=1, maximum=16, value=1); layout.addRow("GPUs (nproc_per_node):", self.nproc_input)
         else: self.nproc_input = None
-        layout.addRow(QLabel(" ")); self.src_dir_input = self.create_path_selector("Source Directory"); self.dst_dir_input = self.create_path_selector("Destination Directory"); self.mask_dir_input = self.create_path_selector("Mask Directory"); self.model_folder_input = self.create_path_selector("Model Folder", is_output=True); self.resolution_input = QComboBox(); self.resolution_input.addItems(["512", "1024"]); self.model_size_dims_input = QComboBox(); self.model_size_dims_input.addItems(["32", "64", "128", "256", "512"]); self.model_size_dims_input.setCurrentText("128"); layout.addRow(QLabel("--- Data Settings ---")); layout.addRow("Source Directory:", self.src_dir_input); layout.addRow("Destination Directory:", self.dst_dir_input); layout.addRow("Mask Directory (optional):", self.mask_dir_input); layout.addRow("Model Folder:", self.model_folder_input); layout.addRow("Resolution:", self.resolution_input)
+        layout.addRow(QLabel(" ")); self.src_dir_input = self.create_path_selector("Source Directory"); self.dst_dir_input = self.create_path_selector("Destination Directory"); self.mask_dir_input = self.create_path_selector("Mask Directory"); self.model_folder_input = self.create_path_selector("Model Folder", is_output=True); self.resolution_input = QComboBox(); self.resolution_input.setEditable(True); self.resolution_input.addItems(["256", "384", "512", "640", "768", "896", "928", "960", "1024"]); self.resolution_input.setCurrentText("512"); self.model_size_dims_input = QComboBox(); self.model_size_dims_input.addItems(["32", "64", "128", "256", "512"]); self.model_size_dims_input.setCurrentText("128"); layout.addRow(QLabel("--- Data Settings ---")); layout.addRow("Source Directory:", self.src_dir_input); layout.addRow("Destination Directory:", self.dst_dir_input); layout.addRow("Mask Directory (optional):", self.mask_dir_input); layout.addRow("Model Folder:", self.model_folder_input); layout.addRow("Resolution:", self.resolution_input)
         self.val_src_dir_input = self.create_path_selector("Val Source Directory"); self.val_dst_dir_input = self.create_path_selector("Val Destination Directory")
         layout.addRow(QLabel("--- Validation Data (optional) ---")); layout.addRow("Val Source Directory:", self.val_src_dir_input); layout.addRow("Val Destination Directory:", self.val_dst_dir_input)
         layout.addRow(QLabel("--- Model Settings ---")); layout.addRow("Model Size Dims:", self.model_size_dims_input); self.tabs.addTab(tab, "Main")
@@ -148,6 +172,18 @@ class MainWindow(QMainWindow):
         for label, _ in self.lr_presets: self.lr_input.addItem(label)
         self.lr_input.setCurrentIndex(1)
         self.log_interval_input = QSpinBox(minimum=1, maximum=1000, value=5); self.preview_interval_input = QSpinBox(minimum=0, maximum=1000, value=35); self.preview_refresh_input = QSpinBox(minimum=0, maximum=1000, value=5); self.keep_checkpoints_input = QSpinBox(minimum=1, maximum=50, value=4); layout.addRow(QLabel("--- Training Settings ---")); layout.addRow("Iterations per Epoch:", self.iter_per_epoch_input); layout.addRow("Batch Size (per GPU):", self.batch_size_input); layout.addRow("Max Steps (0=unlimited):", self.max_steps_input); layout.addRow("Use AMP:", self.use_amp_input); layout.addRow("Loss:", self.loss_input); layout.addRow("LPIPS Lambda:", self.lambda_lpips_input); layout.addRow("Learning Rate:", self.lr_input); layout.addRow(QLabel("--- Logging & Saving Settings ---")); layout.addRow("Log Interval:", self.log_interval_input); layout.addRow("Preview Batch Interval:", self.preview_interval_input); layout.addRow("Preview Refresh Rate:", self.preview_refresh_input); layout.addRow("Keep Last Checkpoints:", self.keep_checkpoints_input)
+        layout.addRow(QLabel("--- DataLoader Settings ---"))
+        self.num_workers_input = QComboBox()
+        self.num_workers_presets = [
+            ("Auto (Recommended)", -1),
+            ("0 - Disabled (single thread)", 0),
+            ("2 - Light", 2),
+            ("4 - Moderate", 4),
+            ("8 - Heavy (high-end GPU + many CPU cores)", 8),
+        ]
+        for label, _ in self.num_workers_presets: self.num_workers_input.addItem(label)
+        self.num_workers_input.setCurrentIndex(0)
+        layout.addRow("DataLoader Workers:", self.num_workers_input)
         layout.addRow(QLabel("--- Mask Settings ---"))
         self.use_mask_loss_input = QCheckBox("Weight loss by mask (white=important)")
         layout.addRow("Mask Loss:", self.use_mask_loss_input)
@@ -218,15 +254,15 @@ class MainWindow(QMainWindow):
         return widget
         
     def create_preview_tab(self):
-        self.preview_tab = QWidget(); main_layout = QVBoxLayout(self.preview_tab); self.scroll_area = QScrollArea(); self.scroll_area.setWidgetResizable(True); self.preview_label = QLabel("Waiting for preview image..."); self.preview_label.setAlignment(Qt.AlignCenter); self.scroll_area.setWidget(self.preview_label); controls_layout = QHBoxLayout(); self.zoom_combo = QComboBox(); self.zoom_combo.addItems(["Fit", "50%", "100%", "200%"]); self.zoom_combo.currentTextChanged.connect(self.apply_zoom); controls_layout.addStretch(); controls_layout.addWidget(QLabel("Zoom:")); controls_layout.addWidget(self.zoom_combo); controls_layout.addStretch(); self.labels_container = QWidget(); labels_layout = QHBoxLayout(self.labels_container); labels_layout.setContentsMargins(0,0,0,0); src_label = QLabel("src data"); dst_label = QLabel("dst data"); model_label = QLabel("Model result"); src_label.setAlignment(Qt.AlignLeft); dst_label.setAlignment(Qt.AlignCenter); model_label.setAlignment(Qt.AlignRight); labels_layout.addWidget(src_label); labels_layout.addWidget(dst_label); labels_layout.addWidget(model_label); main_layout.addWidget(self.scroll_area, stretch=1); main_layout.addLayout(controls_layout); main_layout.addWidget(self.labels_container); self.tabs.addTab(self.preview_tab, "Preview")
+        self.preview_tab = QWidget(); main_layout = QVBoxLayout(self.preview_tab); self.scroll_area = ZoomPanScrollArea(); self.scroll_area.setWidgetResizable(True); self.preview_label = QLabel("Waiting for preview image..."); self.preview_label.setAlignment(Qt.AlignCenter); self.scroll_area.setWidget(self.preview_label); controls_layout = QHBoxLayout(); self.zoom_combo = QComboBox(); self.zoom_combo.addItems(["Fit", "50%", "100%", "200%"]); self.zoom_combo.activated.connect(lambda: self._on_zoom_combo_changed(self.zoom_combo.currentText())); self.scroll_area.zoom_changed.connect(self._on_preview_wheel_zoom); controls_layout.addStretch(); controls_layout.addWidget(QLabel("Zoom:")); controls_layout.addWidget(self.zoom_combo); controls_layout.addStretch(); self.labels_container = QWidget(); labels_layout = QHBoxLayout(self.labels_container); labels_layout.setContentsMargins(0,0,0,0); src_label = QLabel("src data"); dst_label = QLabel("dst data"); model_label = QLabel("Model result"); src_label.setAlignment(Qt.AlignLeft); dst_label.setAlignment(Qt.AlignCenter); model_label.setAlignment(Qt.AlignRight); labels_layout.addWidget(src_label); labels_layout.addWidget(dst_label); labels_layout.addWidget(model_label); main_layout.addWidget(self.scroll_area, stretch=1); main_layout.addLayout(controls_layout); main_layout.addWidget(self.labels_container); self.tabs.addTab(self.preview_tab, "Preview")
     def create_val_preview_tab(self):
         self.val_preview_tab = QWidget(); main_layout = QVBoxLayout(self.val_preview_tab)
-        self.val_scroll_area = QScrollArea(); self.val_scroll_area.setWidgetResizable(True)
+        self.val_scroll_area = ZoomPanScrollArea(); self.val_scroll_area.setWidgetResizable(True)
         self.val_preview_label = QLabel("Waiting for validation preview image..."); self.val_preview_label.setAlignment(Qt.AlignCenter)
         self.val_scroll_area.setWidget(self.val_preview_label)
         controls_layout = QHBoxLayout()
         self.val_zoom_combo = QComboBox(); self.val_zoom_combo.addItems(["Fit", "50%", "100%", "200%"])
-        self.val_zoom_combo.currentTextChanged.connect(self.apply_val_zoom)
+        self.val_zoom_combo.activated.connect(lambda: self._on_val_zoom_combo_changed(self.val_zoom_combo.currentText())); self.val_scroll_area.zoom_changed.connect(self._on_val_preview_wheel_zoom)
         controls_layout.addStretch(); controls_layout.addWidget(QLabel("Zoom:")); controls_layout.addWidget(self.val_zoom_combo); controls_layout.addStretch()
         self.val_labels_container = QWidget(); labels_layout = QHBoxLayout(self.val_labels_container); labels_layout.setContentsMargins(0,0,0,0)
         src_label = QLabel("val src"); dst_label = QLabel("val dst"); model_label = QLabel("Model result")
@@ -311,7 +347,7 @@ class MainWindow(QMainWindow):
         if val_dst_dir: data_config['val_dst_dir'] = val_dst_dir
         lr_value = self.lr_presets[self.lr_input.currentIndex()][1]
         lambda_value = self.lambda_presets[self.lambda_lpips_input.currentIndex()][1]
-        config = {'data': data_config, 'model': {'model_size_dims': int(self.model_size_dims_input.currentText())}, 'training': {'iterations_per_epoch': self.iter_per_epoch_input.value(), 'batch_size': self.batch_size_input.value(), 'max_steps': self.max_steps_input.value(), 'use_amp': self.use_amp_input.isChecked(), 'loss': self.loss_input.currentText(), 'lambda_lpips': lambda_value, 'lr': lr_value}, 'logging': {'log_interval': self.log_interval_input.value(), 'preview_batch_interval': self.preview_interval_input.value(), 'preview_refresh_rate': self.preview_refresh_input.value()}, 'saving': {'keep_last_checkpoints': self.keep_checkpoints_input.value()}, 'dataloader': {'datasets': {'shared_augs': augs}}}
+        config = {'data': data_config, 'model': {'model_size_dims': int(self.model_size_dims_input.currentText())}, 'training': {'iterations_per_epoch': self.iter_per_epoch_input.value(), 'batch_size': self.batch_size_input.value(), 'max_steps': self.max_steps_input.value(), 'use_amp': self.use_amp_input.isChecked(), 'loss': self.loss_input.currentText(), 'lambda_lpips': lambda_value, 'lr': lr_value}, 'logging': {'log_interval': self.log_interval_input.value(), 'preview_batch_interval': self.preview_interval_input.value(), 'preview_refresh_rate': self.preview_refresh_input.value()}, 'saving': {'keep_last_checkpoints': self.keep_checkpoints_input.value()}, 'dataloader': {'num_workers': self.num_workers_presets[self.num_workers_input.currentIndex()][1], 'datasets': {'shared_augs': augs}}}
         if self.use_mask_loss_input.isChecked() or self.use_mask_input_input.isChecked():
             config['mask'] = {'use_mask_loss': self.use_mask_loss_input.isChecked(), 'mask_weight': self.mask_weight_input.value(), 'use_mask_input': self.use_mask_input_input.isChecked()}
         config['_ui_settings'] = {'train_script_path': get_path(self.train_script_input), 'nproc_per_node': self.nproc_input.value() if self.nproc_input else 1}
@@ -338,6 +374,12 @@ class MainWindow(QMainWindow):
         mask_config = config.get('mask', {}); self.use_mask_loss_input.setChecked(mask_config.get('use_mask_loss', False)); self.mask_weight_input.setValue(mask_config.get('mask_weight', 10.0)); self.use_mask_input_input.setChecked(mask_config.get('use_mask_input', False))
         get_path_widget(self.val_src_dir_input).setText(config.get('data', {}).get('val_src_dir', '')); get_path_widget(self.val_dst_dir_input).setText(config.get('data', {}).get('val_dst_dir', ''))
 
+        # Restore num_workers preset from config
+        saved_workers = config.get('dataloader', {}).get('num_workers', -1)
+        best_workers_idx = 0  # Default to Auto
+        for i, (_, val) in enumerate(self.num_workers_presets):
+            if val == saved_workers: best_workers_idx = i; break
+        self.num_workers_input.setCurrentIndex(best_workers_idx)
         # Reset augs before populating
         self.hflip_check.setChecked(False); self.affine_check.setChecked(False); self.gamma_check.setChecked(False)
         augs = config.get('dataloader', {}).get('datasets', {}).get('shared_augs', [])
@@ -585,12 +627,11 @@ class MainWindow(QMainWindow):
         if not self.original_pixmap:
             self.preview_label.setText("Waiting for preview image..."); self.labels_container.setVisible(False)
             return
-        self.labels_container.setVisible(True); zoom_text = self.zoom_combo.currentText()
-        if zoom_text == "Fit":
+        self.labels_container.setVisible(True)
+        if self._preview_zoom_factor is None:
             scaled_pixmap = self.original_pixmap.scaled(self.scroll_area.viewport().size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         else:
-            factor = float(zoom_text.replace('%', '')) / 100.0
-            new_width = int(self.original_pixmap.width() * factor); new_height = int(self.original_pixmap.height() * factor)
+            new_width = int(self.original_pixmap.width() * self._preview_zoom_factor); new_height = int(self.original_pixmap.height() * self._preview_zoom_factor)
             scaled_pixmap = self.original_pixmap.scaled(new_width, new_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.preview_label.setPixmap(scaled_pixmap); self.preview_label.adjustSize()
         image_width = scaled_pixmap.width(); container_width = self.scroll_area.viewport().width()
@@ -611,17 +652,40 @@ class MainWindow(QMainWindow):
         if not self.val_original_pixmap:
             self.val_preview_label.setText("Waiting for validation preview image..."); self.val_labels_container.setVisible(False)
             return
-        self.val_labels_container.setVisible(True); zoom_text = self.val_zoom_combo.currentText()
-        if zoom_text == "Fit":
+        self.val_labels_container.setVisible(True)
+        if self._val_preview_zoom_factor is None:
             scaled_pixmap = self.val_original_pixmap.scaled(self.val_scroll_area.viewport().size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         else:
-            factor = float(zoom_text.replace('%', '')) / 100.0
-            new_width = int(self.val_original_pixmap.width() * factor); new_height = int(self.val_original_pixmap.height() * factor)
+            new_width = int(self.val_original_pixmap.width() * self._val_preview_zoom_factor); new_height = int(self.val_original_pixmap.height() * self._val_preview_zoom_factor)
             scaled_pixmap = self.val_original_pixmap.scaled(new_width, new_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.val_preview_label.setPixmap(scaled_pixmap); self.val_preview_label.adjustSize()
         image_width = scaled_pixmap.width(); container_width = self.val_scroll_area.viewport().width()
         margin = max(0, (container_width - image_width) // 2)
         self.val_labels_container.setContentsMargins(margin, 0, margin, 0)
+    def _on_zoom_combo_changed(self, text):
+        if text == "Fit": self._preview_zoom_factor = None
+        else: self._preview_zoom_factor = float(text.replace('%', '')) / 100.0
+        self.apply_zoom()
+    def _on_val_zoom_combo_changed(self, text):
+        if text == "Fit": self._val_preview_zoom_factor = None
+        else: self._val_preview_zoom_factor = float(text.replace('%', '')) / 100.0
+        self.apply_val_zoom()
+    def _on_preview_wheel_zoom(self, factor):
+        if self._preview_zoom_factor is None:
+            if self.original_pixmap and not self.original_pixmap.isNull():
+                vp = self.scroll_area.viewport().size()
+                self._preview_zoom_factor = min(vp.width() / self.original_pixmap.width(), vp.height() / self.original_pixmap.height())
+            else: return
+        self._preview_zoom_factor = max(0.05, min(10.0, self._preview_zoom_factor * factor))
+        self.apply_zoom()
+    def _on_val_preview_wheel_zoom(self, factor):
+        if self._val_preview_zoom_factor is None:
+            if self.val_original_pixmap and not self.val_original_pixmap.isNull():
+                vp = self.val_scroll_area.viewport().size()
+                self._val_preview_zoom_factor = min(vp.width() / self.val_original_pixmap.width(), vp.height() / self.val_original_pixmap.height())
+            else: return
+        self._val_preview_zoom_factor = max(0.05, min(10.0, self._val_preview_zoom_factor * factor))
+        self.apply_val_zoom()
     @Slot(int)
     def on_tab_changed(self, index):
         tab_name = self.tabs.tabText(index)
@@ -630,15 +694,17 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event); self.apply_zoom(); self.apply_val_zoom()
     def save_config_to_file(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save Config As", "", "YAML Files (*.yaml *.yml)")
+        path, _ = QFileDialog.getSaveFileName(self, "Save Config As", self._last_config_dir, "YAML Files (*.yaml *.yml)")
         if path:
+            self._last_config_dir = str(Path(path).parent)
             config = self.gather_config_from_ui()
             with open(path, 'w') as f:
                 yaml.dump(config, f, Dumper=IndentDumper, sort_keys=False, default_flow_style=False, indent=2)
             self.console_output.append(f"Config saved to: {path}")
     def load_config_from_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Load Config", "", "YAML Files (*.yaml *.yml)")
+        path, _ = QFileDialog.getOpenFileName(self, "Load Config", self._last_config_dir, "YAML Files (*.yaml *.yml)")
         if path:
+            self._last_config_dir = str(Path(path).parent)
             try:
                 with open(path, 'r') as f: config = yaml.safe_load(f)
                 self.populate_ui_from_config(config); self.console_output.append(f"Config loaded from: {path}")
