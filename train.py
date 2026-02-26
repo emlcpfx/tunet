@@ -621,21 +621,21 @@ def diff_heatmap(a_denorm, b_denorm, amplify=5.0):
     return torch.cat([r, g, b], dim=0)  # (3, H, W)
 
 # --- Auto Mask ---
-def compute_auto_mask(src, dst, blur_kernel=31, gamma=0.5, noise_floor=0.1):
-    """Compute auto-mask from |src - dst|: blur to spread, threshold to kill noise, gamma to expand.
+def compute_auto_mask(src, dst):
+    """Compute auto-mask from |src - dst|: blur + steep sigmoid.
     Returns (B, 1, H, W) mask in [0, 1] ready for weight_map formula."""
     diff = (src - dst).abs().mean(dim=1, keepdim=True)  # (B, 1, H, W)
-    # Gaussian blur to spread mask beyond exact diff pixels
-    diff = T.functional.gaussian_blur(diff, kernel_size=blur_kernel)
+    # Blur to spread mask beyond exact diff pixels
+    diff = T.functional.gaussian_blur(diff, kernel_size=31)
     # Normalize per-sample to [0, 1]
     max_vals = diff.amax(dim=(-2, -1), keepdim=True) + 1e-8
     diff = diff / max_vals
-    # Kill noise floor: subtract threshold, re-clamp, re-normalize
-    diff = (diff - noise_floor).clamp(0)
-    max_vals2 = diff.amax(dim=(-2, -1), keepdim=True) + 1e-8
-    diff = diff / max_vals2
-    # Gamma < 1 expands remaining signal outward
-    diff = diff.pow(gamma)
+    # Steep sigmoid: sharp transition kills noise, snaps signal to ~1
+    diff = torch.sigmoid(20.0 * (diff - 0.15))
+    # Renormalize to use full [0, 1] range
+    min_vals = diff.amin(dim=(-2, -1), keepdim=True)
+    max_vals2 = diff.amax(dim=(-2, -1), keepdim=True)
+    diff = (diff - min_vals) / (max_vals2 - min_vals + 1e-8)
     return diff
 
 # --- Preview Capture/Saving ---
