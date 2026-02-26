@@ -152,16 +152,15 @@ class MainWindow(QMainWindow):
     def create_advanced_tab(self):
         tab = QWidget(); layout = QFormLayout(tab); self.iter_per_epoch_input = QSpinBox(minimum=1, maximum=10000, value=500); self.batch_size_input = QSpinBox(minimum=1, maximum=256, value=4); self.max_steps_input = QSpinBox(minimum=0, maximum=10000000, value=0); self.max_steps_input.setSpecialValueText("Unlimited"); self.use_amp_input = QCheckBox("Enable fp16 Mixed-precision"); self.use_amp_input.setChecked(True); self.loss_input = QComboBox(); self.loss_input.addItems(["l1", "l1+lpips", "bce+dice"]); self.lambda_lpips_input = QComboBox()
         self.lambda_presets = [
-            ("Subtle (0.01) - Mostly pixel accuracy, hint of perceptual", 0.01),
-            ("Low (0.05) - Pixel-focused with light perceptual guidance", 0.05),
-            ("Moderate (0.1) - Balanced pixel + perceptual quality", 0.1),
-            ("Default (1.0) - Equal weight pixel and perceptual", 1.0),
-            ("Perceptual (2.0) - Prioritize texture/structure over pixel match", 2.0),
-            ("Strong (5.0) - Heavy perceptual, good for subtle beauty work", 5.0),
-            ("Extreme (10.0) - Perceptual-dominated loss", 10.0),
+            ("Off (0.0) - Pure L1 pixel loss, no perceptual", 0.0),
+            ("Light (0.05) - Mostly pixel accuracy, hint of perceptual", 0.05),
+            ("Default (0.1) - Recommended balance for subtle work", 0.1),
+            ("Medium (0.2) - More perceptual texture guidance", 0.2),
+            ("High (0.3) - Strong perceptual push, still safe", 0.3),
+            ("Risky (0.5) - LPIPS starts to dominate, watch for artifacts", 0.5),
         ]
         for label, _ in self.lambda_presets: self.lambda_lpips_input.addItem(label)
-        self.lambda_lpips_input.setCurrentIndex(3)
+        self.lambda_lpips_input.setCurrentIndex(2)
         self.lambda_lpips_input.setEnabled(False); self.loss_input.currentTextChanged.connect(lambda t: self.lambda_lpips_input.setEnabled(t == "l1+lpips"))
         self.lr_input = QComboBox()
         self.lr_presets = [
