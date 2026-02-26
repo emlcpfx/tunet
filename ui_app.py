@@ -157,6 +157,8 @@ class MainWindow(QMainWindow):
             ("Moderate (0.1) - Balanced pixel + perceptual quality", 0.1),
             ("Default (1.0) - Equal weight pixel and perceptual", 1.0),
             ("Perceptual (2.0) - Prioritize texture/structure over pixel match", 2.0),
+            ("Strong (5.0) - Heavy perceptual, good for subtle beauty work", 5.0),
+            ("Extreme (10.0) - Perceptual-dominated loss", 10.0),
         ]
         for label, _ in self.lambda_presets: self.lambda_lpips_input.addItem(label)
         self.lambda_lpips_input.setCurrentIndex(3)
@@ -191,6 +193,8 @@ class MainWindow(QMainWindow):
         layout.addRow("Mask Weight:", self.mask_weight_input)
         self.use_mask_input_input = QCheckBox("Feed mask as 4th input channel to model")
         layout.addRow("Mask Input:", self.use_mask_input_input)
+        self.use_auto_mask_input = QCheckBox("Auto-generate masks from |src-dst| difference (no mask files needed)")
+        layout.addRow("Auto Mask:", self.use_auto_mask_input)
         self.tabs.addTab(tab, "Advanced")
 
     def create_dataloader_tab(self):
@@ -348,8 +352,8 @@ class MainWindow(QMainWindow):
         lr_value = self.lr_presets[self.lr_input.currentIndex()][1]
         lambda_value = self.lambda_presets[self.lambda_lpips_input.currentIndex()][1]
         config = {'data': data_config, 'model': {'model_size_dims': int(self.model_size_dims_input.currentText())}, 'training': {'iterations_per_epoch': self.iter_per_epoch_input.value(), 'batch_size': self.batch_size_input.value(), 'max_steps': self.max_steps_input.value(), 'use_amp': self.use_amp_input.isChecked(), 'loss': self.loss_input.currentText(), 'lambda_lpips': lambda_value, 'lr': lr_value}, 'logging': {'log_interval': self.log_interval_input.value(), 'preview_batch_interval': self.preview_interval_input.value(), 'preview_refresh_rate': self.preview_refresh_input.value()}, 'saving': {'keep_last_checkpoints': self.keep_checkpoints_input.value()}, 'dataloader': {'num_workers': self.num_workers_presets[self.num_workers_input.currentIndex()][1], 'datasets': {'shared_augs': augs}}}
-        if self.use_mask_loss_input.isChecked() or self.use_mask_input_input.isChecked():
-            config['mask'] = {'use_mask_loss': self.use_mask_loss_input.isChecked(), 'mask_weight': self.mask_weight_input.value(), 'use_mask_input': self.use_mask_input_input.isChecked()}
+        if self.use_mask_loss_input.isChecked() or self.use_mask_input_input.isChecked() or self.use_auto_mask_input.isChecked():
+            config['mask'] = {'use_mask_loss': self.use_mask_loss_input.isChecked(), 'mask_weight': self.mask_weight_input.value(), 'use_mask_input': self.use_mask_input_input.isChecked(), 'use_auto_mask': self.use_auto_mask_input.isChecked()}
         config['_ui_settings'] = {'train_script_path': get_path(self.train_script_input), 'nproc_per_node': self.nproc_input.value() if self.nproc_input else 1}
         return config
 
@@ -371,7 +375,7 @@ class MainWindow(QMainWindow):
             if abs(val - saved_lr) < 1e-6: best_idx = i; break
         self.lr_input.setCurrentIndex(best_idx)
         self.log_interval_input.setValue(config.get('logging', {}).get('log_interval', 5)); self.preview_interval_input.setValue(config.get('logging', {}).get('preview_batch_interval', 35)); self.preview_refresh_input.setValue(config.get('logging', {}).get('preview_refresh_rate', 5)); self.keep_checkpoints_input.setValue(config.get('saving', {}).get('keep_last_checkpoints', 4))
-        mask_config = config.get('mask', {}); self.use_mask_loss_input.setChecked(mask_config.get('use_mask_loss', False)); self.mask_weight_input.setValue(mask_config.get('mask_weight', 10.0)); self.use_mask_input_input.setChecked(mask_config.get('use_mask_input', False))
+        mask_config = config.get('mask', {}); self.use_mask_loss_input.setChecked(mask_config.get('use_mask_loss', False)); self.mask_weight_input.setValue(mask_config.get('mask_weight', 10.0)); self.use_mask_input_input.setChecked(mask_config.get('use_mask_input', False)); self.use_auto_mask_input.setChecked(mask_config.get('use_auto_mask', False))
         get_path_widget(self.val_src_dir_input).setText(config.get('data', {}).get('val_src_dir', '')); get_path_widget(self.val_dst_dir_input).setText(config.get('data', {}).get('val_dst_dir', ''))
 
         # Restore num_workers preset from config

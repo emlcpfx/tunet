@@ -609,11 +609,36 @@ def dice_loss(pred, target, smooth=1.0):
     intersection = (pred_flat * target_flat).sum()
     return 1.0 - (2.0 * intersection + smooth) / (pred_flat.sum() + target_flat.sum() + smooth)
 
+# --- Difference Heatmap ---
+def diff_heatmap(a_denorm, b_denorm, amplify=5.0):
+    """Compute amplified difference heatmap between two denormalized images.
+    Returns (3, H, W) tensor with heat colormap: black -> red -> yellow -> white."""
+    diff = (a_denorm - b_denorm).abs().mean(dim=0, keepdim=True)  # (1, H, W)
+    diff = (diff * amplify).clamp(0, 1)
+    r = (diff * 3.0).clamp(0, 1)
+    g = ((diff - 0.33) * 3.0).clamp(0, 1)
+    b = ((diff - 0.66) * 3.0).clamp(0, 1)
+    return torch.cat([r, g, b], dim=0)  # (3, H, W)
+
+# --- Auto Mask ---
+def compute_auto_mask(src, dst, blur_kernel=31, gamma=0.4):
+    """Compute auto-mask from |src - dst|: blur to spread, gamma to expand coverage.
+    Returns (B, 1, H, W) mask in [0, 1] ready for weight_map formula."""
+    diff = (src - dst).abs().mean(dim=1, keepdim=True)  # (B, 1, H, W)
+    # Gaussian blur to spread mask beyond exact diff pixels
+    diff = T.functional.gaussian_blur(diff, kernel_size=blur_kernel)
+    # Normalize per-sample to [0, 1]
+    max_vals = diff.amax(dim=(-2, -1), keepdim=True) + 1e-8
+    diff = diff / max_vals
+    # Gamma < 1 expands coverage: pushes low values up (0.04 -> 0.2, 0.1 -> 0.32)
+    diff = diff.pow(gamma)
+    return diff
+
 # --- Preview Capture/Saving ---
-def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, preview_save_count, preview_refresh_rate, fixed_mask_batch=None, use_mask_input=False, use_bce_dice=False, use_amp=False):
+def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, preview_save_count, preview_refresh_rate, fixed_mask_batch=None, use_mask_input=False, use_bce_dice=False, use_amp=False, use_auto_mask=False):
     if not is_main_process() or fixed_src_batch is None or fixed_dst_batch is None or fixed_src_batch.nelement() == 0: return
     has_mask = fixed_mask_batch is not None
-    num_grid_cols = 4 if has_mask else 3
+    num_grid_cols = 3 + (1 if has_mask else 0) + 1 + (1 if use_auto_mask else 0)  # src [mask] dst pred diff [automask]
     num_samples = min(fixed_src_batch.size(0), 3)
     if num_samples == 0: return
     src_select, dst_select = fixed_src_batch[:num_samples].cpu(), fixed_dst_batch[:num_samples].cpu()
@@ -646,11 +671,17 @@ def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_e
         pred_denorm = denormalize(pred_select)
         dst_denorm = denormalize(dst_select)
     if src_denorm is None or pred_denorm is None or dst_denorm is None: logging.error(f"Preview denorm error (Step {global_step})"); return
+    # Compute auto-mask visualization if enabled (from raw [-1,1] tensors, same as training)
+    auto_mask_vis = None
+    if use_auto_mask:
+        auto_mask_batch = compute_auto_mask(src_select, dst_select)  # (N, 1, H, W)
+        auto_mask_vis = auto_mask_batch.repeat(1, 3, 1, 1)  # (N, 3, H, W) grayscale for display
     if has_mask:
         mask_3ch = mask_select.repeat(1, 3, 1, 1)  # (N, 3, H, W) for display
-        combined = [item for i in range(num_samples) for item in [src_denorm[i], mask_3ch[i], dst_denorm[i], pred_denorm[i]]]
+        row = lambda i: [src_denorm[i], mask_3ch[i], dst_denorm[i], pred_denorm[i], diff_heatmap(src_denorm[i], dst_denorm[i])] + ([auto_mask_vis[i]] if use_auto_mask else [])
     else:
-        combined = [item for i in range(num_samples) for item in [src_denorm[i], dst_denorm[i], pred_denorm[i]]]
+        row = lambda i: [src_denorm[i], dst_denorm[i], pred_denorm[i], diff_heatmap(src_denorm[i], dst_denorm[i])] + ([auto_mask_vis[i]] if use_auto_mask else [])
+    combined = [item for i in range(num_samples) for item in row(i)]
     if not combined: return
     try: grid_tensor = torch.stack(combined); grid = make_grid(grid_tensor, nrow=num_grid_cols, padding=2, normalize=False)
     except Exception as e: logging.error(f"Preview grid error (Step {global_step}): {e}"); return # Keep Error
@@ -742,7 +773,7 @@ def run_validation(model, val_dataloader, device, device_type, use_amp, use_lpip
     logging.info(log_msg)
     return avg_l1, avg_lp
 
-def save_val_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, use_bce_dice=False, use_amp=False):
+def save_val_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, use_bce_dice=False, use_amp=False, use_auto_mask=False):
     """Save validation preview grid to val_preview.jpg. Works with or without dst."""
     if not is_main_process() or fixed_src_batch is None or fixed_src_batch.nelement() == 0: return
     has_dst = fixed_dst_batch is not None
@@ -769,12 +800,17 @@ def save_val_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, curre
         pred_denorm = denormalize(pred_select)
         dst_denorm = denormalize(dst_select) if has_dst else None
     if src_denorm is None or pred_denorm is None: return
+    auto_mask_vis = None
+    if use_auto_mask and has_dst:
+        auto_mask_batch = compute_auto_mask(src_select, dst_select)
+        auto_mask_vis = auto_mask_batch.repeat(1, 3, 1, 1)
     if has_dst:
-        combined = [item for i in range(num_samples) for item in [src_denorm[i], dst_denorm[i], pred_denorm[i]]]
-        nrow = 3
+        row = lambda i: [src_denorm[i], dst_denorm[i], pred_denorm[i], diff_heatmap(src_denorm[i], dst_denorm[i])] + ([auto_mask_vis[i]] if auto_mask_vis is not None else [])
+        nrow = 4 + (1 if auto_mask_vis is not None else 0)
     else:
-        combined = [item for i in range(num_samples) for item in [src_denorm[i], pred_denorm[i]]]
-        nrow = 2
+        row = lambda i: [src_denorm[i], pred_denorm[i], diff_heatmap(src_denorm[i], pred_denorm[i])]
+        nrow = 3
+    combined = [item for i in range(num_samples) for item in row(i)]
     if not combined: return
     try: grid_tensor = torch.stack(combined); grid = make_grid(grid_tensor, nrow=nrow, padding=2, normalize=False)
     except Exception as e: logging.error(f"Val preview grid error: {e}"); return
@@ -921,9 +957,12 @@ def train(config):
     use_masks = config.data.mask_dir is not None and (config.mask.use_mask_loss or config.mask.use_mask_input)
     use_mask_loss = use_masks and config.mask.use_mask_loss
     use_mask_input = use_masks and config.mask.use_mask_input
+    use_auto_mask = config.mask.use_auto_mask
     n_input_ch = 4 if use_mask_input else 3
     if is_main_process() and use_masks:
         logging.info(f"Mask enabled: loss_weighting={use_mask_loss} (weight={config.mask.mask_weight}), input_channel={use_mask_input}")
+    if is_main_process() and use_auto_mask:
+        logging.info(f"Auto-mask enabled: weight={config.mask.mask_weight} (auto-generated from |src-dst|, blur+gamma expansion)")
 
     # --- Dataset & DataLoader ---
     dataset, dataloader, dataloader_iter = None, None, None
@@ -1183,6 +1222,10 @@ def train(config):
                         if use_mask_loss and mask_batch is not None:
                             weight_map = 1.0 + mask_batch * (config.mask.mask_weight - 1.0)
                             l1 = (torch.abs(out - dst) * weight_map).mean()
+                        elif use_auto_mask:
+                            auto_mask_w = compute_auto_mask(src, dst)
+                            weight_map = 1.0 + auto_mask_w * (config.mask.mask_weight - 1.0)
+                            l1 = (torch.abs(out - dst) * weight_map).mean()
                         else:
                             l1 = criterion_l1(out, dst)
                         lp = torch.tensor(0.0, device=device)
@@ -1210,6 +1253,10 @@ def train(config):
                 else:
                     if use_mask_loss and mask_batch is not None:
                         weight_map = 1.0 + mask_batch * (config.mask.mask_weight - 1.0)
+                        l1 = (torch.abs(out - dst) * weight_map).mean()
+                    elif use_auto_mask:
+                        auto_mask_w = compute_auto_mask(src, dst)
+                        weight_map = 1.0 + auto_mask_w * (config.mask.mask_weight - 1.0)
                         l1 = (torch.abs(out - dst) * weight_map).mean()
                     else:
                         l1 = criterion_l1(out, dst)
@@ -1244,7 +1291,8 @@ def train(config):
             compute_time = time.time() - compute_start
 
             batch_l1 = l1.detach().item(); batch_lp = lp.detach().item() if use_lpips else 0.0
-            batch_l1_raw = criterion_l1(out.detach(), dst).item() if use_mask_loss and mask_batch is not None else batch_l1
+            _has_weighted_loss = (use_mask_loss and mask_batch is not None) or use_auto_mask
+            batch_l1_raw = criterion_l1(out.detach(), dst).item() if _has_weighted_loss else batch_l1
             if world_size > 1:
                 l1_t = torch.tensor(batch_l1, device=device); lp_t = torch.tensor(batch_lp, device=device)
                 dist.all_reduce(l1_t, op=dist.ReduceOp.AVG); dist.all_reduce(lp_t, op=dist.ReduceOp.AVG)
@@ -1265,7 +1313,7 @@ def train(config):
                 loss_label = 'BCE+Dice' if use_bce_dice else 'L1'
                 log_msg = (f'Epoch[{current_ep_idx + 1}] Step[{global_step}] ({steps_in_ep}/{iter_epoch}), '
                            f'{loss_label}:{batch_l1:.4f}(Avg:{avg_ep_l1:.4f})')
-                if use_mask_loss and mask_batch is not None:
+                if _has_weighted_loss:
                     log_msg += f'[raw:{batch_l1_raw:.4f}]'
                 if use_lpips: log_msg += (f', LPIPS:{batch_lp:.4f}(Avg:{avg_ep_lp:.4f})')
                 log_msg += (f', LR:{current_lr:.1e}, T/Step:{avg_time:.3f}s '
@@ -1279,7 +1327,7 @@ def train(config):
                      if new_src is not None: fixed_src, fixed_dst, fixed_mask = new_src, new_dst, new_mask
                      elif fixed_src is None: logging.warning(f"S{global_step}: Preview refresh failed (no initial).")
                      else: logging.warning(f"S{global_step}: Preview refresh failed, using old.")
-                if fixed_src is not None: save_previews(model, fixed_src, fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, preview_count, config.logging.preview_refresh_rate, fixed_mask_batch=fixed_mask, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff); preview_count += 1
+                if fixed_src is not None: save_previews(model, fixed_src, fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, preview_count, config.logging.preview_refresh_rate, fixed_mask_batch=fixed_mask, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask); preview_count += 1
                 elif preview_count == 0: logging.warning(f"S{global_step}: Skipping preview (no batch).")
 
             save_interval = config.saving.save_iterations_interval; save_now = (save_interval > 0 and global_step % save_interval == 0)
@@ -1313,7 +1361,7 @@ def train(config):
             # Val preview runs on its own schedule (epoch end or val_interval), even without dst
             run_val_preview_now = is_main_process() and has_val_preview and val_fixed_src is not None and (epoch_end_now or (val_interval > 0 and global_step % val_interval == 0))
             if run_val_preview_now:
-                save_val_previews(model, val_fixed_src, val_fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, use_bce_dice=use_bce_dice, use_amp=use_amp_eff)
+                save_val_previews(model, val_fixed_src, val_fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask)
 
         # --- End of Training Loop ---
         training_successful = True
@@ -1529,6 +1577,7 @@ if __name__ == "__main__":
     config.mask.use_mask_loss = getattr(config.mask, 'use_mask_loss', False)
     config.mask.mask_weight = getattr(config.mask, 'mask_weight', 10.0)
     config.mask.use_mask_input = getattr(config.mask, 'use_mask_input', False)
+    config.mask.use_auto_mask = getattr(config.mask, 'use_auto_mask', False)
     # Validation defaults
     config.data.val_src_dir = getattr(config.data, 'val_src_dir', None)
     config.data.val_dst_dir = getattr(config.data, 'val_dst_dir', None)
