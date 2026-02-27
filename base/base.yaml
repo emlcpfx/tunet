@@ -84,6 +84,10 @@ dataloader:
         
 # --- Training Settings ---
 training:
+  finetune_from: null                # Path to an existing .pth checkpoint to fine-tune from.
+                                     # Loads ONLY model weights (no optimizer, no step counter).
+                                     # Point src_dir/dst_dir to your new dataset and train as usual.
+                                     # Ignored if a checkpoint already exists in output_dir (resume takes priority).
   iterations_per_epoch: 500          # Number of batches ints per save cycle
   batch_size: 2                      # Batch size *per GPU*
   lr: !!float 1e-4                   # Learning rate (1e-4 to 5e-5)

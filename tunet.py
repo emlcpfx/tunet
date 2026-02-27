@@ -471,6 +471,53 @@ class MainWindow(QMainWindow):
         self.gamma_check.toggled.connect(
             lambda checked: [w.setEnabled(checked) for w in self._gamma_sub_widgets])
 
+        # Color Augmentation (brightness, contrast, saturation)
+        self.color_check = QCheckBox("Color Augmentation")
+        self.color_check.setToolTip(
+            "Randomly adjust brightness, contrast, and saturation.\n"
+            "Applied identically to source and target pairs.\n"
+            "Helps the model generalize across different lighting conditions and color grades.\n\n"
+            "Use when: your dataset has varied lighting, or you want robustness to color shifts.\n"
+            "Avoid when: precise color matching is critical (e.g. exact color correction tasks).")
+        self.color_p = QSpinBox(minimum=0, maximum=100, value=30)
+        self.color_p.setSuffix("%")
+        self.color_p.setToolTip("Chance each sample gets a color adjustment.")
+        color_header = QHBoxLayout()
+        color_header.addWidget(self.color_check)
+        color_header.addWidget(self.color_p)
+        form_aug.addRow(color_header)
+
+        self.color_brightness_min = QDoubleSpinBox(decimals=2, minimum=-1.0, maximum=1.0, value=-0.2, singleStep=0.05)
+        self.color_brightness_max = QDoubleSpinBox(decimals=2, minimum=-1.0, maximum=1.0, value=0.2, singleStep=0.05)
+        self.color_brightness_min.setToolTip(
+            "Brightness adjustment range. 0 = no change.\n"
+            "Negative = darker, positive = brighter. ±0.2 is a safe default.")
+        form_aug.addRow("  Brightness:", self._create_range_layout(self.color_brightness_min, self.color_brightness_max))
+
+        self.color_contrast_min = QDoubleSpinBox(decimals=2, minimum=-1.0, maximum=1.0, value=-0.2, singleStep=0.05)
+        self.color_contrast_max = QDoubleSpinBox(decimals=2, minimum=-1.0, maximum=1.0, value=0.2, singleStep=0.05)
+        self.color_contrast_min.setToolTip(
+            "Contrast adjustment range. 0 = no change.\n"
+            "Negative = lower contrast, positive = higher contrast.")
+        form_aug.addRow("  Contrast:", self._create_range_layout(self.color_contrast_min, self.color_contrast_max))
+
+        self.color_saturation_min = QSpinBox(minimum=-100, maximum=100, value=-30)
+        self.color_saturation_max = QSpinBox(minimum=-100, maximum=100, value=30)
+        self.color_saturation_min.setToolTip(
+            "Saturation shift range. 0 = no change.\n"
+            "Negative = desaturate toward grayscale, positive = boost color intensity.")
+        form_aug.addRow("  Saturation:", self._create_range_layout(self.color_saturation_min, self.color_saturation_max))
+
+        self._color_sub_widgets = [
+            self.color_p, self.color_brightness_min, self.color_brightness_max,
+            self.color_contrast_min, self.color_contrast_max,
+            self.color_saturation_min, self.color_saturation_max,
+        ]
+        for w in self._color_sub_widgets:
+            w.setEnabled(False)
+        self.color_check.toggled.connect(
+            lambda checked: [w.setEnabled(checked) for w in self._color_sub_widgets])
+
         layout.addWidget(grp_aug)
         layout.addStretch()
 
@@ -530,10 +577,11 @@ class MainWindow(QMainWindow):
         form_opt.addRow("Learning Rate:", self.lr_input)
 
         self.loss_input = QComboBox()
-        self.loss_input.addItems(["l1", "l1+lpips", "bce+dice"])
+        self.loss_input.addItems(["l1", "l1+lpips", "weighted", "bce+dice"])
         self.loss_input.setToolTip(
-            "'l1' = pixel-level absolute difference (sharp, stable). "
-            "'l1+lpips' = pixel + perceptual similarity (better textures). "
+            "'l1' = pixel-level absolute difference (sharp, stable).\n"
+            "'l1+lpips' = pixel + perceptual similarity (better textures).\n"
+            "'weighted' = custom mix of L1 + L2 + LPIPS with individual weight sliders.\n"
             "'bce+dice' = for binary mask/segmentation outputs.")
         form_opt.addRow("Loss Function:", self.loss_input)
 
@@ -553,9 +601,41 @@ class MainWindow(QMainWindow):
             "Balance between pixel accuracy (L1) and perceptual quality (LPIPS). "
             "Only active when loss is 'l1+lpips'.")
         self.lambda_lpips_input.setEnabled(False)
-        self.loss_input.currentTextChanged.connect(
-            lambda t: self.lambda_lpips_input.setEnabled(t == "l1+lpips"))
         form_opt.addRow("LPIPS Lambda:", self.lambda_lpips_input)
+
+        # --- Weighted loss controls (visible only when loss = "weighted") ---
+        self.l1_weight_input = QDoubleSpinBox(decimals=2, minimum=0.0, maximum=10.0, value=1.0, singleStep=0.05)
+        self.l1_weight_input.setToolTip(
+            "Weight for L1 (Mean Absolute Error) loss.\n"
+            "Treats all pixel errors equally. Good baseline for sharpness.\n"
+            "Default 1.0. Set to 0 to disable.")
+        self.l2_weight_input = QDoubleSpinBox(decimals=2, minimum=0.0, maximum=10.0, value=0.0, singleStep=0.05)
+        self.l2_weight_input.setToolTip(
+            "Weight for L2 (Mean Squared Error) loss.\n"
+            "Penalizes large errors more than small ones — smoother results.\n"
+            "Try 0.1–0.5 alongside L1 for a blend of sharp + smooth.")
+        self.lpips_weight_input = QDoubleSpinBox(decimals=2, minimum=0.0, maximum=10.0, value=0.1, singleStep=0.05)
+        self.lpips_weight_input.setToolTip(
+            "Weight for LPIPS perceptual loss.\n"
+            "Matches structures and textures rather than raw pixels.\n"
+            "Makes models less brittle to small misalignments.\n"
+            "Keep below 0.5 to avoid artifacts. 0.1 is a safe start.")
+        weighted_row = QHBoxLayout()
+        weighted_row.addWidget(QLabel("L1:"))
+        weighted_row.addWidget(self.l1_weight_input)
+        weighted_row.addWidget(QLabel("L2:"))
+        weighted_row.addWidget(self.l2_weight_input)
+        weighted_row.addWidget(QLabel("LPIPS:"))
+        weighted_row.addWidget(self.lpips_weight_input)
+        self.weighted_loss_widget = QWidget()
+        self.weighted_loss_widget.setLayout(weighted_row)
+        self.weighted_loss_widget.setVisible(False)
+        form_opt.addRow("Loss Weights:", self.weighted_loss_widget)
+
+        def _on_loss_changed(t):
+            self.lambda_lpips_input.setEnabled(t == "l1+lpips")
+            self.weighted_loss_widget.setVisible(t == "weighted")
+        self.loss_input.currentTextChanged.connect(_on_loss_changed)
 
         self.use_amp_input = QCheckBox("Enable fp16 Mixed Precision")
         self.use_amp_input.setChecked(True)
@@ -564,6 +644,19 @@ class MainWindow(QMainWindow):
             "Disable only if you see NaN losses.")
         form_opt.addRow("Mixed Precision:", self.use_amp_input)
         layout.addWidget(grp_opt)
+
+        # --- Fine-tune ---
+        grp_finetune = QGroupBox("Fine-tune (Optional)")
+        form_finetune = QFormLayout(grp_finetune)
+        self.finetune_from_input = self._create_path_selector(
+            "Fine-tune From", is_file=True, file_filter="PyTorch Checkpoints (*.pth)")
+        self.finetune_from_input.setToolTip(
+            "Pick an existing .pth model to fine-tune on new data.\n"
+            "Only model weights are loaded — optimizer and step counter start fresh.\n"
+            "Just point Source/Destination to your new dataset and hit Train.\n\n"
+            "Leave empty to train from scratch (or auto-resume if output folder has a checkpoint).")
+        form_finetune.addRow("Starting Checkpoint:", self.finetune_from_input)
+        layout.addWidget(grp_finetune)
 
         # --- Schedule ---
         grp_sched = QGroupBox("Schedule")
@@ -587,6 +680,18 @@ class MainWindow(QMainWindow):
             "Total steps before auto-stopping. 0 = train until manually stopped. "
             "Required for queue items.")
         form_sched.addRow("Max Steps:", self.max_steps_input)
+
+        self.progressive_res_check = QCheckBox("Progressive Multi-Resolution")
+        self.progressive_res_check.setToolTip(
+            "Start training at lower resolutions and progressively increase to full.\n"
+            "Speeds up early training ~2x by learning coarse structure first.\n\n"
+            "How it works:\n"
+            "  Epoch 1 → trains at 1/4 resolution (fast, learns shapes & layout)\n"
+            "  Epoch 2 → trains at 1/2 resolution (medium detail)\n"
+            "  Epoch 3+ → trains at full resolution (fine detail)\n\n"
+            "Best for: large datasets, high resolutions (512+), long training runs.\n"
+            "Skip when: resolution is already small (256), very short runs, or fine-tuning.")
+        form_sched.addRow(self.progressive_res_check)
 
         self.num_workers_input = QComboBox()
         self.num_workers_presets = [
@@ -1194,6 +1299,20 @@ class MainWindow(QMainWindow):
                 'gamma_limit': [self.gamma_limit_min.value(), self.gamma_limit_max.value()],
                 'p': self.gamma_p.value() / 100.0,
             })
+        if self.color_check.isChecked():
+            augs.append({
+                '_target_': 'albumentations.RandomBrightnessContrast',
+                'brightness_limit': [self.color_brightness_min.value(), self.color_brightness_max.value()],
+                'contrast_limit': [self.color_contrast_min.value(), self.color_contrast_max.value()],
+                'p': self.color_p.value() / 100.0,
+            })
+            augs.append({
+                '_target_': 'albumentations.HueSaturationValue',
+                'hue_shift_limit': 0,
+                'sat_shift_limit': [self.color_saturation_min.value(), self.color_saturation_max.value()],
+                'val_shift_limit': 0,
+                'p': self.color_p.value() / 100.0,
+            })
 
         mask_dir = gp(self.mask_dir_input)
         data_config = {
@@ -1222,6 +1341,7 @@ class MainWindow(QMainWindow):
                 'model_type': self.model_type_input.currentText(),
             },
             'training': {
+                'finetune_from': gp(self.finetune_from_input) or None,
                 'iterations_per_epoch': self.iter_per_epoch_input.value(),
                 'batch_size': self.batch_size_input.value(),
                 'max_steps': self.max_steps_input.value(),
@@ -1229,6 +1349,10 @@ class MainWindow(QMainWindow):
                 'loss': self.loss_input.currentText(),
                 'lambda_lpips': lambda_value,
                 'lr': lr_value,
+                'progressive_resolution': self.progressive_res_check.isChecked(),
+                'l1_weight': self.l1_weight_input.value(),
+                'l2_weight': self.l2_weight_input.value(),
+                'lpips_weight': self.lpips_weight_input.value(),
             },
             'logging': {
                 'log_interval': self.log_interval_input.value(),
@@ -1298,6 +1422,7 @@ class MainWindow(QMainWindow):
 
         # Training
         training = config.get('training', {})
+        sp(self.finetune_from_input, training.get('finetune_from', '') or '')
         self.iter_per_epoch_input.setValue(training.get('iterations_per_epoch', 500))
         self.batch_size_input.setValue(training.get('batch_size', 4))
         self.max_steps_input.setValue(training.get('max_steps', 0))
@@ -1319,6 +1444,12 @@ class MainWindow(QMainWindow):
                 best_lr_idx = i
                 break
         self.lr_input.setCurrentIndex(best_lr_idx)
+
+        # Progressive resolution & weighted loss
+        self.progressive_res_check.setChecked(training.get('progressive_resolution', False))
+        self.l1_weight_input.setValue(training.get('l1_weight', 1.0))
+        self.l2_weight_input.setValue(training.get('l2_weight', 0.0))
+        self.lpips_weight_input.setValue(training.get('lpips_weight', 0.1))
 
         # Logging
         log_cfg = config.get('logging', {})
@@ -1347,6 +1478,7 @@ class MainWindow(QMainWindow):
         self.hflip_check.setChecked(False)
         self.affine_check.setChecked(False)
         self.gamma_check.setChecked(False)
+        self.color_check.setChecked(False)
         augs = config.get('dataloader', {}).get('datasets', {}).get('shared_augs', [])
         for aug in augs:
             target = aug.get('_target_', '')
@@ -1376,6 +1508,21 @@ class MainWindow(QMainWindow):
                 limit = aug.get('gamma_limit', [40, 160])
                 self.gamma_limit_min.setValue(limit[0])
                 self.gamma_limit_max.setValue(limit[1])
+            elif 'RandomBrightnessContrast' in target:
+                self.color_check.setChecked(True)
+                self.color_p.setValue(int(aug.get('p', 0.3) * 100))
+                bl = aug.get('brightness_limit', [-0.2, 0.2])
+                self.color_brightness_min.setValue(bl[0])
+                self.color_brightness_max.setValue(bl[1])
+                cl = aug.get('contrast_limit', [-0.2, 0.2])
+                self.color_contrast_min.setValue(cl[0])
+                self.color_contrast_max.setValue(cl[1])
+            elif 'HueSaturationValue' in target:
+                # Saturation part of color augmentation (paired with RandomBrightnessContrast)
+                sl = aug.get('sat_shift_limit', [-30, 30])
+                if isinstance(sl, list):
+                    self.color_saturation_min.setValue(sl[0])
+                    self.color_saturation_max.setValue(sl[1])
 
         # Inference
         inf = config.get('inference', {})
