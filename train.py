@@ -767,7 +767,7 @@ def diff_heatmap(a_denorm, b_denorm, amplify=5.0):
     return torch.cat([r, g, b], dim=0)  # (3, H, W)
 
 # --- Auto Mask ---
-def refine_auto_mask(raw_diff, noise_threshold=0.05):
+def refine_auto_mask(raw_diff, noise_threshold=0.01):
     """Apply blur + steep sigmoid to raw |src-dst| diff tensor.
     Input: (B, 1, H, W) raw diff in [0, 1] (pre-computed in dataset, augmented with src/dst).
     Returns: (B, 1, H, W) mask in [0, 1] ready for weight_map formula."""
