@@ -492,6 +492,7 @@ def load_image_any_format(image_path):
 
         # Convert to 8-bit for PIL (no transforms - treat like PNG/JPG)
         # EXR values assumed to be in [0, 1] range like normalized PNG
+        np.nan_to_num(img_float, copy=False, nan=0.0, posinf=1.0, neginf=0.0)
         img_8bit = np.clip(img_float * 255, 0, 255).astype(np.uint8)
 
         # Convert to PIL Image

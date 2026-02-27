@@ -263,12 +263,16 @@ def load_model_for_export(checkpoint_path, device):
     model_config = getattr(config_source_obj, 'model', SimpleNamespace())
     data_config = getattr(config_source_obj, 'data', SimpleNamespace())
 
-    # Get model size DIRECTLY from checkpoint metadata, using fallbacks
-    model_size_saved = getattr(model_config, 'model_size_dims', default_hidden_size); size_source = "'model.model_size_dims'"
-    if model_size_saved == default_hidden_size:
-        legacy_size = getattr(model_config, 'unet_hidden_size', default_hidden_size)
-        if legacy_size != default_hidden_size: model_size_saved = legacy_size; size_source = "'model.unet_hidden_size' (legacy fallback)"
-        else: size_source += " (or fallback, using default)"
+    # Get model size from checkpoint metadata, preferring effective_model_size (accounts for training-time bumps)
+    effective_size = checkpoint.get('effective_model_size', None)
+    if effective_size is not None and effective_size > 0:
+        model_size_saved = effective_size; size_source = "'effective_model_size' (top-level checkpoint key)"
+    else:
+        model_size_saved = getattr(model_config, 'model_size_dims', default_hidden_size); size_source = "'model.model_size_dims'"
+        if model_size_saved == default_hidden_size:
+            legacy_size = getattr(model_config, 'unet_hidden_size', default_hidden_size)
+            if legacy_size != default_hidden_size: model_size_saved = legacy_size; size_source = "'model.unet_hidden_size' (legacy fallback)"
+            else: size_source += " (or fallback, using default)"
     logging.info(f"  - Using Model Size from Checkpoint: {model_size_saved} (loaded via {size_source})")
 
     # Extract resolution (needed for dummy input)

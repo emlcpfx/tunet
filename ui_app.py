@@ -13,6 +13,7 @@ import subprocess
 import threading
 import signal
 import yaml
+import json
 from pathlib import Path
 import platform
 import shutil
@@ -99,7 +100,8 @@ class MainWindow(QMainWindow):
         self.process = None; self.utility_process = None; self.config_file_path = Path("config_from_ui.yaml")
         self.preview_image_path = None; self.original_pixmap = None; self.copy_thread = None; self.conversion_target = None
         self.val_preview_image_path = None; self.val_original_pixmap = None; self._preview_zoom_factor = None; self._val_preview_zoom_factor = None
-        self.training_queue = []; self.queue_running = False; self.queue_stop_requested = False; self._last_config_dir = ""
+        self.training_queue = []; self.queue_running = False; self.queue_stop_requested = False; self._last_config_dir = ""; self._last_config_path = ""
+        self._settings_file = Path(os.path.dirname(os.path.abspath(__file__))) / "ui_settings.json"
         self.central_widget = QWidget(); self.setCentralWidget(self.central_widget)
         self.main_layout = QHBoxLayout(self.central_widget)
         # Left side: tabs + console + controls
@@ -119,6 +121,30 @@ class MainWindow(QMainWindow):
         self.process_monitor = QTimer(self); self.process_monitor.setInterval(500); self.process_monitor.timeout.connect(self.check_process_status)
         self.utility_monitor = QTimer(self); self.utility_monitor.setInterval(500); self.utility_monitor.timeout.connect(self.check_utility_status)
         self.populate_default_script_path()
+        self._load_ui_settings()
+
+    def _load_ui_settings(self):
+        try:
+            if self._settings_file.is_file():
+                with open(self._settings_file, 'r') as f:
+                    settings = json.load(f)
+                self._last_config_dir = settings.get("last_config_dir", "")
+                self._last_config_path = settings.get("last_config_path", "")
+                if self._last_config_path and Path(self._last_config_path).is_file():
+                    with open(self._last_config_path, 'r') as f:
+                        config = yaml.safe_load(f)
+                    self.populate_ui_from_config(config)
+                    self.console_output.append(f"Auto-loaded last config: {self._last_config_path}")
+        except Exception as e:
+            self.console_output.append(f"Could not auto-load last config: {e}")
+
+    def _save_ui_settings(self):
+        try:
+            settings = {"last_config_dir": self._last_config_dir, "last_config_path": self._last_config_path}
+            with open(self._settings_file, 'w') as f:
+                json.dump(settings, f, indent=2)
+        except Exception:
+            pass
 
     def populate_default_script_path(self):
         try:
@@ -703,23 +729,28 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Save Config As", self._last_config_dir, "YAML Files (*.yaml *.yml)")
         if path:
             self._last_config_dir = str(Path(path).parent)
+            self._last_config_path = path
             config = self.gather_config_from_ui()
             with open(path, 'w') as f:
                 yaml.dump(config, f, Dumper=IndentDumper, sort_keys=False, default_flow_style=False, indent=2)
+            self._save_ui_settings()
             self.console_output.append(f"Config saved to: {path}")
     def load_config_from_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load Config", self._last_config_dir, "YAML Files (*.yaml *.yml)")
         if path:
             self._last_config_dir = str(Path(path).parent)
+            self._last_config_path = path
             try:
                 with open(path, 'r') as f: config = yaml.safe_load(f)
                 self.populate_ui_from_config(config); self.console_output.append(f"Config loaded from: {path}")
+                self._save_ui_settings()
             except Exception as e: QMessageBox.critical(self, "Error", f"Failed to load or parse config file:\n{e}")
     @Slot()
     def append_text(self, text):
         self.console_output.moveCursor(QTextCursor.End)
         self.console_output.insertPlainText(text)
     def closeEvent(self, event):
+        self._save_ui_settings()
         self.preview_timer.stop(); self.process_monitor.stop()
         if self.process and self.process.poll() is None:
             reply = QMessageBox.question(self, 'Exit Confirmation',
