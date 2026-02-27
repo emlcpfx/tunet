@@ -1168,10 +1168,41 @@ def train(config):
 
     # --- Model & Loss Setup ---
     model, loss_fn_lpips = None, None
-    eff_size = config.model.model_size_dims; use_lpips = False; use_bce_dice = False; def_h, bump_h = 64, 96
+    eff_size = config.model.model_size_dims; use_lpips = False; use_bce_dice = False; use_weighted = False; use_l2 = False; def_h, bump_h = 64, 96
     if config.training.loss == 'bce+dice':
         use_bce_dice = True
         if is_main_process(): logging.info(f"Using BCE+Dice loss (segmentation mode). Hidden size: {eff_size}.")
+    elif config.training.loss == 'weighted':
+        use_weighted = True
+        needs_lpips = config.training.lpips_weight > 0
+        use_l2 = config.training.l2_weight > 0
+        if needs_lpips:
+            use_lpips = True
+            if config.model.model_size_dims == def_h: eff_size = bump_h; msg = f"bumping effective hidden size to {eff_size}"
+            else: msg = f"using configured hidden size {eff_size}"
+            if is_main_process(): logging.debug(f"Weighted loss with LPIPS, {msg}.")
+        if is_main_process():
+            logging.info(f"Using weighted loss: L1={config.training.l1_weight}, L2={config.training.l2_weight}, LPIPS={config.training.lpips_weight}. Hidden size: {eff_size}.")
+        # Initialize LPIPS if needed
+        if needs_lpips:
+            status = {'success': False, 'error': None}
+            if is_main_process():
+                try:
+                    if device_type != 'cuda': logging.debug(f"LPIPS running on {device_type}. May be slow.")
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("ignore", category=UserWarning, module="torchvision")
+                        loss_fn_lpips = lpips.LPIPS(net='vgg').to(device).eval()
+                    [p.requires_grad_(False) for p in loss_fn_lpips.parameters()]; status['success'] = True; logging.info("LPIPS model initialized.")
+                except Exception as e: logging.error(f"LPIPS init failed: {e}. Disabling LPIPS component.", exc_info=True); status['error'] = str(e); use_lpips = False
+            if world_size > 1: dist.broadcast_object_list([status], src=0); status = status[0]; use_lpips = status['success']
+            if rank > 0 and use_lpips:
+                try:
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("ignore", category=UserWarning, module="torchvision")
+                        loss_fn_lpips = lpips.LPIPS(net='vgg').to(device).eval()
+                    [p.requires_grad_(False) for p in loss_fn_lpips.parameters()]
+                except Exception as e_rank_n: logging.error(f"LPIPS init Rank {rank} failed: {e_rank_n}.", exc_info=True)
+            if not use_lpips and is_main_process(): logging.warning(f"LPIPS disabled due to init failure. Weighted loss will use L1+L2 only.")
     elif config.training.loss == 'l1+lpips':
         use_lpips = True
         if config.model.model_size_dims == def_h: eff_size = bump_h; msg = f"bumping effective hidden size to {eff_size}"
@@ -1235,6 +1266,7 @@ def train(config):
         scaler = GradScaler(enabled=use_amp_eff) # Scaler is created based on effective usage
         if is_main_process(): logging.info(f"Optimizer: AdamW | AMP Enabled: {use_amp_eff}")
         criterion_l1 = nn.L1Loss()
+        criterion_l2 = nn.MSELoss() if use_l2 else None
         criterion_bce = nn.BCEWithLogitsLoss() if use_bce_dice else None
         ckpt_prefix = getattr(config, '_config_stem', os.path.basename(os.path.normpath(config.data.output_dir)))
         latest_ckpt = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth')
@@ -1258,7 +1290,8 @@ def train(config):
                 ckpt = torch.load(latest_ckpt, map_location='cpu') # Load to CPU first
                 if 'config' not in ckpt: raise ValueError("Checkpoint missing 'config'")
                 ckpt_cfg = dict_to_sns(ckpt['config']); ckpt_loss = getattr(getattr(ckpt_cfg, 'training', SimpleNamespace()), 'loss', 'l1'); ckpt_base = getattr(getattr(ckpt_cfg, 'model', SimpleNamespace()), 'model_size_dims', def_h)
-                ckpt_eff_size = ckpt_base if not (ckpt_loss == 'l1+lpips' and ckpt_base == def_h) else bump_h
+                ckpt_needs_bump = (ckpt_loss == 'l1+lpips' and ckpt_base == def_h) or (ckpt_loss == 'weighted' and ckpt_base == def_h and getattr(getattr(ckpt_cfg, 'training', SimpleNamespace()), 'lpips_weight', 0) > 0)
+                ckpt_eff_size = bump_h if ckpt_needs_bump else ckpt_base
                 if ckpt_loss != config.training.loss: raise ValueError(f"Loss mismatch: Ckpt='{ckpt_loss}', Current='{config.training.loss}'")
                 if ckpt_eff_size != eff_size: raise ValueError(f"Effective size mismatch: Ckpt={ckpt_eff_size}, Current={eff_size}")
                 ckpt_n_ch = ckpt.get('n_input_channels', 3)
@@ -1296,7 +1329,35 @@ def train(config):
                 logging.error(f"Checkpoint load failed: {e}. Starting fresh.", exc_info=True)
                 start_epoch, start_step = 0, 0; optimizer = optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=1e-5); scaler = GradScaler(enabled=use_amp_eff)
         else:
-            if is_main_process(): logging.info("No checkpoint found. Starting fresh.")
+            # No checkpoint in output_dir — check if fine-tuning from an existing model
+            finetune_path = getattr(config.training, 'finetune_from', None)
+            if finetune_path:
+                if is_main_process():
+                    logging.info("=" * 60)
+                    logging.info("FINE-TUNING MODE")
+                    logging.info(f"  Loading model weights from: {finetune_path}")
+                    logging.info(f"  Training on new data in: {config.data.src_dir}")
+                    logging.info(f"  Optimizer & step counter start fresh (step 0).")
+                    logging.info("=" * 60)
+                try:
+                    ft_ckpt = torch.load(finetune_path, map_location='cpu')
+                    if 'model_state_dict' not in ft_ckpt:
+                        raise KeyError("Checkpoint missing 'model_state_dict'. Is this a valid tunet checkpoint?")
+                    ft_state = ft_ckpt['model_state_dict']
+                    # Strip 'module.' prefix if present (DDP checkpoint → non-DDP model)
+                    if any(k.startswith('module.') for k in ft_state):
+                        ft_state = {k.replace('module.', '', 1): v for k, v in ft_state.items()}
+                    # Add 'module.' prefix if needed (non-DDP checkpoint → DDP model)
+                    if world_size > 1 and not any(k.startswith('module.') for k in ft_state):
+                        ft_state = {'module.' + k: v for k, v in ft_state.items()}
+                    model.load_state_dict(ft_state)
+                    if is_main_process(): logging.info("Fine-tune weights loaded successfully. Starting training from step 0.")
+                    del ft_ckpt; torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                except Exception as e:
+                    logging.error(f"Failed to load fine-tune checkpoint: {e}", exc_info=True)
+                    logging.warning("Falling back to training from scratch.")
+            else:
+                if is_main_process(): logging.info("No checkpoint found. Starting fresh.")
 
 
         if world_size > 1:
@@ -1330,6 +1391,48 @@ def train(config):
             val_fixed_src, val_fixed_dst = capture_val_preview_batch(config, standard_transform)
             if val_fixed_src is None: logging.warning("Initial val preview batch capture failed.")
 
+    # --- Progressive Multi-Resolution Setup ---
+    progressive_schedule = []  # list of (epoch_index, resolution) for warm-up stages
+    current_training_res = config.data.resolution
+    if config.training.progressive_resolution:
+        full_res = config.data.resolution
+        # Compute progressive stages: quarter → half → full
+        quarter = max(64, (full_res // 4) // 16 * 16)  # Round down to nearest 16
+        half = max(64, (full_res // 2) // 16 * 16)
+        stages = []
+        if quarter < full_res:
+            stages.append(quarter)
+        if half < full_res and half > quarter:
+            stages.append(half)
+        # Build schedule: epoch 0 → stages[0], epoch 1 → stages[1], epoch 2+ → full
+        for i, res in enumerate(stages):
+            progressive_schedule.append((i, res))
+        if is_main_process() and progressive_schedule:
+            stage_str = ' → '.join([f'{res}px (epoch {ep+1})' for ep, res in progressive_schedule])
+            logging.info(f"Progressive resolution: {stage_str} → {full_res}px (epoch {len(progressive_schedule)+1}+)")
+        # Start at the appropriate progressive resolution (accounting for resume)
+        if progressive_schedule:
+            resume_epoch = start_step // iter_epoch if start_step > 0 else 0
+            current_training_res = config.data.resolution  # default to full
+            for ep_idx, res in progressive_schedule:
+                if resume_epoch == ep_idx:
+                    current_training_res = res
+                    break
+            if current_training_res != config.data.resolution:
+                if is_main_process(): logging.info(f"Progressive: starting at {current_training_res}px resolution")
+                try:
+                    dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, current_training_res, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask)
+                    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
+                    pin = True if device_type == 'cuda' else False; persist = True if config.dataloader.num_workers > 0 else False
+                    prefetch = config.dataloader.prefetch_factor if config.dataloader.num_workers > 0 else None
+                    dataloader = DataLoader(dataset, batch_size=config.training.batch_size, sampler=sampler, num_workers=config.dataloader.num_workers, pin_memory=pin, prefetch_factor=prefetch, persistent_workers=persist, collate_fn=collate_skip_none, drop_last=True)
+                    dataloader_iter = cycle(dataloader)
+                    if is_main_process(): logging.info(f"Progressive: dataset recreated at {current_training_res}px ({len(dataset)} slices)")
+                except Exception as e:
+                    logging.error(f"Progressive: failed to create dataset at {current_training_res}px: {e}. Using full resolution.", exc_info=True)
+                    current_training_res = config.data.resolution
+                    progressive_schedule = []
+
     # --- Main Training Loop ---
     model.train()
     try:
@@ -1348,6 +1451,27 @@ def train(config):
                 if isinstance(dataloader.sampler, DistributedSampler): dataloader.sampler.set_epoch(current_ep_idx)
                 if is_main_process() and (global_step > 0 or start_step > 0): logging.info(f"--- Epoch {current_ep_idx + 1} Start (Step {global_step}) ---")
                 ep_l1, ep_lpips, ep_steps = 0.0, 0.0, 0
+
+                # --- Progressive resolution: check if we need to change resolution ---
+                if config.training.progressive_resolution:
+                    target_res = config.data.resolution  # default to full
+                    for ep_idx, res in progressive_schedule:
+                        if current_ep_idx == ep_idx:
+                            target_res = res
+                            break
+                    if target_res != current_training_res:
+                        current_training_res = target_res
+                        if is_main_process(): logging.info(f"Progressive: switching to {current_training_res}px resolution")
+                        try:
+                            dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, current_training_res, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask)
+                            sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
+                            pin = True if device_type == 'cuda' else False; persist = True if config.dataloader.num_workers > 0 else False
+                            prefetch = config.dataloader.prefetch_factor if config.dataloader.num_workers > 0 else None
+                            dataloader = DataLoader(dataset, batch_size=config.training.batch_size, sampler=sampler, num_workers=config.dataloader.num_workers, pin_memory=pin, prefetch_factor=prefetch, persistent_workers=persist, collate_fn=collate_skip_none, drop_last=True)
+                            dataloader_iter = cycle(dataloader)
+                            if is_main_process(): logging.info(f"Progressive: dataset recreated at {current_training_res}px ({len(dataset)} slices)")
+                        except Exception as e:
+                            logging.error(f"Progressive: failed to recreate dataset at {current_training_res}px: {e}", exc_info=True)
 
             data_load_start = time.time()
             try: batch = next(dataloader_iter)
@@ -1408,12 +1532,22 @@ def train(config):
                             weight_map = 1.0 + auto_mask_w * (config.mask.mask_weight - 1.0)
                             l1 = (torch.abs(out - dst) * weight_map).mean()
                         else:
+                            weight_map = None
                             l1 = criterion_l1(out, dst)
+                        l2_val = torch.tensor(0.0, device=device)
+                        if use_l2 and criterion_l2 is not None:
+                            if weight_map is not None:
+                                l2_val = ((out - dst) ** 2 * weight_map).mean()
+                            else:
+                                l2_val = criterion_l2(out, dst)
                         lp = torch.tensor(0.0, device=device)
                         if use_lpips and loss_fn_lpips:
                             try: lp = loss_fn_lpips(out, dst).mean()
                             except Exception as e_lp: lp = torch.tensor(0.0, device=device)
-                        loss = l1 + config.training.lambda_lpips * lp
+                        if use_weighted:
+                            loss = config.training.l1_weight * l1 + config.training.l2_weight * l2_val + config.training.lpips_weight * lp
+                        else:
+                            loss = l1 + config.training.lambda_lpips * lp
             else:
                 out = model(model_input)
                 if use_bce_dice:
@@ -1440,12 +1574,22 @@ def train(config):
                         weight_map = 1.0 + auto_mask_w * (config.mask.mask_weight - 1.0)
                         l1 = (torch.abs(out - dst) * weight_map).mean()
                     else:
+                        weight_map = None
                         l1 = criterion_l1(out, dst)
+                    l2_val = torch.tensor(0.0, device=device)
+                    if use_l2 and criterion_l2 is not None:
+                        if weight_map is not None:
+                            l2_val = ((out - dst) ** 2 * weight_map).mean()
+                        else:
+                            l2_val = criterion_l2(out, dst)
                     lp = torch.tensor(0.0, device=device)
                     if use_lpips and loss_fn_lpips:
                         try: lp = loss_fn_lpips(out, dst).mean()
                         except Exception as e_lp: lp = torch.tensor(0.0, device=device)
-                    loss = l1 + config.training.lambda_lpips * lp
+                    if use_weighted:
+                        loss = config.training.l1_weight * l1 + config.training.l2_weight * l2_val + config.training.lpips_weight * lp
+                    else:
+                        loss = l1 + config.training.lambda_lpips * lp
 
             if not torch.isfinite(loss):
                 logging.error(f"S{global_step}: NaN/Inf loss ({loss.item()})! Skip update.")
@@ -1472,6 +1616,7 @@ def train(config):
             compute_time = time.time() - compute_start
 
             batch_l1 = l1.detach().item(); batch_lp = lp.detach().item() if use_lpips else 0.0
+            batch_l2 = l2_val.detach().item() if use_l2 else 0.0
             _has_weighted_loss = (use_mask_loss and mask_batch is not None) or use_auto_mask
             batch_l1_raw = criterion_l1(out.detach(), dst).item() if _has_weighted_loss else batch_l1
             if world_size > 1:
@@ -1496,6 +1641,7 @@ def train(config):
                            f'{loss_label}:{batch_l1:.4f}(Avg:{avg_ep_l1:.4f})')
                 if _has_weighted_loss:
                     log_msg += f'[raw:{batch_l1_raw:.4f}]'
+                if use_l2: log_msg += f', L2:{batch_l2:.4f}'
                 if use_lpips: log_msg += (f', LPIPS:{batch_lp:.4f}(Avg:{avg_ep_lp:.4f})')
                 log_msg += (f', LR:{current_lr:.1e}, T/Step:{avg_time:.3f}s '
                             f'(D:{data_load_time:.3f} T:{transfer_time:.3f} C:{compute_time:.3f})')
@@ -1749,6 +1895,7 @@ if __name__ == "__main__":
         logging.info(f"num_workers from config: {raw_workers}")
     config.dataloader.prefetch_factor = getattr(config.dataloader, 'prefetch_factor', 2 if config.dataloader.num_workers > 0 else None)
     config.training.max_steps = getattr(config.training, 'max_steps', 0)
+    config.training.finetune_from = getattr(config.training, 'finetune_from', None)
     config.saving = getattr(config, 'saving', SimpleNamespace()); config.saving.save_iterations_interval = getattr(config.saving, 'save_iterations_interval', 0)
     config.logging = getattr(config, 'logging', SimpleNamespace()); config.logging.log_interval = getattr(config.logging, 'log_interval', 50)
     config.logging.preview_batch_interval = getattr(config.logging, 'preview_batch_interval', 500); config.logging.preview_refresh_rate = getattr(config.logging, 'preview_refresh_rate', 5)
@@ -1762,6 +1909,11 @@ if __name__ == "__main__":
     # Model defaults
     config.model.model_type = getattr(config.model, 'model_type', 'unet')
     config.model.recurrence_steps = getattr(config.model, 'recurrence_steps', 2)
+    # Progressive resolution & weighted loss defaults
+    config.training.progressive_resolution = getattr(config.training, 'progressive_resolution', False)
+    config.training.l1_weight = getattr(config.training, 'l1_weight', 1.0)
+    config.training.l2_weight = getattr(config.training, 'l2_weight', 0.0)
+    config.training.lpips_weight = getattr(config.training, 'lpips_weight', 0.1)
     # Validation defaults
     config.data.val_src_dir = getattr(config.data, 'val_src_dir', None)
     config.data.val_dst_dir = getattr(config.data, 'val_dst_dir', None)
@@ -1772,8 +1924,14 @@ if __name__ == "__main__":
             if config.training.iterations_per_epoch <= 0: error_msgs.append("train.iter_epoch<=0")
             if config.training.batch_size <= 0: error_msgs.append("train.batch_size<=0")
             if not isinstance(config.training.lr, (int, float)) or config.training.lr <= 0: error_msgs.append("train.lr<=0")
-            if config.training.loss not in ['l1', 'l1+lpips', 'bce+dice']: error_msgs.append("train.loss invalid")
+            if config.training.loss not in ['l1', 'l1+lpips', 'weighted', 'bce+dice']: error_msgs.append("train.loss invalid")
             if config.training.lambda_lpips < 0: error_msgs.append("train.lambda_lpips<0")
+            if config.training.loss == 'weighted':
+                if config.training.l1_weight < 0: error_msgs.append("train.l1_weight<0")
+                if config.training.l2_weight < 0: error_msgs.append("train.l2_weight<0")
+                if config.training.lpips_weight < 0: error_msgs.append("train.lpips_weight<0")
+                if config.training.l1_weight == 0 and config.training.l2_weight == 0 and config.training.lpips_weight == 0:
+                    error_msgs.append("weighted loss: at least one weight must be > 0")
             if not (0.0 <= config.data.overlap_factor < 1.0): error_msgs.append("data.overlap invalid")
             ds=16;
             if config.data.resolution<=0 or config.data.resolution % ds !=0: error_msgs.append(f"data.resolution not >0 & div by {ds}")
@@ -1797,6 +1955,7 @@ if __name__ == "__main__":
             # Validation dir checks
             if config.data.val_src_dir and not os.path.isdir(config.data.val_src_dir): error_msgs.append(f"data.val_src_dir missing: {config.data.val_src_dir}")
             if config.data.val_dst_dir and not os.path.isdir(config.data.val_dst_dir): error_msgs.append(f"data.val_dst_dir missing: {config.data.val_dst_dir}")
+            if config.training.finetune_from and not os.path.isfile(config.training.finetune_from): error_msgs.append(f"training.finetune_from not found: {config.training.finetune_from}")
             # val_src_dir alone enables preview-only validation; both enables preview + loss
         except Exception as e: error_msgs.append(f"Validation error: {e}")
     # Abort on Errors
