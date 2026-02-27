@@ -32,12 +32,16 @@ ENV/
 .DS_Store
 Thumbs.db
 Miniconda3-latest-Linux-x86_64.sh
-inference_gui_settings.json
-inference_gui_settings.json
 
+# Build artifacts
 build/
-build/tunet/
 dist/
-build/tunet/Analysis-00.toc
 
+# Release archives
 *.zip
+
+# Archived/legacy files
+_archive/
+
+# Settings
+inference_gui_settings.json

@@ -2395,6 +2395,9 @@ class MainWindow(QMainWindow):
         if not source_path_str:
             return
 
+        # Remember the selected file's directory for output
+        self._conversion_output_dir = str(Path(source_path_str).parent)
+
         if self.copy_before_convert_check.isChecked():
             self.conversion_target = target_type
             source_path = Path(source_path_str)
@@ -2444,7 +2447,10 @@ class MainWindow(QMainWindow):
     def _build_utility_command(self, target_type, checkpoint_path):
         if target_type == 'flame':
             script_path = _APP_DIR / "utils" / "convert_flame.py"
-            return [sys.executable, str(script_path), '--checkpoint', checkpoint_path, '--use_gpu']
+            cmd = [sys.executable, str(script_path), '--checkpoint', checkpoint_path, '--use_gpu']
+            if hasattr(self, '_conversion_output_dir') and self._conversion_output_dir:
+                cmd.extend(['--output_dir', self._conversion_output_dir])
+            return cmd
         elif target_type == 'nuke':
             script_path = _APP_DIR / "utils" / "convert_nuke.py"
             return [sys.executable, str(script_path), '--generate_nk',
