@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QComboBox, QSpinBox, QCheckBox,
     QTextEdit, QFileDialog, QFormLayout, QMessageBox, QSizePolicy, QScrollArea,
     QSplitter, QProgressDialog, QDoubleSpinBox, QListWidget, QGroupBox,
-    QProgressBar, QStackedWidget,
+    QProgressBar, QStackedWidget, QFrame,
 )
 from PySide6.QtCore import Qt, QObject, Signal, Slot, QFileSystemWatcher, QTimer, QThread
 from PySide6.QtGui import QPixmap, QTextCursor
@@ -943,29 +943,67 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         layout.setAlignment(Qt.AlignCenter)
 
-        title = QLabel("TuNet by tpo.comp")
-        title.setStyleSheet("font-size: 18px; font-weight: bold;")
-        desc = QLabel(
-            "A direct, pixel-level mapping from src to dst images via an encoder-decoder network.\n"
-            "Supports training, inference, and export to VFX tools.")
-        desc.setAlignment(Qt.AlignCenter)
-        desc.setWordWrap(True)
-        support = QLabel("Native inference support in Autodesk Flame or Foundry Nuke.")
-        support.setAlignment(Qt.AlignCenter)
-        source_title = QLabel("Source:")
-        source_link = QLabel('<a href="https://github.com/tpc2233/tunet">https://github.com/tpc2233/tunet</a>')
-        source_link.setOpenExternalLinks(True)
-        source_link.setAlignment(Qt.AlignCenter)
+        # --- Original project credit ---
+        orig_title = QLabel("TuNet")
+        orig_title.setStyleSheet("font-size: 20px; font-weight: bold;")
+        orig_title.setAlignment(Qt.AlignCenter)
+        orig_author = QLabel("Created by tpo.comp")
+        orig_author.setStyleSheet("font-size: 14px;")
+        orig_author.setAlignment(Qt.AlignCenter)
+        orig_desc = QLabel(
+            "A direct, pixel-level mapping from source to destination images\n"
+            "via an encoder-decoder network.")
+        orig_desc.setAlignment(Qt.AlignCenter)
+        orig_desc.setWordWrap(True)
+        orig_link = QLabel('<a href="https://github.com/tpc2233/tunet">github.com/tpc2233/tunet</a>')
+        orig_link.setOpenExternalLinks(True)
+        orig_link.setAlignment(Qt.AlignCenter)
 
+        # --- Separator ---
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+
+        # --- Fork credit ---
+        fork_title = QLabel("VFX Tools Fork")
+        fork_title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        fork_title.setAlignment(Qt.AlignCenter)
+        fork_author = QLabel("Maintained by emlcpfx")
+        fork_author.setStyleSheet("font-size: 13px;")
+        fork_author.setAlignment(Qt.AlignCenter)
+        fork_changes = QLabel(
+            "Changes since fork:\n"
+            "\u2022 Unified PyQt GUI for training, inference, and export\n"
+            "\u2022 Render queue with progress monitoring\n"
+            "\u2022 Live preview with pan/zoom\n"
+            "\u2022 Auto-matte / auto-mask generation\n"
+            "\u2022 MSRN architecture option and BigCat features\n"
+            "\u2022 Checkpoint resume, validation, and improved naming\n"
+            "\u2022 Export to Flame (.gizmo) and Nuke (.nk) formats\n"
+            "\u2022 Multi-OS support")
+        fork_changes.setAlignment(Qt.AlignCenter)
+        fork_changes.setWordWrap(True)
+        fork_link = QLabel('<a href="https://github.com/emlcpfx/tunet">github.com/emlcpfx/tunet</a>')
+        fork_link.setOpenExternalLinks(True)
+        fork_link.setAlignment(Qt.AlignCenter)
+
+        # --- Layout ---
         layout.addStretch()
-        layout.addWidget(title)
-        layout.addSpacing(15)
-        layout.addWidget(desc)
-        layout.addSpacing(10)
-        layout.addWidget(support)
-        layout.addSpacing(25)
-        layout.addWidget(source_title)
-        layout.addWidget(source_link)
+        layout.addWidget(orig_title)
+        layout.addWidget(orig_author)
+        layout.addSpacing(8)
+        layout.addWidget(orig_desc)
+        layout.addSpacing(4)
+        layout.addWidget(orig_link)
+        layout.addSpacing(20)
+        layout.addWidget(separator)
+        layout.addSpacing(20)
+        layout.addWidget(fork_title)
+        layout.addWidget(fork_author)
+        layout.addSpacing(8)
+        layout.addWidget(fork_changes)
+        layout.addSpacing(4)
+        layout.addWidget(fork_link)
         layout.addStretch()
         self.tabs.addTab(tab, "About")
 
