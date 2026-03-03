@@ -73,11 +73,13 @@ PRESETS = {
     "Beauty": {
         "description": (
             "Skin retouching, blemish removal, frequency separation cleanup.\n"
-            "Uses auto-mask to focus on areas that changed between src and dst."
+            "Uses MSRN (attention + recurrence) for fine detail preservation.\n"
+            "Auto-mask focuses learning on areas that changed between src and dst."
         ),
         "loss": "l1+lpips",
         "lambda_lpips": 0.1,
         "lr": 5e-4,
+        "model_type": "msrn",
         "mask": {
             "use_mask_loss": True,
             "mask_weight": 10.0,
@@ -632,7 +634,7 @@ class SimpleWindow(QMainWindow):
             },
             'model': {
                 'model_size_dims': model_size,
-                'model_type': 'unet',
+                'model_type': preset.get('model_type', 'unet'),
             },
             'training': {
                 'iterations_per_epoch': 500,
