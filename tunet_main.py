@@ -71,6 +71,19 @@ def main():
         except Exception as e:
             print(f"Update check skipped: {e}")
 
+    # --simple flag launches the simplified preset-based UI
+    if '--simple' in sys.argv:
+        from tunet_simple import SimpleWindow
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is None:
+            sys.argv = [a for a in sys.argv if a != '--simple']
+            app = QApplication(sys.argv)
+        window = SimpleWindow()
+        window.show()
+        sys.exit(app.exec())
+
     from ui_app import MainWindow
     from PySide6.QtWidgets import QApplication
 
