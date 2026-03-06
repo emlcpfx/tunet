@@ -3,12 +3,13 @@ const path = require('path');
 const fs = require('fs');
 
 async function deploy() {
+  require('dotenv').config();
   const config = {
-    host: '62.72.50.53',
-    user: 'u742468149',
-    password: '***REMOVED***',
-    port: 21,
-    remotePath: '/domains/ericmlevy.com/public_html/sparktunet'
+    host: process.env.FTP_HOST,
+    user: process.env.FTP_USER,
+    password: process.env.FTP_PASSWORD,
+    port: parseInt(process.env.FTP_PORT || '21'),
+    remotePath: process.env.FTP_REMOTE_PATH
   };
 
   const client = new ftp.Client();
