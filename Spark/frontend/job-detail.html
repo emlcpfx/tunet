@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>hero_beauty_v3 - Training - Spark Cloud Studio</title>
+  <link rel="stylesheet" href="spark-tunet.css">
+  <style>
+    .job-header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .job-header h1 { margin-bottom: 0; }
+
+    .monitor-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+
+    .loss-chart {
+      background: var(--white);
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-lg);
+      padding: 20px;
+      min-height: 280px;
+      position: relative;
+    }
+
+    .chart-placeholder {
+      width: 100%;
+      height: 220px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* Simple SVG loss curve illustration */
+    .chart-placeholder svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    .preview-panel {
+      background: var(--white);
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-lg);
+      padding: 20px;
+    }
+
+    .preview-toggle {
+      display: flex;
+      gap: 0;
+      background: var(--gray-100);
+      border-radius: var(--radius-md);
+      padding: 3px;
+      margin-bottom: 12px;
+    }
+
+    .preview-toggle-btn {
+      flex: 1;
+      padding: 6px 12px;
+      border: none;
+      background: transparent;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--gray-500);
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.15s;
+    }
+
+    .preview-toggle-btn.active {
+      background: var(--white);
+      color: var(--gray-800);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .preview-image {
+      background: #1a1a1a;
+      border-radius: var(--radius-md);
+      overflow: hidden;
+      position: relative;
+      min-height: 200px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .preview-image .mock-preview {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 2px;
+      width: 100%;
+      padding: 2px;
+    }
+
+    .mock-preview-tile {
+      aspect-ratio: 1;
+      border-radius: 2px;
+      position: relative;
+    }
+
+    .mock-preview-tile .label {
+      position: absolute;
+      bottom: 4px;
+      left: 4px;
+      font-size: 9px;
+      color: rgba(255,255,255,0.7);
+      background: rgba(0,0,0,0.5);
+      padding: 1px 5px;
+      border-radius: 3px;
+    }
+
+    .live-stats {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+
+    .live-stat {
+      text-align: center;
+      padding: 16px 12px;
+      background: var(--white);
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-card);
+    }
+
+    .live-stat-value {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--gray-900);
+    }
+
+    .live-stat-value.cost { color: var(--spark-purple-hover); }
+    .live-stat-value.loss { color: var(--green); }
+
+    .live-stat-label {
+      font-size: 11px;
+      color: var(--gray-500);
+      margin-top: 2px;
+    }
+
+    .console-section {
+      margin-top: 20px;
+    }
+
+    .console-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .download-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 12px;
+    }
+
+    .download-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px;
+      background: var(--gray-100);
+      border-radius: var(--radius-md);
+      text-decoration: none;
+      color: var(--gray-800);
+      transition: background 0.15s;
+      cursor: pointer;
+    }
+
+    .download-item:hover {
+      background: var(--spark-purple-light);
+    }
+
+    .download-item .dl-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: var(--radius-md);
+      background: var(--spark-purple-light);
+      color: var(--spark-purple);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .download-item .dl-name {
+      font-weight: 600;
+      font-size: 13px;
+    }
+
+    .download-item .dl-size {
+      font-size: 11px;
+      color: var(--gray-500);
+    }
+  </style>
+</head>
+<body>
+<div class="app-layout has-demo-banner">
+
+  <!-- Demo Banner -->
+  <div class="demo-banner">
+    Tunet Spark Share &mdash; UI Concept Demo (non-functional) &mdash; <a href="https://github.com/emlcpfx/tunet" target="_blank">github.com/emlcpfx/tunet</a>
+  </div>
+
+  <!-- Sidebar -->
+  <nav class="sidebar">
+    <div class="sidebar-logo">
+      <svg viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="14" fill="#ae69f4"/><path d="M12 10c0-1 1.5-2 4-2s4 1 4 2c0 2-4 3-4 5 0 1.5 0 2 0 2m0 3v1" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>
+      <span>spark</span>
+    </div>
+    <div class="sidebar-nav">
+      <a href="#" class="nav-item"><span class="nav-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></span> Dashboard</a>
+      <div class="nav-section-label">Tools</div>
+      <a href="dashboard.html" class="nav-item active"><span class="nav-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a4 4 0 0 0-4 4c0 2 1 3 2 4l-3 3a2 2 0 0 0 0 3h10a2 2 0 0 0 0-3l-3-3c1-1 2-2 2-4a4 4 0 0 0-4-4z"/><circle cx="12" cy="19" r="2"/></svg></span> Tunet Training</a>
+    </div>
+    <div class="sidebar-footer"><div class="sidebar-user"><div class="user-avatar"></div><span>Eric Levy</span></div></div>
+  </nav>
+
+  <!-- ========== Main Content ========== -->
+  <main class="main-content">
+
+    <!-- Header -->
+    <div class="job-header">
+      <a href="dashboard.html" class="btn btn-ghost" style="padding: 6px 10px;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+      </a>
+      <div>
+        <h1 class="page-title" style="margin-bottom: 4px;">hero_beauty_v3</h1>
+        <div class="flex gap-3 items-center">
+          <span class="badge badge-green"><span class="dot"></span> Training</span>
+          <span class="text-sm text-muted">Beauty &middot; MSRN 128 &middot; 512px &middot; A10 24GB ($1.65/hr)</span>
+        </div>
+      </div>
+      <div style="margin-left: auto;">
+        <button class="btn btn-danger">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="5" y="5" rx="2"/></svg>
+          Stop &amp; Save
+        </button>
+      </div>
+    </div>
+
+    <!-- Live Stats -->
+    <div class="live-stats">
+      <div class="live-stat">
+        <div class="live-stat-value">4,312</div>
+        <div class="live-stat-label">Step (of 15,000)</div>
+      </div>
+      <div class="live-stat">
+        <div class="live-stat-value loss">0.0142</div>
+        <div class="live-stat-label">Training Loss</div>
+      </div>
+      <div class="live-stat">
+        <div class="live-stat-value">2h 18m</div>
+        <div class="live-stat-label">Elapsed</div>
+      </div>
+      <div class="live-stat">
+        <div class="live-stat-value cost">$3.80</div>
+        <div class="live-stat-label">Cost So Far</div>
+      </div>
+    </div>
+
+    <!-- Overall progress -->
+    <div class="card mb-4">
+      <div class="flex justify-between items-center mb-2">
+        <span class="text-sm font-semi">Progress</span>
+        <span class="text-sm text-muted">29% &middot; Est. ~5h 42m remaining (~$9.41 more)</span>
+      </div>
+      <div class="progress-track" style="height: 10px;">
+        <div class="progress-fill" style="width: 29%;"></div>
+      </div>
+    </div>
+
+    <!-- Monitor Grid: Loss Chart + Preview -->
+    <div class="monitor-grid">
+
+      <!-- Loss Chart -->
+      <div class="loss-chart">
+        <div class="card-title" style="font-size: 14px;">Loss Curve</div>
+        <div class="chart-placeholder">
+          <svg viewBox="0 0 500 200" preserveAspectRatio="none">
+            <!-- Grid lines -->
+            <line x1="0" y1="50" x2="500" y2="50" stroke="#e5e7eb" stroke-width="0.5"/>
+            <line x1="0" y1="100" x2="500" y2="100" stroke="#e5e7eb" stroke-width="0.5"/>
+            <line x1="0" y1="150" x2="500" y2="150" stroke="#e5e7eb" stroke-width="0.5"/>
+
+            <!-- Training loss (purple, dropping) -->
+            <polyline
+              points="0,180 20,160 40,140 60,120 80,105 100,95 120,88 140,82 160,78 180,74 200,70 220,66 240,62 260,58 280,55 300,52 320,50 340,48 360,46 380,44 400,42 420,40 440,38"
+              fill="none"
+              stroke="#ae69f4"
+              stroke-width="2"
+            />
+
+            <!-- Validation loss (dashed, slightly higher) -->
+            <polyline
+              points="0,185 50,150 100,120 150,100 200,88 250,78 300,72 350,65 400,58 440,54"
+              fill="none"
+              stroke="#7E3AF2"
+              stroke-width="1.5"
+              stroke-dasharray="6,4"
+            />
+
+            <!-- Legend -->
+            <line x1="340" y1="12" x2="360" y2="12" stroke="#ae69f4" stroke-width="2"/>
+            <text x="364" y="16" font-size="10" fill="#6b7280" font-family="Plus Jakarta Sans">Train</text>
+            <line x1="410" y1="12" x2="430" y2="12" stroke="#7E3AF2" stroke-width="1.5" stroke-dasharray="6,4"/>
+            <text x="434" y="16" font-size="10" fill="#6b7280" font-family="Plus Jakarta Sans">Val</text>
+          </svg>
+        </div>
+        <div class="flex justify-between text-xs text-muted" style="margin-top: 4px;">
+          <span>Step 0</span>
+          <span>Step 2,147</span>
+        </div>
+      </div>
+
+      <!-- Preview Panel -->
+      <div class="preview-panel">
+        <div class="flex justify-between items-center" style="margin-bottom: 12px;">
+          <div class="card-title" style="font-size: 14px; margin-bottom: 0;">Preview</div>
+          <div class="preview-toggle">
+            <button class="preview-toggle-btn active">Training</button>
+            <button class="preview-toggle-btn">Validation</button>
+          </div>
+        </div>
+
+        <div class="preview-image">
+          <div class="mock-preview">
+            <div class="mock-preview-tile" style="background: linear-gradient(135deg, #c9a96e 0%, #d4b07a 50%, #bfa068 100%);">
+              <span class="label">Source</span>
+            </div>
+            <div class="mock-preview-tile" style="background: linear-gradient(135deg, #d4b88a 0%, #e0c49a 50%, #cfb080 100%);">
+              <span class="label">Target</span>
+            </div>
+            <div class="mock-preview-tile" style="background: linear-gradient(135deg, #d2b586 0%, #ddc094 50%, #cbac7c 100%);">
+              <span class="label">Output</span>
+            </div>
+          </div>
+        </div>
+        <div class="text-xs text-muted mt-2" style="text-align: center;">
+          Updates every 35 steps &middot; Last updated: step 2,135
+        </div>
+      </div>
+    </div>
+
+    <!-- Console Log -->
+    <div class="console-section">
+      <div class="console-header">
+        <span class="card-title" style="font-size: 14px; margin-bottom: 0;">Console Output</span>
+        <button class="btn btn-ghost btn-sm">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+          Download Full Log
+        </button>
+      </div>
+      <div class="console">
+<span class="log-step">[08:14:22]</span> Loading config from /jobs/hero_beauty_v3/config.yaml
+<span class="log-step">[08:14:23]</span> Device: cuda:0 (NVIDIA RTX 4090, 24GB)
+<span class="log-step">[08:14:24]</span> Model: MSRN (hidden=128, recurrence=2)
+<span class="log-step">[08:14:24]</span> Parameters: 4,217,603
+<span class="log-step">[08:14:25]</span> Dataset: 342 image pairs, 512px patches, overlap 0.25
+<span class="log-step">[08:14:25]</span> Auto-mask: enabled (weight=10.0)
+<span class="log-step">[08:14:26]</span> Training started — Beauty preset, L1+LPIPS, lr=5e-4, AMP=true
+<span class="log-step">[08:14:26]</span> ─────────────────────────────────────────
+<span class="log-step">[08:15:01]</span> Epoch 1 | <span class="log-loss">Step 25 | loss: 0.1842</span> | lr: 5.00e-4
+<span class="log-step">[08:15:38]</span> Epoch 1 | <span class="log-loss">Step 50 | loss: 0.1203</span> | lr: 5.00e-4
+<span class="log-step">[08:16:14]</span> Epoch 1 | <span class="log-loss">Step 75 | loss: 0.0891</span> | lr: 5.00e-4
+...
+<span class="log-step">[10:21:42]</span> Epoch 5 | <span class="log-loss">Step 2145 | loss: 0.0142</span> | lr: 4.87e-4
+<span class="log-step">[10:21:48]</span> Epoch 5 | <span class="log-loss">Step 2147 | loss: 0.0141</span> | lr: 4.87e-4
+<span class="log-step">[10:21:48]</span> Validation: <span class="log-loss">val_loss: 0.0189</span>
+<span class="log-step">[10:21:49]</span> Preview saved → training_preview.jpg
+      </div>
+    </div>
+
+    <!-- Downloads (shown even during training for partial checkpoints) -->
+    <div class="card mt-4">
+      <div class="card-title">Downloads</div>
+      <p class="text-sm text-muted mb-4">Latest checkpoint and exports. Final ONNX exports will be generated when training completes.</p>
+
+      <div class="download-grid">
+        <a class="download-item">
+          <div class="dl-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+          </div>
+          <div>
+            <div class="dl-name">Latest Checkpoint</div>
+            <div class="dl-size">hero_beauty_v3_tunet_latest.pth &middot; 48 MB</div>
+          </div>
+        </a>
+
+        <a class="download-item" style="opacity: 0.4; pointer-events: none;">
+          <div class="dl-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+          </div>
+          <div>
+            <div class="dl-name">ONNX — Nuke</div>
+            <div class="dl-size">Available after training completes</div>
+          </div>
+        </a>
+
+        <a class="download-item" style="opacity: 0.4; pointer-events: none;">
+          <div class="dl-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+          </div>
+          <div>
+            <div class="dl-name">ONNX — Flame / AE</div>
+            <div class="dl-size">Available after training completes</div>
+          </div>
+        </a>
+
+        <a class="download-item">
+          <div class="dl-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+          </div>
+          <div>
+            <div class="dl-name">Preview Images</div>
+            <div class="dl-size">training_preview.jpg + validation</div>
+          </div>
+        </a>
+      </div>
+    </div>
+
+    <!-- Navigation hint -->
+    <div style="margin-top: 24px; text-align: center;">
+      <a href="dashboard.html" class="btn btn-secondary" style="text-decoration:none;">&larr; Back to Dashboard</a>
+      &nbsp;&nbsp;
+      <a href="new-job.html" class="btn btn-ghost" style="text-decoration:none;">See New Job Page &rarr;</a>
+    </div>
+
+    <!-- Job Config Summary -->
+    <details class="mt-4">
+      <summary style="cursor: pointer; font-size: 13px; color: var(--gray-500); font-weight: 500;">
+        Job Configuration (config.yaml)
+      </summary>
+      <div class="console mt-2" style="max-height: 400px; font-size: 11px;">
+data:
+  src_dir: /sharesync/show_ep04/beauty/src/
+  dst_dir: /sharesync/show_ep04/beauty/dst/
+  output_dir: /jobs/hero_beauty_v3/model/
+  resolution: 512
+  overlap_factor: 0.25
+
+model:
+  model_type: msrn
+  model_size_dims: 128
+  recurrence_steps: 2
+
+training:
+  batch_size: 4
+  iterations_per_epoch: 500
+  max_steps: 15000
+  use_amp: true
+  loss: l1+lpips
+  lambda_lpips: 0.1
+  lr: 0.0005
+  progressive_resolution: false
+
+mask:
+  use_mask_loss: true
+  mask_weight: 10.0
+  use_mask_input: false
+  use_auto_mask: true
+
+saving:
+  keep_last_checkpoints: 4
+      </div>
+    </details>
+
+  </main>
+</div>
+
+<script>
+// Interactive preview toggle (demo only)
+document.querySelectorAll('.preview-toggle-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.preview-toggle-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+});
+</script>
+</body>
+</html>
