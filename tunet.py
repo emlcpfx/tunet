@@ -378,12 +378,13 @@ class MainWindow(QMainWindow):
         self.use_auto_mask_input.toggled.connect(self.skip_empty_patches_input.setEnabled)
 
         self.skip_empty_threshold_input = QDoubleSpinBox()
-        self.skip_empty_threshold_input.setRange(0.5, 20.0)
+        self.skip_empty_threshold_input.setRange(0.1, 20.0)
         self.skip_empty_threshold_input.setSingleStep(0.5)
-        self.skip_empty_threshold_input.setValue(3.0)
+        self.skip_empty_threshold_input.setDecimals(1)
+        self.skip_empty_threshold_input.setValue(1.0)
         self.skip_empty_threshold_input.setToolTip(
-            "Mean pixel difference threshold (0-255 scale) below which a patch is considered empty. "
-            "Higher = more aggressive filtering. 3.0 is good for EXR, lower for JPEG.")
+            "Max pixel difference threshold (0-255 scale) below which a patch is skipped. "
+            "If no pixel in the crop differs by more than this, the crop is considered empty.")
         self.skip_empty_threshold_input.setEnabled(False)
         self.skip_empty_patches_input.toggled.connect(self.skip_empty_threshold_input.setEnabled)
 
@@ -1601,7 +1602,7 @@ class MainWindow(QMainWindow):
         self.use_mask_input_input.setChecked(mask_cfg.get('use_mask_input', False))
         self.use_auto_mask_input.setChecked(mask_cfg.get('use_auto_mask', False))
         self.skip_empty_patches_input.setChecked(mask_cfg.get('skip_empty_patches', False))
-        self.skip_empty_threshold_input.setValue(mask_cfg.get('skip_empty_threshold', 3.0))
+        self.skip_empty_threshold_input.setValue(mask_cfg.get('skip_empty_threshold', 1.0))
 
         # Augmentations
         self.hflip_check.setChecked(False)
