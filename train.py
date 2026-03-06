@@ -551,7 +551,7 @@ def load_mask_image(image_path):
 class AugmentedImagePairSlicingDataset(Dataset):
     def __init__(self, src_dir, dst_dir, resolution, overlap_factor=0.0,
                  src_transforms=None, dst_transforms=None, shared_transforms=None,
-                 final_transform=None, mask_dir=None, use_auto_mask=False, skip_empty_patches=False):
+                 final_transform=None, mask_dir=None, use_auto_mask=False, skip_empty_patches=False, skip_empty_threshold=1.5):
         self.src_dir = os.path.abspath(src_dir)
         self.dst_dir = os.path.abspath(dst_dir)
         if not os.path.isdir(self.src_dir): raise FileNotFoundError(f"Src dir not found: {self.src_dir}")
@@ -563,6 +563,7 @@ class AugmentedImagePairSlicingDataset(Dataset):
         self.shared_transforms, self.final_transform = shared_transforms, final_transform
         self.use_auto_mask = use_auto_mask
         self.skip_empty_patches = skip_empty_patches
+        self.skip_empty_threshold = skip_empty_threshold
         self.slice_info, self.skipped_count, self.processed_files, self.total_slices_generated, self.empty_patches_skipped = [], 0, 0, 0, 0
         self.skipped_file_reasons = []
         overlap_pixels = int(resolution * overlap_factor); self.stride = max(1, resolution - overlap_pixels)
@@ -609,7 +610,7 @@ class AugmentedImagePairSlicingDataset(Dataset):
                         # Skip patches where src and dst are essentially identical
                         if diff_map is not None:
                             patch_diff = diff_map[y:y+resolution, x:x+resolution]
-                            if patch_diff.max() < 2.0:  # max pixel diff < 2/255 -> no meaningful change
+                            if patch_diff.mean() < self.skip_empty_threshold:
                                 self.empty_patches_skipped += 1
                                 continue
                         crop_box = (x, y, x + resolution, y + resolution)
@@ -1150,13 +1151,13 @@ def train(config):
     if is_main_process() and use_auto_mask:
         logging.info(f"Auto-mask enabled: weight={config.mask.mask_weight} (auto-generated from |src-dst|, blur+gamma expansion)")
     if is_main_process() and config.mask.skip_empty_patches and use_auto_mask:
-        logging.info(f"Skip empty patches: enabled (filtering patches with no src/dst difference)")
+        logging.info(f"Skip empty patches: enabled (mean diff threshold={config.mask.skip_empty_threshold}/255)")
 
     # --- Dataset & DataLoader ---
     dataset, dataloader, dataloader_iter = None, None, None
     try:
         skip_empty = config.mask.skip_empty_patches and use_auto_mask
-        dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, config.data.resolution, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty)
+        dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, config.data.resolution, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold)
         if is_main_process():
              logging.info(f"Dataset Size: {len(dataset)} slices.")
              global_bs = config.training.batch_size * world_size; est_bpp = math.ceil(len(dataset)/global_bs) if global_bs>0 else 0
@@ -1441,7 +1442,7 @@ def train(config):
             if current_training_res != config.data.resolution:
                 if is_main_process(): logging.info(f"Progressive: starting at {current_training_res}px resolution")
                 try:
-                    dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, current_training_res, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty)
+                    dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, current_training_res, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold)
                     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
                     pin = True if device_type == 'cuda' else False; persist = True if config.dataloader.num_workers > 0 else False
                     prefetch = config.dataloader.prefetch_factor if config.dataloader.num_workers > 0 else None
@@ -1483,7 +1484,7 @@ def train(config):
                         current_training_res = target_res
                         if is_main_process(): logging.info(f"Progressive: switching to {current_training_res}px resolution")
                         try:
-                            dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, current_training_res, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty)
+                            dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, current_training_res, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold)
                             sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
                             pin = True if device_type == 'cuda' else False; persist = True if config.dataloader.num_workers > 0 else False
                             prefetch = config.dataloader.prefetch_factor if config.dataloader.num_workers > 0 else None
@@ -1927,6 +1928,7 @@ if __name__ == "__main__":
     config.mask.use_mask_input = getattr(config.mask, 'use_mask_input', False)
     config.mask.use_auto_mask = getattr(config.mask, 'use_auto_mask', False)
     config.mask.skip_empty_patches = getattr(config.mask, 'skip_empty_patches', False)
+    config.mask.skip_empty_threshold = getattr(config.mask, 'skip_empty_threshold', 1.5)
     # Model defaults
     config.model.model_type = getattr(config.model, 'model_type', 'unet')
     config.model.recurrence_steps = getattr(config.model, 'recurrence_steps', 2)
