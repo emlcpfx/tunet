@@ -551,7 +551,7 @@ def load_mask_image(image_path):
 class AugmentedImagePairSlicingDataset(Dataset):
     def __init__(self, src_dir, dst_dir, resolution, overlap_factor=0.0,
                  src_transforms=None, dst_transforms=None, shared_transforms=None,
-                 final_transform=None, mask_dir=None, use_auto_mask=False, skip_empty_patches=False, skip_empty_threshold=3.0):
+                 final_transform=None, mask_dir=None, use_auto_mask=False, skip_empty_patches=False, skip_empty_threshold=1.0):
         self.src_dir = os.path.abspath(src_dir)
         self.dst_dir = os.path.abspath(dst_dir)
         if not os.path.isdir(self.src_dir): raise FileNotFoundError(f"Src dir not found: {self.src_dir}")
@@ -564,6 +564,7 @@ class AugmentedImagePairSlicingDataset(Dataset):
         self.use_auto_mask = use_auto_mask
         self.skip_empty_patches = skip_empty_patches
         self.skip_empty_threshold = skip_empty_threshold
+        self._patch_diffs = []
         self.slice_info, self.skipped_count, self.processed_files, self.total_slices_generated, self.empty_patches_skipped = [], 0, 0, 0, 0
         self.skipped_file_reasons = []
         overlap_pixels = int(resolution * overlap_factor); self.stride = max(1, resolution - overlap_pixels)
@@ -610,7 +611,9 @@ class AugmentedImagePairSlicingDataset(Dataset):
                         # Skip patches where src and dst are essentially identical
                         if diff_map is not None:
                             patch_diff = diff_map[y:y+resolution, x:x+resolution]
-                            if patch_diff.mean() < self.skip_empty_threshold:
+                            patch_max = patch_diff.max()
+                            self._patch_diffs.append(patch_max)
+                            if patch_max < self.skip_empty_threshold:
                                 self.empty_patches_skipped += 1
                                 continue
                         crop_box = (x, y, x + resolution, y + resolution)
@@ -631,6 +634,11 @@ class AugmentedImagePairSlicingDataset(Dataset):
             # Keep INFO for overall summary
             empty_str = f" (filtered {self.empty_patches_skipped} empty patches)" if self.empty_patches_skipped > 0 else ""
             logging.info(f"Dataset Init: Processed {self.processed_files}/{len(src_files)} files -> {self.total_slices_generated} slices{empty_str}. Skipped {self.skipped_count} files.")
+            if self._patch_diffs:
+                diffs = np.array(self._patch_diffs)
+                pcts = np.percentile(diffs, [0, 25, 50, 75, 90, 95, 100])
+                logging.info(f"Patch diff stats (max_pixel/255): min={pcts[0]:.2f} p25={pcts[1]:.2f} p50={pcts[2]:.2f} p75={pcts[3]:.2f} p90={pcts[4]:.2f} p95={pcts[5]:.2f} max={pcts[6]:.2f} | threshold={self.skip_empty_threshold:.1f}")
+                self._patch_diffs = []
             # Use DEBUG for skip reasons unless count is high? Maybe keep top N as WARNING.
             if self.skipped_count > 0:
                  limit = 5
@@ -1151,7 +1159,7 @@ def train(config):
     if is_main_process() and use_auto_mask:
         logging.info(f"Auto-mask enabled: weight={config.mask.mask_weight} (auto-generated from |src-dst|, blur+gamma expansion)")
     if is_main_process() and config.mask.skip_empty_patches and use_auto_mask:
-        logging.info(f"Skip empty patches: enabled (mean diff threshold={config.mask.skip_empty_threshold}/255)")
+        logging.info(f"Skip empty patches: enabled (max pixel diff threshold={config.mask.skip_empty_threshold}/255)")
 
     # --- Dataset & DataLoader ---
     dataset, dataloader, dataloader_iter = None, None, None
@@ -1928,7 +1936,7 @@ if __name__ == "__main__":
     config.mask.use_mask_input = getattr(config.mask, 'use_mask_input', False)
     config.mask.use_auto_mask = getattr(config.mask, 'use_auto_mask', False)
     config.mask.skip_empty_patches = getattr(config.mask, 'skip_empty_patches', False)
-    config.mask.skip_empty_threshold = getattr(config.mask, 'skip_empty_threshold', 3.0)
+    config.mask.skip_empty_threshold = getattr(config.mask, 'skip_empty_threshold', 1.0)
     # Model defaults
     config.model.model_type = getattr(config.model, 'model_type', 'unet')
     config.model.recurrence_steps = getattr(config.model, 'recurrence_steps', 2)
