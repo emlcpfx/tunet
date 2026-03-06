@@ -19,7 +19,7 @@ Using 8x B200 GPUs. Inference can be done in consumer GPUs.
 
 
 
-Rain:   
+Rain  
 Flame:   
 [![Flame video](https://img.youtube.com/vi/6-OFAJtfliM/hqdefault.jpg)](https://youtu.be/6-OFAJtfliM)
 
