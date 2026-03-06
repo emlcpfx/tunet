@@ -551,7 +551,7 @@ def load_mask_image(image_path):
 class AugmentedImagePairSlicingDataset(Dataset):
     def __init__(self, src_dir, dst_dir, resolution, overlap_factor=0.0,
                  src_transforms=None, dst_transforms=None, shared_transforms=None,
-                 final_transform=None, mask_dir=None, use_auto_mask=False, skip_empty_patches=False, skip_empty_threshold=1.5):
+                 final_transform=None, mask_dir=None, use_auto_mask=False, skip_empty_patches=False, skip_empty_threshold=3.0):
         self.src_dir = os.path.abspath(src_dir)
         self.dst_dir = os.path.abspath(dst_dir)
         if not os.path.isdir(self.src_dir): raise FileNotFoundError(f"Src dir not found: {self.src_dir}")
@@ -1928,7 +1928,7 @@ if __name__ == "__main__":
     config.mask.use_mask_input = getattr(config.mask, 'use_mask_input', False)
     config.mask.use_auto_mask = getattr(config.mask, 'use_auto_mask', False)
     config.mask.skip_empty_patches = getattr(config.mask, 'skip_empty_patches', False)
-    config.mask.skip_empty_threshold = getattr(config.mask, 'skip_empty_threshold', 1.5)
+    config.mask.skip_empty_threshold = getattr(config.mask, 'skip_empty_threshold', 3.0)
     # Model defaults
     config.model.model_type = getattr(config.model, 'model_type', 'unet')
     config.model.recurrence_steps = getattr(config.model, 'recurrence_steps', 2)
