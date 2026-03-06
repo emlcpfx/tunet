@@ -4,7 +4,7 @@
 # A unified PySide6 desktop application combining training control and
 # batch inference into a single window, organized by workflow stage.
 #
-# Tabs: Data | Training | Inference | Previews | Export | About
+# Tabs: Data | Training | Previews | Export | Inference | About
 #
 # require: pip install PySide6
 # ==============================================================================
@@ -225,13 +225,13 @@ class MainWindow(QMainWindow):
         # --- Create tabs ---
         self._create_data_tab()          # Tab 0
         self._create_training_tab()      # Tab 1
-        self._create_inference_tab()     # Tab 2
-        self._create_previews_tab()      # Tab 3
-        self._create_export_tab()        # Tab 4
+        self._create_previews_tab()      # Tab 2
+        self._create_export_tab()        # Tab 3
+        self._create_inference_tab()     # Tab 4
         self._create_about_tab()         # Tab 5
 
         # Remember the inference tab index for sidebar switching
-        self._inference_tab_index = 2
+        self._inference_tab_index = 4
 
         # --- Signals ---
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -370,6 +370,13 @@ class MainWindow(QMainWindow):
             lambda checked: self.auto_mask_hint.setText(
                 "(Mask directory not needed with Auto Mask)" if checked else ""))
 
+        self.skip_empty_patches_input = QCheckBox("Skip empty patches (no src/dst difference)")
+        self.skip_empty_patches_input.setToolTip(
+            "Filter out training patches where source and destination are identical. "
+            "Speeds up training when only parts of the image have changes. Requires Auto Mask.")
+        self.skip_empty_patches_input.setEnabled(False)
+        self.use_auto_mask_input.toggled.connect(self.skip_empty_patches_input.setEnabled)
+
         mask_weight_row = QHBoxLayout()
         mask_weight_row.addWidget(self.use_mask_loss_input)
         mask_weight_row.addWidget(QLabel("Weight:"))
@@ -377,6 +384,7 @@ class MainWindow(QMainWindow):
         form_mask.addRow(mask_weight_row)
         form_mask.addRow(self.use_mask_input_input)
         form_mask.addRow(self.use_auto_mask_input)
+        form_mask.addRow(self.skip_empty_patches_input)
         layout.addWidget(grp_mask)
 
         # --- Data Augmentation ---
@@ -527,10 +535,75 @@ class MainWindow(QMainWindow):
         scroll.setWidget(tab)
         self.tabs.addTab(scroll, "Data")
 
+    def _apply_preset(self, preset_name):
+        """Apply a training preset, adjusting relevant settings."""
+        if preset_name == "Custom":
+            return
+        presets = {
+            "Beauty / Paint Fix": {
+                "model_type": "msrn",
+                "model_size_dims": "64",
+                "resolution": "512",
+                "overlap_factor": "0.5",
+                "loss": "l1+lpips",
+                "lambda_lpips": 0.2,
+                "lr": 1e-4,
+                "use_auto_mask": True,
+                "skip_empty_patches": True,
+                "progressive_resolution": False,
+            },
+            "Roto / Matte": {
+                "model_type": "unet",
+                "model_size_dims": "128",
+                "resolution": "512",
+                "overlap_factor": "0.25",
+                "loss": "bce+dice",
+                "lambda_lpips": 0.0,
+                "lr": 3e-4,
+                "use_auto_mask": False,
+                "skip_empty_patches": False,
+                "progressive_resolution": True,
+            },
+        }
+        p = presets.get(preset_name)
+        if not p:
+            return
+        self.model_type_input.setCurrentText(p["model_type"])
+        self.model_size_dims_input.setCurrentText(p["model_size_dims"])
+        self.resolution_input.setCurrentText(p["resolution"])
+        self.overlap_factor_input.setCurrentText(p["overlap_factor"])
+        self.loss_input.setCurrentText(p["loss"])
+        # Set LR by finding matching preset value
+        for i, (_, val) in enumerate(self.lr_presets):
+            if abs(val - p["lr"]) < 1e-8:
+                self.lr_input.setCurrentIndex(i)
+                break
+        # Set LPIPS lambda by finding matching preset value
+        for i, (_, val) in enumerate(self.lambda_presets):
+            if abs(val - p["lambda_lpips"]) < 1e-8:
+                self.lambda_lpips_input.setCurrentIndex(i)
+                break
+        self.use_auto_mask_input.setChecked(p["use_auto_mask"])
+        self.skip_empty_patches_input.setChecked(p["skip_empty_patches"])
+        self.progressive_res_check.setChecked(p.get("progressive_resolution", False))
+
     def _create_training_tab(self):
         """Tab 2: Training — model, optimization, schedule, logging."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
+
+        # --- Preset ---
+        grp_preset = QGroupBox("Preset")
+        form_preset = QFormLayout(grp_preset)
+        self.preset_input = QComboBox()
+        self.preset_input.addItems(["Custom", "Beauty / Paint Fix", "Roto / Matte"])
+        self.preset_input.setToolTip(
+            "Quick-start presets that configure model, loss, and patch settings.\n"
+            "Select a preset then adjust individual settings as needed.\n"
+            "Changing any setting afterwards keeps your changes (won't revert).")
+        self.preset_input.currentTextChanged.connect(self._apply_preset)
+        form_preset.addRow("Training Preset:", self.preset_input)
+        layout.addWidget(grp_preset)
 
         # --- Model ---
         grp_model = QGroupBox("Model")
@@ -742,7 +815,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(scroll, "Training")
 
     def _create_inference_tab(self):
-        """Tab 3: Inference — apply a trained model to new images."""
+        """Tab 5: Inference — apply a trained model to new images."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
@@ -938,7 +1011,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(tab, "Export")
 
     def _create_about_tab(self):
-        """Tab 6: About."""
+        """Tab 6: About / Info."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setAlignment(Qt.AlignCenter)
@@ -1412,6 +1485,7 @@ class MainWindow(QMainWindow):
                 'mask_weight': self.mask_weight_input.value(),
                 'use_mask_input': self.use_mask_input_input.isChecked(),
                 'use_auto_mask': self.use_auto_mask_input.isChecked(),
+                'skip_empty_patches': self.skip_empty_patches_input.isChecked(),
             }
 
         # Inference section
@@ -1511,6 +1585,7 @@ class MainWindow(QMainWindow):
         self.mask_weight_input.setValue(mask_cfg.get('mask_weight', 10.0))
         self.use_mask_input_input.setChecked(mask_cfg.get('use_mask_input', False))
         self.use_auto_mask_input.setChecked(mask_cfg.get('use_auto_mask', False))
+        self.skip_empty_patches_input.setChecked(mask_cfg.get('skip_empty_patches', False))
 
         # Augmentations
         self.hflip_check.setChecked(False)

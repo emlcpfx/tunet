@@ -551,7 +551,7 @@ def load_mask_image(image_path):
 class AugmentedImagePairSlicingDataset(Dataset):
     def __init__(self, src_dir, dst_dir, resolution, overlap_factor=0.0,
                  src_transforms=None, dst_transforms=None, shared_transforms=None,
-                 final_transform=None, mask_dir=None, use_auto_mask=False):
+                 final_transform=None, mask_dir=None, use_auto_mask=False, skip_empty_patches=False):
         self.src_dir = os.path.abspath(src_dir)
         self.dst_dir = os.path.abspath(dst_dir)
         if not os.path.isdir(self.src_dir): raise FileNotFoundError(f"Src dir not found: {self.src_dir}")
@@ -562,7 +562,8 @@ class AugmentedImagePairSlicingDataset(Dataset):
         self.src_transforms, self.dst_transforms = src_transforms, dst_transforms
         self.shared_transforms, self.final_transform = shared_transforms, final_transform
         self.use_auto_mask = use_auto_mask
-        self.slice_info, self.skipped_count, self.processed_files, self.total_slices_generated = [], 0, 0, 0
+        self.skip_empty_patches = skip_empty_patches
+        self.slice_info, self.skipped_count, self.processed_files, self.total_slices_generated, self.empty_patches_skipped = [], 0, 0, 0, 0
         self.skipped_file_reasons = []
         overlap_pixels = int(resolution * overlap_factor); self.stride = max(1, resolution - overlap_pixels)
         src_glob_pattern = os.path.join(self.src_dir, '*.*')
@@ -587,9 +588,15 @@ class AugmentedImagePairSlicingDataset(Dataset):
             try:
                 img_s = load_image_any_format(src_path); img_d = load_image_any_format(dst_path)
                 w_s, h_s = img_s.size; w_d, h_d = img_d.size
+                if (w_s, h_s) != (w_d, h_d): img_s.close(); img_d.close(); self.skipped_count += 1; self.skipped_file_reasons.append((base_name, f"Dims mismatch: src={w_s}x{h_s} dst={w_d}x{h_d}")); continue
+                if w_s < resolution or h_s < resolution: img_s.close(); img_d.close(); self.skipped_count += 1; self.skipped_file_reasons.append((base_name, f"Too small")); continue
+                # Pre-compute per-pixel diff map for empty patch filtering
+                diff_map = None
+                if self.skip_empty_patches:
+                    src_np = np.array(img_s).astype(np.float32)
+                    dst_np = np.array(img_d).astype(np.float32)
+                    diff_map = np.abs(src_np - dst_np).mean(axis=2)  # (H, W) in [0, 255]
                 img_s.close(); img_d.close()
-                if (w_s, h_s) != (w_d, h_d): self.skipped_count += 1; self.skipped_file_reasons.append((base_name, f"Dims mismatch: src={w_s}x{h_s} dst={w_d}x{h_d}")); continue
-                if w_s < resolution or h_s < resolution: self.skipped_count += 1; self.skipped_file_reasons.append((base_name, f"Too small")); continue
                 num_slices_for_file = 0
                 y_coords = list(range(0, max(0, h_s - resolution) + 1, self.stride)); x_coords = list(range(0, max(0, w_s - resolution) + 1, self.stride))
                 if (h_s > resolution) and ((h_s - resolution) % self.stride != 0): y_coords.append(h_s - resolution)
@@ -599,6 +606,12 @@ class AugmentedImagePairSlicingDataset(Dataset):
                     if not (0 <= y <= h_s - resolution): continue
                     for x in unique_x:
                         if not (0 <= x <= w_s - resolution): continue
+                        # Skip patches where src and dst are essentially identical
+                        if diff_map is not None:
+                            patch_diff = diff_map[y:y+resolution, x:x+resolution]
+                            if patch_diff.max() < 2.0:  # max pixel diff < 2/255 -> no meaningful change
+                                self.empty_patches_skipped += 1
+                                continue
                         crop_box = (x, y, x + resolution, y + resolution)
                         info_dict = {'src_path': src_path, 'dst_path': dst_path, 'crop_box': crop_box}
                         if mask_path: info_dict['mask_path'] = mask_path
@@ -615,7 +628,8 @@ class AugmentedImagePairSlicingDataset(Dataset):
 
         if is_main_process():
             # Keep INFO for overall summary
-            logging.info(f"Dataset Init: Processed {self.processed_files}/{len(src_files)} files -> {self.total_slices_generated} slices. Skipped {self.skipped_count} files.")
+            empty_str = f" (filtered {self.empty_patches_skipped} empty patches)" if self.empty_patches_skipped > 0 else ""
+            logging.info(f"Dataset Init: Processed {self.processed_files}/{len(src_files)} files -> {self.total_slices_generated} slices{empty_str}. Skipped {self.skipped_count} files.")
             # Use DEBUG for skip reasons unless count is high? Maybe keep top N as WARNING.
             if self.skipped_count > 0:
                  limit = 5
@@ -772,7 +786,10 @@ def refine_auto_mask(raw_diff, noise_threshold=0.01):
     """Apply blur + steep sigmoid to raw |src-dst| diff tensor.
     Input: (B, 1, H, W) raw diff in [0, 1] (pre-computed in dataset, augmented with src/dst).
     Returns: (B, 1, H, W) mask in [0, 1] ready for weight_map formula."""
-    diff = T.functional.gaussian_blur(raw_diff, kernel_size=31)
+    # Scale kernel size with resolution (calibrated for 31px at 256px)
+    res = raw_diff.shape[-1]
+    kernel_size = max(31, int(31 * res / 256) | 1)  # keep odd
+    diff = T.functional.gaussian_blur(raw_diff, kernel_size=kernel_size)
     max_vals = diff.amax(dim=(-2, -1), keepdim=True) + 1e-8
     # Zero out patches where max difference is below noise floor —
     # prevents noise amplification on unchanged crops
@@ -1132,11 +1149,14 @@ def train(config):
         logging.info(f"Mask enabled: loss_weighting={use_mask_loss} (weight={config.mask.mask_weight}), input_channel={use_mask_input}")
     if is_main_process() and use_auto_mask:
         logging.info(f"Auto-mask enabled: weight={config.mask.mask_weight} (auto-generated from |src-dst|, blur+gamma expansion)")
+    if is_main_process() and config.mask.skip_empty_patches and use_auto_mask:
+        logging.info(f"Skip empty patches: enabled (filtering patches with no src/dst difference)")
 
     # --- Dataset & DataLoader ---
     dataset, dataloader, dataloader_iter = None, None, None
     try:
-        dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, config.data.resolution, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask)
+        skip_empty = config.mask.skip_empty_patches and use_auto_mask
+        dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, config.data.resolution, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty)
         if is_main_process():
              logging.info(f"Dataset Size: {len(dataset)} slices.")
              global_bs = config.training.batch_size * world_size; est_bpp = math.ceil(len(dataset)/global_bs) if global_bs>0 else 0
@@ -1270,7 +1290,7 @@ def train(config):
         criterion_bce = nn.BCEWithLogitsLoss() if use_bce_dice else None
         ckpt_prefix = getattr(config, '_config_stem', os.path.basename(os.path.normpath(config.data.output_dir)))
         latest_ckpt = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth')
-        # Fallback chain: config_stem name → folder name → legacy tunet_
+        # Fallback chain: config_stem name -> folder name -> legacy tunet_
         if is_main_process() and not os.path.exists(latest_ckpt):
             folder_prefix = os.path.basename(os.path.normpath(config.data.output_dir))
             folder_ckpt = os.path.join(config.data.output_dir, f'{folder_prefix}_tunet_latest.pth')
@@ -1344,10 +1364,10 @@ def train(config):
                     if 'model_state_dict' not in ft_ckpt:
                         raise KeyError("Checkpoint missing 'model_state_dict'. Is this a valid tunet checkpoint?")
                     ft_state = ft_ckpt['model_state_dict']
-                    # Strip 'module.' prefix if present (DDP checkpoint → non-DDP model)
+                    # Strip 'module.' prefix if present (DDP checkpoint -> non-DDP model)
                     if any(k.startswith('module.') for k in ft_state):
                         ft_state = {k.replace('module.', '', 1): v for k, v in ft_state.items()}
-                    # Add 'module.' prefix if needed (non-DDP checkpoint → DDP model)
+                    # Add 'module.' prefix if needed (non-DDP checkpoint -> DDP model)
                     if world_size > 1 and not any(k.startswith('module.') for k in ft_state):
                         ft_state = {'module.' + k: v for k, v in ft_state.items()}
                     model.load_state_dict(ft_state)
@@ -1396,7 +1416,7 @@ def train(config):
     current_training_res = config.data.resolution
     if config.training.progressive_resolution:
         full_res = config.data.resolution
-        # Compute progressive stages: quarter → half → full
+        # Compute progressive stages: quarter -> half -> full
         quarter = max(64, (full_res // 4) // 16 * 16)  # Round down to nearest 16
         half = max(64, (full_res // 2) // 16 * 16)
         stages = []
@@ -1404,12 +1424,12 @@ def train(config):
             stages.append(quarter)
         if half < full_res and half > quarter:
             stages.append(half)
-        # Build schedule: epoch 0 → stages[0], epoch 1 → stages[1], epoch 2+ → full
+        # Build schedule: epoch 0 -> stages[0], epoch 1 -> stages[1], epoch 2+ -> full
         for i, res in enumerate(stages):
             progressive_schedule.append((i, res))
         if is_main_process() and progressive_schedule:
-            stage_str = ' → '.join([f'{res}px (epoch {ep+1})' for ep, res in progressive_schedule])
-            logging.info(f"Progressive resolution: {stage_str} → {full_res}px (epoch {len(progressive_schedule)+1}+)")
+            stage_str = ' -> '.join([f'{res}px (epoch {ep+1})' for ep, res in progressive_schedule])
+            logging.info(f"Progressive resolution: {stage_str} -> {full_res}px (epoch {len(progressive_schedule)+1}+)")
         # Start at the appropriate progressive resolution (accounting for resume)
         if progressive_schedule:
             resume_epoch = start_step // iter_epoch if start_step > 0 else 0
@@ -1421,7 +1441,7 @@ def train(config):
             if current_training_res != config.data.resolution:
                 if is_main_process(): logging.info(f"Progressive: starting at {current_training_res}px resolution")
                 try:
-                    dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, current_training_res, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask)
+                    dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, current_training_res, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty)
                     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
                     pin = True if device_type == 'cuda' else False; persist = True if config.dataloader.num_workers > 0 else False
                     prefetch = config.dataloader.prefetch_factor if config.dataloader.num_workers > 0 else None
@@ -1463,7 +1483,7 @@ def train(config):
                         current_training_res = target_res
                         if is_main_process(): logging.info(f"Progressive: switching to {current_training_res}px resolution")
                         try:
-                            dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, current_training_res, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask)
+                            dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, current_training_res, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty)
                             sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
                             pin = True if device_type == 'cuda' else False; persist = True if config.dataloader.num_workers > 0 else False
                             prefetch = config.dataloader.prefetch_factor if config.dataloader.num_workers > 0 else None
@@ -1906,6 +1926,7 @@ if __name__ == "__main__":
     config.mask.mask_weight = getattr(config.mask, 'mask_weight', 10.0)
     config.mask.use_mask_input = getattr(config.mask, 'use_mask_input', False)
     config.mask.use_auto_mask = getattr(config.mask, 'use_auto_mask', False)
+    config.mask.skip_empty_patches = getattr(config.mask, 'skip_empty_patches', False)
     # Model defaults
     config.model.model_type = getattr(config.model, 'model_type', 'unet')
     config.model.recurrence_steps = getattr(config.model, 'recurrence_steps', 2)
