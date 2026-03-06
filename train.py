@@ -884,12 +884,12 @@ def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_e
         logging.log(log_level, f"{log_msg_base} {log_msg_details}" + (" - Refreshed" if refreshed else ""))
     except Exception as e: logging.error(f"Failed to save preview image: {e}") # Keep Error
 
-def capture_preview_batch(config, src_transforms, dst_transforms, shared_transforms, standard_transform, use_masks=False, use_auto_mask=False):
+def capture_preview_batch(config, src_transforms, dst_transforms, shared_transforms, standard_transform, use_masks=False, use_auto_mask=False, skip_empty=False, skip_empty_threshold=1.0):
     if not is_main_process(): return None, None, None, None
     num_preview_samples = 3
     logging.debug(f"Capturing/refreshing fixed batch ({num_preview_samples} samples) for previews...")
     try:
-        preview_dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, config.data.resolution, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask)
+        preview_dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, config.data.resolution, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty, skip_empty_threshold=skip_empty_threshold)
         if len(preview_dataset) == 0: logging.warning("Preview dataset has 0 slices."); return None, None, None, None
         num_samples_to_load = min(num_preview_samples, len(preview_dataset))
         if num_samples_to_load < num_preview_samples: logging.info(f"Preview capturing {num_samples_to_load} samples (dataset smaller).")
@@ -1414,7 +1414,7 @@ def train(config):
     # --- Capture Initial Preview Batch ---
     preview_interval = config.logging.preview_batch_interval
     if is_main_process() and preview_interval > 0:
-        fixed_src, fixed_dst, fixed_mask, fixed_auto_mask = capture_preview_batch(config, src_transforms, dst_transforms, shared_transforms, standard_transform, use_masks=use_masks, use_auto_mask=use_auto_mask)
+        fixed_src, fixed_dst, fixed_mask, fixed_auto_mask = capture_preview_batch(config, src_transforms, dst_transforms, shared_transforms, standard_transform, use_masks=use_masks, use_auto_mask=use_auto_mask, skip_empty=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold)
         if fixed_src is None: logging.warning("Initial preview batch capture failed.")
         if has_val_preview:
             val_fixed_src, val_fixed_dst = capture_val_preview_batch(config, standard_transform)
@@ -1679,7 +1679,7 @@ def train(config):
             if is_main_process() and preview_interval > 0 and global_step % preview_interval == 0:
                 refresh = (fixed_src is None) or (config.logging.preview_refresh_rate > 0 and preview_count > 0 and (preview_count % config.logging.preview_refresh_rate == 0))
                 if refresh:
-                     new_src, new_dst, new_mask, new_auto = capture_preview_batch(config, src_transforms, dst_transforms, shared_transforms, standard_transform, use_masks=use_masks, use_auto_mask=use_auto_mask)
+                     new_src, new_dst, new_mask, new_auto = capture_preview_batch(config, src_transforms, dst_transforms, shared_transforms, standard_transform, use_masks=use_masks, use_auto_mask=use_auto_mask, skip_empty=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold)
                      if new_src is not None: fixed_src, fixed_dst, fixed_mask, fixed_auto_mask = new_src, new_dst, new_mask, new_auto
                      elif fixed_src is None: logging.warning(f"S{global_step}: Preview refresh failed (no initial).")
                      else: logging.warning(f"S{global_step}: Preview refresh failed, using old.")
