@@ -370,12 +370,22 @@ class MainWindow(QMainWindow):
             lambda checked: self.auto_mask_hint.setText(
                 "(Mask directory not needed with Auto Mask)" if checked else ""))
 
-        self.skip_empty_patches_input = QCheckBox("Skip empty patches (no src/dst difference)")
+        self.skip_empty_patches_input = QCheckBox("Skip empty patches")
         self.skip_empty_patches_input.setToolTip(
             "Filter out training patches where source and destination are identical. "
             "Speeds up training when only parts of the image have changes. Requires Auto Mask.")
         self.skip_empty_patches_input.setEnabled(False)
         self.use_auto_mask_input.toggled.connect(self.skip_empty_patches_input.setEnabled)
+
+        self.skip_empty_threshold_input = QDoubleSpinBox()
+        self.skip_empty_threshold_input.setRange(0.5, 20.0)
+        self.skip_empty_threshold_input.setSingleStep(0.5)
+        self.skip_empty_threshold_input.setValue(3.0)
+        self.skip_empty_threshold_input.setToolTip(
+            "Mean pixel difference threshold (0-255 scale) below which a patch is considered empty. "
+            "Higher = more aggressive filtering. 3.0 is good for EXR, lower for JPEG.")
+        self.skip_empty_threshold_input.setEnabled(False)
+        self.skip_empty_patches_input.toggled.connect(self.skip_empty_threshold_input.setEnabled)
 
         mask_weight_row = QHBoxLayout()
         mask_weight_row.addWidget(self.use_mask_loss_input)
@@ -384,7 +394,11 @@ class MainWindow(QMainWindow):
         form_mask.addRow(mask_weight_row)
         form_mask.addRow(self.use_mask_input_input)
         form_mask.addRow(self.use_auto_mask_input)
-        form_mask.addRow(self.skip_empty_patches_input)
+        skip_empty_row = QHBoxLayout()
+        skip_empty_row.addWidget(self.skip_empty_patches_input)
+        skip_empty_row.addWidget(QLabel("Threshold:"))
+        skip_empty_row.addWidget(self.skip_empty_threshold_input)
+        form_mask.addRow(skip_empty_row)
         layout.addWidget(grp_mask)
 
         # --- Data Augmentation ---
@@ -1486,6 +1500,7 @@ class MainWindow(QMainWindow):
                 'use_mask_input': self.use_mask_input_input.isChecked(),
                 'use_auto_mask': self.use_auto_mask_input.isChecked(),
                 'skip_empty_patches': self.skip_empty_patches_input.isChecked(),
+                'skip_empty_threshold': self.skip_empty_threshold_input.value(),
             }
 
         # Inference section
@@ -1586,6 +1601,7 @@ class MainWindow(QMainWindow):
         self.use_mask_input_input.setChecked(mask_cfg.get('use_mask_input', False))
         self.use_auto_mask_input.setChecked(mask_cfg.get('use_auto_mask', False))
         self.skip_empty_patches_input.setChecked(mask_cfg.get('skip_empty_patches', False))
+        self.skip_empty_threshold_input.setValue(mask_cfg.get('skip_empty_threshold', 3.0))
 
         # Augmentations
         self.hflip_check.setChecked(False)
