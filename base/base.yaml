@@ -17,6 +17,7 @@ mask:
   mask_weight: 10.0                    # Multiplier for masked regions (min 1.0)
   use_mask_input: false                # Feed mask as 4th input channel to model
   use_auto_mask: false                 # Auto-generate masks from |src-dst| difference (no mask_dir needed)
+  auto_mask_gamma: 1.0                 # Gamma curve for auto-mask. <1.0 expands white (e.g. 0.5 for beauty), >1.0 contracts, 1.0=neutral
 
 # --- Model Settings ---
 model:
