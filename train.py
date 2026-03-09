@@ -791,10 +791,12 @@ def diff_heatmap(a_denorm, b_denorm, amplify=5.0):
     return torch.cat([r, g, b], dim=0)  # (3, H, W)
 
 # --- Auto Mask ---
-def refine_auto_mask(raw_diff, noise_threshold=0.01):
+def refine_auto_mask(raw_diff, noise_threshold=0.01, gamma=1.0):
     """Apply blur + steep sigmoid to raw |src-dst| diff tensor.
     Input: (B, 1, H, W) raw diff in [0, 1] (pre-computed in dataset, augmented with src/dst).
-    Returns: (B, 1, H, W) mask in [0, 1] ready for weight_map formula."""
+    Returns: (B, 1, H, W) mask in [0, 1] ready for weight_map formula.
+    gamma < 1.0 expands white coverage (e.g. 0.5 for subtle beauty work),
+    gamma > 1.0 contracts it, gamma = 1.0 is neutral."""
     # Scale kernel size with resolution (calibrated for 31px at 256px)
     res = raw_diff.shape[-1]
     kernel_size = max(31, int(31 * res / 256) | 1)  # keep odd
@@ -808,6 +810,8 @@ def refine_auto_mask(raw_diff, noise_threshold=0.01):
     min_vals = diff.amin(dim=(-2, -1), keepdim=True)
     max_vals2 = diff.amax(dim=(-2, -1), keepdim=True)
     diff = (diff - min_vals) / (max_vals2 - min_vals + 1e-8)
+    if gamma != 1.0:
+        diff = diff.pow(gamma)
     diff = diff * significant
     return diff
 
@@ -818,7 +822,7 @@ def compute_auto_mask(src, dst):
     return refine_auto_mask(diff)
 
 # --- Preview Capture/Saving ---
-def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, preview_save_count, preview_refresh_rate, fixed_mask_batch=None, use_mask_input=False, use_bce_dice=False, use_amp=False, use_auto_mask=False, fixed_auto_mask_batch=None):
+def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, preview_save_count, preview_refresh_rate, fixed_mask_batch=None, use_mask_input=False, use_bce_dice=False, use_amp=False, use_auto_mask=False, fixed_auto_mask_batch=None, auto_mask_gamma=1.0):
     if not is_main_process() or fixed_src_batch is None or fixed_dst_batch is None or fixed_src_batch.nelement() == 0: return
     has_mask = fixed_mask_batch is not None
     has_auto_mask = use_auto_mask and fixed_auto_mask_batch is not None
@@ -858,7 +862,7 @@ def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_e
     # Auto-mask visualization: use pre-computed raw diff from dataset, apply blur+sigmoid
     auto_mask_vis = None
     if has_auto_mask:
-        auto_mask_refined = refine_auto_mask(fixed_auto_mask_batch[:num_samples])  # (N, 1, H, W)
+        auto_mask_refined = refine_auto_mask(fixed_auto_mask_batch[:num_samples], gamma=auto_mask_gamma)  # (N, 1, H, W)
         auto_mask_vis = auto_mask_refined.repeat(1, 3, 1, 1)  # (N, 3, H, W) grayscale for display
     if has_mask:
         mask_3ch = mask_select.repeat(1, 3, 1, 1)  # (N, 3, H, W) for display
@@ -1157,7 +1161,7 @@ def train(config):
     if is_main_process() and use_masks:
         logging.info(f"Mask enabled: loss_weighting={use_mask_loss} (weight={config.mask.mask_weight}), input_channel={use_mask_input}")
     if is_main_process() and use_auto_mask:
-        logging.info(f"Auto-mask enabled: weight={config.mask.mask_weight} (auto-generated from |src-dst|, blur+gamma expansion)")
+        logging.info(f"Auto-mask enabled: weight={config.mask.mask_weight}, gamma={config.mask.auto_mask_gamma} (auto-generated from |src-dst|, blur+gamma expansion)")
     if is_main_process() and config.mask.skip_empty_patches and use_auto_mask:
         logging.info(f"Skip empty patches: enabled (max pixel diff threshold={config.mask.skip_empty_threshold}/255)")
 
@@ -1557,7 +1561,7 @@ def train(config):
                             weight_map = 1.0 + mask_batch * (config.mask.mask_weight - 1.0)
                             l1 = (torch.abs(out - dst) * weight_map).mean()
                         elif use_auto_mask and auto_mask_raw is not None:
-                            auto_mask_w = refine_auto_mask(auto_mask_raw)
+                            auto_mask_w = refine_auto_mask(auto_mask_raw, gamma=config.mask.auto_mask_gamma)
                             weight_map = 1.0 + auto_mask_w * (config.mask.mask_weight - 1.0)
                             l1 = (torch.abs(out - dst) * weight_map).mean()
                         else:
@@ -1599,7 +1603,7 @@ def train(config):
                         weight_map = 1.0 + mask_batch * (config.mask.mask_weight - 1.0)
                         l1 = (torch.abs(out - dst) * weight_map).mean()
                     elif use_auto_mask and auto_mask_raw is not None:
-                        auto_mask_w = refine_auto_mask(auto_mask_raw)
+                        auto_mask_w = refine_auto_mask(auto_mask_raw, gamma=config.mask.auto_mask_gamma)
                         weight_map = 1.0 + auto_mask_w * (config.mask.mask_weight - 1.0)
                         l1 = (torch.abs(out - dst) * weight_map).mean()
                     else:
@@ -1683,7 +1687,7 @@ def train(config):
                      if new_src is not None: fixed_src, fixed_dst, fixed_mask, fixed_auto_mask = new_src, new_dst, new_mask, new_auto
                      elif fixed_src is None: logging.warning(f"S{global_step}: Preview refresh failed (no initial).")
                      else: logging.warning(f"S{global_step}: Preview refresh failed, using old.")
-                if fixed_src is not None: save_previews(model, fixed_src, fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, preview_count, config.logging.preview_refresh_rate, fixed_mask_batch=fixed_mask, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, fixed_auto_mask_batch=fixed_auto_mask); preview_count += 1
+                if fixed_src is not None: save_previews(model, fixed_src, fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, preview_count, config.logging.preview_refresh_rate, fixed_mask_batch=fixed_mask, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, fixed_auto_mask_batch=fixed_auto_mask, auto_mask_gamma=config.mask.auto_mask_gamma); preview_count += 1
                 elif preview_count == 0: logging.warning(f"S{global_step}: Skipping preview (no batch).")
 
             save_interval = config.saving.save_iterations_interval; save_now = (save_interval > 0 and global_step % save_interval == 0)
@@ -1937,6 +1941,7 @@ if __name__ == "__main__":
     config.mask.use_auto_mask = getattr(config.mask, 'use_auto_mask', False)
     config.mask.skip_empty_patches = getattr(config.mask, 'skip_empty_patches', False)
     config.mask.skip_empty_threshold = getattr(config.mask, 'skip_empty_threshold', 1.0)
+    config.mask.auto_mask_gamma = getattr(config.mask, 'auto_mask_gamma', 1.0)
     # Model defaults
     config.model.model_type = getattr(config.model, 'model_type', 'unet')
     config.model.recurrence_steps = getattr(config.model, 'recurrence_steps', 2)

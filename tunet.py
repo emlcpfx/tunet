@@ -388,6 +388,17 @@ class MainWindow(QMainWindow):
         self.skip_empty_threshold_input.setEnabled(False)
         self.skip_empty_patches_input.toggled.connect(self.skip_empty_threshold_input.setEnabled)
 
+        self.auto_mask_gamma_input = QDoubleSpinBox()
+        self.auto_mask_gamma_input.setRange(0.1, 3.0)
+        self.auto_mask_gamma_input.setSingleStep(0.1)
+        self.auto_mask_gamma_input.setDecimals(2)
+        self.auto_mask_gamma_input.setValue(1.0)
+        self.auto_mask_gamma_input.setToolTip(
+            "Gamma curve applied to auto-mask. Values < 1.0 expand white coverage "
+            "(e.g. 0.5 for subtle beauty work), > 1.0 contracts it, 1.0 = neutral.")
+        self.auto_mask_gamma_input.setEnabled(False)
+        self.use_auto_mask_input.toggled.connect(self.auto_mask_gamma_input.setEnabled)
+
         mask_weight_row = QHBoxLayout()
         mask_weight_row.addWidget(self.use_mask_loss_input)
         mask_weight_row.addWidget(QLabel("Weight:"))
@@ -395,6 +406,10 @@ class MainWindow(QMainWindow):
         form_mask.addRow(mask_weight_row)
         form_mask.addRow(self.use_mask_input_input)
         form_mask.addRow(self.use_auto_mask_input)
+        auto_mask_gamma_row = QHBoxLayout()
+        auto_mask_gamma_row.addWidget(QLabel("Auto Mask Gamma:"))
+        auto_mask_gamma_row.addWidget(self.auto_mask_gamma_input)
+        form_mask.addRow(auto_mask_gamma_row)
         skip_empty_row = QHBoxLayout()
         skip_empty_row.addWidget(self.skip_empty_patches_input)
         skip_empty_row.addWidget(QLabel("Threshold:"))
@@ -564,6 +579,7 @@ class MainWindow(QMainWindow):
                 "lambda_lpips": 0.2,
                 "lr": 1e-4,
                 "use_auto_mask": True,
+                "auto_mask_gamma": 0.5,
                 "skip_empty_patches": True,
                 "progressive_resolution": False,
             },
@@ -599,6 +615,7 @@ class MainWindow(QMainWindow):
                 self.lambda_lpips_input.setCurrentIndex(i)
                 break
         self.use_auto_mask_input.setChecked(p["use_auto_mask"])
+        self.auto_mask_gamma_input.setValue(p.get("auto_mask_gamma", 1.0))
         self.skip_empty_patches_input.setChecked(p["skip_empty_patches"])
         self.progressive_res_check.setChecked(p.get("progressive_resolution", False))
 
@@ -1502,6 +1519,7 @@ class MainWindow(QMainWindow):
                 'use_auto_mask': self.use_auto_mask_input.isChecked(),
                 'skip_empty_patches': self.skip_empty_patches_input.isChecked(),
                 'skip_empty_threshold': self.skip_empty_threshold_input.value(),
+                'auto_mask_gamma': self.auto_mask_gamma_input.value(),
             }
 
         # Inference section
@@ -1603,6 +1621,7 @@ class MainWindow(QMainWindow):
         self.use_auto_mask_input.setChecked(mask_cfg.get('use_auto_mask', False))
         self.skip_empty_patches_input.setChecked(mask_cfg.get('skip_empty_patches', False))
         self.skip_empty_threshold_input.setValue(mask_cfg.get('skip_empty_threshold', 1.0))
+        self.auto_mask_gamma_input.setValue(mask_cfg.get('auto_mask_gamma', 1.0))
 
         # Augmentations
         self.hflip_check.setChecked(False)
