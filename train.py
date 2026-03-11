@@ -822,7 +822,7 @@ def compute_auto_mask(src, dst):
     return refine_auto_mask(diff)
 
 # --- Preview Capture/Saving ---
-def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, preview_save_count, preview_refresh_rate, fixed_mask_batch=None, use_mask_input=False, use_bce_dice=False, use_amp=False, use_auto_mask=False, fixed_auto_mask_batch=None, auto_mask_gamma=1.0):
+def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, preview_save_count, preview_refresh_rate, fixed_mask_batch=None, use_mask_input=False, use_bce_dice=False, use_amp=False, use_auto_mask=False, fixed_auto_mask_batch=None, auto_mask_gamma=1.0, diff_amplify=5.0):
     if not is_main_process() or fixed_src_batch is None or fixed_dst_batch is None or fixed_src_batch.nelement() == 0: return
     has_mask = fixed_mask_batch is not None
     has_auto_mask = use_auto_mask and fixed_auto_mask_batch is not None
@@ -866,9 +866,9 @@ def save_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_e
         auto_mask_vis = auto_mask_refined.repeat(1, 3, 1, 1)  # (N, 3, H, W) grayscale for display
     if has_mask:
         mask_3ch = mask_select.repeat(1, 3, 1, 1)  # (N, 3, H, W) for display
-        row = lambda i: [src_denorm[i], mask_3ch[i], dst_denorm[i], pred_denorm[i], diff_heatmap(src_denorm[i], dst_denorm[i])] + ([auto_mask_vis[i]] if has_auto_mask else [])
+        row = lambda i: [src_denorm[i], mask_3ch[i], dst_denorm[i], pred_denorm[i], diff_heatmap(src_denorm[i], dst_denorm[i], amplify=diff_amplify)] + ([auto_mask_vis[i]] if has_auto_mask else [])
     else:
-        row = lambda i: [src_denorm[i], dst_denorm[i], pred_denorm[i], diff_heatmap(src_denorm[i], dst_denorm[i])] + ([auto_mask_vis[i]] if has_auto_mask else [])
+        row = lambda i: [src_denorm[i], dst_denorm[i], pred_denorm[i], diff_heatmap(src_denorm[i], dst_denorm[i], amplify=diff_amplify)] + ([auto_mask_vis[i]] if has_auto_mask else [])
     combined = [item for i in range(num_samples) for item in row(i)]
     if not combined: return
     try: grid_tensor = torch.stack(combined); grid = make_grid(grid_tensor, nrow=num_grid_cols, padding=2, normalize=False)
@@ -968,7 +968,7 @@ def run_validation(model, val_dataloader, device, device_type, use_amp, use_lpip
     logging.info(log_msg)
     return avg_l1, avg_lp
 
-def save_val_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, use_bce_dice=False, use_amp=False, use_auto_mask=False, use_mask_input=False):
+def save_val_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, current_epoch, global_step, device, use_bce_dice=False, use_amp=False, use_auto_mask=False, use_mask_input=False, diff_amplify=5.0):
     """Save validation preview grid to val_preview.jpg. Works with or without dst."""
     if not is_main_process() or fixed_src_batch is None or fixed_src_batch.nelement() == 0: return
     has_dst = fixed_dst_batch is not None
@@ -1004,10 +1004,10 @@ def save_val_previews(model, fixed_src_batch, fixed_dst_batch, output_dir, curre
         auto_mask_batch = compute_auto_mask(src_select, dst_select)
         auto_mask_vis = auto_mask_batch.repeat(1, 3, 1, 1)
     if has_dst:
-        row = lambda i: [src_denorm[i], dst_denorm[i], pred_denorm[i], diff_heatmap(src_denorm[i], dst_denorm[i])] + ([auto_mask_vis[i]] if auto_mask_vis is not None else [])
+        row = lambda i: [src_denorm[i], dst_denorm[i], pred_denorm[i], diff_heatmap(src_denorm[i], dst_denorm[i], amplify=diff_amplify)] + ([auto_mask_vis[i]] if auto_mask_vis is not None else [])
         nrow = 4 + (1 if auto_mask_vis is not None else 0)
     else:
-        row = lambda i: [src_denorm[i], pred_denorm[i], diff_heatmap(src_denorm[i], pred_denorm[i])]
+        row = lambda i: [src_denorm[i], pred_denorm[i], diff_heatmap(src_denorm[i], pred_denorm[i], amplify=diff_amplify)]
         nrow = 3
     combined = [item for i in range(num_samples) for item in row(i)]
     if not combined: return
@@ -1415,6 +1415,18 @@ def train(config):
     batch_times = []
     val_interval = config.logging.val_interval
 
+    # --- Early Stopping / Plateau Detection ---
+    es_cfg = getattr(config, 'early_stopping', SimpleNamespace(enabled=False))
+    es_enabled = getattr(es_cfg, 'enabled', False) and is_main_process()
+    es_patience = getattr(es_cfg, 'patience', 30)
+    es_min_epochs = getattr(es_cfg, 'min_epochs', 10)
+    es_smoothing = getattr(es_cfg, 'smoothing', 0.9)
+    es_stop = getattr(es_cfg, 'stop', False)
+    es_best_loss = float('inf')
+    es_best_epoch = 0
+    es_smoothed_loss = None
+    es_plateau_saved = False
+
     # --- Capture Initial Preview Batch ---
     preview_interval = config.logging.preview_batch_interval
     if is_main_process() and preview_interval > 0:
@@ -1687,7 +1699,7 @@ def train(config):
                      if new_src is not None: fixed_src, fixed_dst, fixed_mask, fixed_auto_mask = new_src, new_dst, new_mask, new_auto
                      elif fixed_src is None: logging.warning(f"S{global_step}: Preview refresh failed (no initial).")
                      else: logging.warning(f"S{global_step}: Preview refresh failed, using old.")
-                if fixed_src is not None: save_previews(model, fixed_src, fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, preview_count, config.logging.preview_refresh_rate, fixed_mask_batch=fixed_mask, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, fixed_auto_mask_batch=fixed_auto_mask, auto_mask_gamma=config.mask.auto_mask_gamma); preview_count += 1
+                if fixed_src is not None: save_previews(model, fixed_src, fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, preview_count, config.logging.preview_refresh_rate, fixed_mask_batch=fixed_mask, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, fixed_auto_mask_batch=fixed_auto_mask, auto_mask_gamma=config.mask.auto_mask_gamma, diff_amplify=float(config.logging.diff_amplify)); preview_count += 1
                 elif preview_count == 0: logging.warning(f"S{global_step}: Skipping preview (no batch).")
 
             save_interval = config.saving.save_iterations_interval; save_now = (save_interval > 0 and global_step % save_interval == 0)
@@ -1721,7 +1733,44 @@ def train(config):
             # Val preview runs on its own schedule (epoch end or val_interval), even without dst
             run_val_preview_now = is_main_process() and has_val_preview and val_fixed_src is not None and (epoch_end_now or (val_interval > 0 and global_step % val_interval == 0))
             if run_val_preview_now:
-                save_val_previews(model, val_fixed_src, val_fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, use_mask_input=use_mask_input)
+                save_val_previews(model, val_fixed_src, val_fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, use_mask_input=use_mask_input, diff_amplify=float(config.logging.diff_amplify))
+
+            # --- Early Stopping / Plateau Detection ---
+            if es_enabled and epoch_end_now and ep_steps > 0:
+                ep_avg_loss = ep_l1 / ep_steps
+                completed_epoch = global_step // iter_epoch
+                # Update EMA of epoch loss
+                if es_smoothed_loss is None:
+                    es_smoothed_loss = ep_avg_loss
+                else:
+                    es_smoothed_loss = es_smoothing * es_smoothed_loss + (1 - es_smoothing) * ep_avg_loss
+                # Track best smoothed loss
+                if es_smoothed_loss < es_best_loss:
+                    es_best_loss = es_smoothed_loss
+                    es_best_epoch = completed_epoch
+                    es_plateau_saved = False
+                # Check for plateau
+                epochs_since_best = completed_epoch - es_best_epoch
+                if completed_epoch >= es_min_epochs and epochs_since_best >= es_patience:
+                    if not es_plateau_saved:
+                        # Save plateau checkpoint
+                        plateau_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_plateau.pth')
+                        try:
+                            m_state_p = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
+                            scaler_state_p = scaler.state_dict() if use_amp_eff else None
+                            cfg_dict_p = config_to_dict(config)
+                            plateau_data = {'epoch': completed_epoch, 'global_step': global_step, 'model_state_dict': m_state_p, 'optimizer_state_dict': optimizer.state_dict(),
+                                            'scaler_state_dict': scaler_state_p, 'config': cfg_dict_p, 'effective_model_size': eff_size, 'n_input_channels': n_input_ch, 'model_type': model_type}
+                            torch.save(plateau_data, plateau_path)
+                            logging.warning(f"PLATEAU DETECTED: No improvement for {epochs_since_best} epochs (best smoothed loss {es_best_loss:.6f} @ epoch {es_best_epoch}). Saved {os.path.basename(plateau_path)}")
+                            es_plateau_saved = True
+                        except Exception as e:
+                            logging.error(f"Plateau checkpoint save failed: {e}", exc_info=True)
+                    if es_stop:
+                        logging.warning(f"EARLY STOPPING: Training halted after {completed_epoch} epochs (patience={es_patience}).")
+                        shutdown_requested = True
+                elif completed_epoch >= es_min_epochs and epochs_since_best >= es_patience // 2:
+                    logging.info(f"[Plateau Watch] No improvement for {epochs_since_best}/{es_patience} epochs (best smoothed: {es_best_loss:.6f} @ ep {es_best_epoch})")
 
         # --- End of Training Loop ---
         training_successful = True
@@ -1931,7 +1980,7 @@ if __name__ == "__main__":
     config.training.finetune_from = getattr(config.training, 'finetune_from', None)
     config.saving = getattr(config, 'saving', SimpleNamespace()); config.saving.save_iterations_interval = getattr(config.saving, 'save_iterations_interval', 0)
     config.logging = getattr(config, 'logging', SimpleNamespace()); config.logging.log_interval = getattr(config.logging, 'log_interval', 50)
-    config.logging.preview_batch_interval = getattr(config.logging, 'preview_batch_interval', 500); config.logging.preview_refresh_rate = getattr(config.logging, 'preview_refresh_rate', 5)
+    config.logging.preview_batch_interval = getattr(config.logging, 'preview_batch_interval', 500); config.logging.preview_refresh_rate = getattr(config.logging, 'preview_refresh_rate', 5); config.logging.diff_amplify = getattr(config.logging, 'diff_amplify', 5.0)
     # Mask defaults
     config.data.mask_dir = getattr(config.data, 'mask_dir', None)
     config.mask = getattr(config, 'mask', SimpleNamespace())

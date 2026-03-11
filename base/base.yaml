@@ -105,3 +105,11 @@ logging:
 
 saving:
   keep_last_checkpoints: 4           # Number of checkpoints to keep (excluding latest)
+
+# --- Early Stopping (Plateau Detection) ---
+early_stopping:
+  enabled: true                      # Enable plateau detection (saves _plateau.pth when loss flatlines)
+  patience: 30                       # Epochs with no improvement before flagging plateau
+  min_epochs: 10                     # Don't check for plateau before this many epochs
+  smoothing: 0.9                     # EMA smoothing for epoch-avg loss (higher = smoother, 0.8-0.95)
+  stop: false                        # Actually stop training on plateau (default: just save checkpoint)
