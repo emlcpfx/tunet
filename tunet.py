@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QComboBox, QSpinBox, QCheckBox,
     QTextEdit, QFileDialog, QFormLayout, QMessageBox, QSizePolicy, QScrollArea,
     QSplitter, QProgressDialog, QDoubleSpinBox, QListWidget, QGroupBox,
-    QProgressBar, QStackedWidget, QFrame,
+    QProgressBar, QStackedWidget, QFrame, QSlider,
 )
 from PySide6.QtCore import Qt, QObject, Signal, Slot, QFileSystemWatcher, QTimer, QThread
 from PySide6.QtGui import QPixmap, QTextCursor
@@ -839,6 +839,31 @@ class MainWindow(QMainWindow):
         form_log.addRow("Keep Checkpoints:", self.keep_checkpoints_input)
         layout.addWidget(grp_log)
 
+        # --- Early Stopping / Plateau Detection ---
+        grp_es = QGroupBox("Plateau Detection")
+        form_es = QFormLayout(grp_es)
+
+        self.es_enabled_input = QCheckBox("Enable Plateau Detection")
+        self.es_enabled_input.setChecked(True)
+        self.es_enabled_input.setToolTip(
+            "Saves a _plateau.pth checkpoint when loss stops improving.\n"
+            "Useful as a safety net for overnight runs.")
+        form_es.addRow(self.es_enabled_input)
+
+        self.es_patience_input = QSpinBox(minimum=5, maximum=200, value=30)
+        self.es_patience_input.setToolTip(
+            "Epochs with no improvement before saving a plateau checkpoint.")
+        form_es.addRow("Patience (epochs):", self.es_patience_input)
+
+        self.es_stop_input = QCheckBox("Stop training on plateau")
+        self.es_stop_input.setChecked(False)
+        self.es_stop_input.setToolTip(
+            "Actually stop training when plateau is detected.\n"
+            "Off = just save checkpoint and keep going (recommended).")
+        form_es.addRow(self.es_stop_input)
+
+        layout.addWidget(grp_es)
+
         layout.addStretch()
 
         scroll = QScrollArea()
@@ -977,7 +1002,7 @@ class MainWindow(QMainWindow):
         self.scroll_area.zoom_changed.connect(self._on_preview_wheel_zoom)
         main_layout.addWidget(self.scroll_area, stretch=1)
 
-        # Zoom controls
+        # Zoom controls + diff amplify
         controls_layout = QHBoxLayout()
         self.zoom_combo = QComboBox()
         self.zoom_combo.addItems(["Fit", "50%", "100%", "200%"])
@@ -986,6 +1011,17 @@ class MainWindow(QMainWindow):
         controls_layout.addStretch()
         controls_layout.addWidget(QLabel("Zoom:"))
         controls_layout.addWidget(self.zoom_combo)
+        controls_layout.addSpacing(20)
+        controls_layout.addWidget(QLabel("Diff Amplify:"))
+        self.diff_amplify_slider = QSlider(Qt.Horizontal)
+        self.diff_amplify_slider.setRange(1, 50)
+        self.diff_amplify_slider.setValue(5)
+        self.diff_amplify_slider.setFixedWidth(120)
+        self.diff_amplify_slider.setToolTip("Amplification for the diff heatmap. Higher = more visible subtle differences.")
+        self.diff_amplify_label = QLabel("5x")
+        self.diff_amplify_slider.valueChanged.connect(lambda v: self.diff_amplify_label.setText(f"{v}x"))
+        controls_layout.addWidget(self.diff_amplify_slider)
+        controls_layout.addWidget(self.diff_amplify_label)
         controls_layout.addStretch()
         main_layout.addLayout(controls_layout)
 
@@ -1501,9 +1537,15 @@ class MainWindow(QMainWindow):
                 'log_interval': self.log_interval_input.value(),
                 'preview_batch_interval': self.preview_interval_input.value(),
                 'preview_refresh_rate': self.preview_refresh_input.value(),
+                'diff_amplify': self.diff_amplify_slider.value(),
             },
             'saving': {
                 'keep_last_checkpoints': self.keep_checkpoints_input.value(),
+            },
+            'early_stopping': {
+                'enabled': self.es_enabled_input.isChecked(),
+                'patience': self.es_patience_input.value(),
+                'stop': self.es_stop_input.isChecked(),
             },
             'dataloader': {
                 'num_workers': self.num_workers_presets[self.num_workers_input.currentIndex()][1],
@@ -1602,7 +1644,14 @@ class MainWindow(QMainWindow):
         self.log_interval_input.setValue(log_cfg.get('log_interval', 5))
         self.preview_interval_input.setValue(log_cfg.get('preview_batch_interval', 35))
         self.preview_refresh_input.setValue(log_cfg.get('preview_refresh_rate', 5))
+        self.diff_amplify_slider.setValue(log_cfg.get('diff_amplify', 5))
         self.keep_checkpoints_input.setValue(config.get('saving', {}).get('keep_last_checkpoints', 4))
+
+        # Early stopping
+        es_cfg = config.get('early_stopping', {})
+        self.es_enabled_input.setChecked(es_cfg.get('enabled', True))
+        self.es_patience_input.setValue(es_cfg.get('patience', 30))
+        self.es_stop_input.setChecked(es_cfg.get('stop', False))
 
         # Dataloader workers
         saved_workers = config.get('dataloader', {}).get('num_workers', -1)

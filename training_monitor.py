@@ -46,9 +46,9 @@ COLORS = {
     'bg_panel': '#252525',
     'border': '#555555',
     'grid': '#404040',
-    'text': '#cccccc',
+    'text': '#d4d4d4',
     'text_bright': '#ffffff',
-    'text_dim': '#888888',
+    'text_dim': '#999999',
     'l1': '#ff6b6b',
     'l1_raw': '#ff6b6b',
     'lpips': '#4ecdc4',
@@ -58,8 +58,13 @@ COLORS = {
     'accent': '#61afef',
     'best_marker': '#98c379',
     'crosshair': '#888888',
-    'btn_active': '#3a6ea5',
-    'btn_normal': '#3d3d3d',
+    'btn_active': '#4a85c4',
+    'btn_normal': '#484848',
+    'btn_text': '#e8e8e8',
+    'btn_border': '#666666',
+    'good': '#98c379',
+    'warn': '#e5c07b',
+    'bad': '#e06c75',
 }
 
 
@@ -210,15 +215,19 @@ class TrainingMonitor:
         else:
             self.create_fallback_display()
 
+        # ─── Analysis panel ───
+        self.create_analysis_panel()
+
         # ─── Stats panel at bottom ───
         self.create_stats_panel()
 
     def _make_button(self, parent, text, command, small=False):
         font = ('Segoe UI', 8) if small else ('Segoe UI', 9)
         padx = 6 if small else 10
-        pady = 1 if small else 3
-        btn = tk.Label(parent, text=text, bg=COLORS['btn_normal'], fg=COLORS['text'],
-                       font=font, padx=padx, pady=pady, cursor='hand2', relief='flat')
+        pady = 2 if small else 4
+        btn = tk.Label(parent, text=text, bg=COLORS['btn_normal'], fg=COLORS['btn_text'],
+                       font=font, padx=padx, pady=pady, cursor='hand2',
+                       relief='raised', borderwidth=1)
         btn.bind('<Button-1>', lambda e: command())
         btn.bind('<Enter>', lambda e: btn.configure(bg=COLORS['btn_active']))
         btn.bind('<Leave>', lambda e: self._btn_leave(btn))
@@ -379,6 +388,163 @@ class TrainingMonitor:
                                  fg=COLORS['text_bright'], font=('Consolas', 10, 'bold'))
             val_label.pack()
             self.stat_labels[key] = val_label
+
+    def create_analysis_panel(self):
+        """Create training analysis panel with trend indicators."""
+        analysis_outer = tk.Frame(self.root, bg=COLORS['border'], pady=1)
+        analysis_outer.pack(fill=tk.X, padx=8, pady=(2, 0))
+
+        analysis_frame = tk.Frame(analysis_outer, bg=COLORS['bg_panel'], pady=4)
+        analysis_frame.pack(fill=tk.X, padx=1)
+
+        # Label
+        tk.Label(analysis_frame, text="Analysis:", bg=COLORS['bg_panel'],
+                 fg=COLORS['text_dim'], font=('Segoe UI', 8)).pack(side=tk.LEFT, padx=(8, 12))
+
+        self.analysis_labels = {}
+
+        analysis_items = [
+            ('trend', 'Trend'),
+            ('improvement', 'Recent Change'),
+            ('plateau', 'Plateau Check'),
+            ('recommendation', 'Status'),
+        ]
+
+        for key, label_text in analysis_items:
+            box = tk.Frame(analysis_frame, bg=COLORS['bg_panel'])
+            box.pack(side=tk.LEFT, padx=12, expand=True)
+
+            tk.Label(box, text=label_text, bg=COLORS['bg_panel'], fg=COLORS['text_dim'],
+                     font=('Segoe UI', 7)).pack(side=tk.LEFT, padx=(0, 4))
+            val_label = tk.Label(box, text="--", bg=COLORS['bg_panel'],
+                                 fg=COLORS['text'], font=('Consolas', 9, 'bold'))
+            val_label.pack(side=tk.LEFT)
+            self.analysis_labels[key] = val_label
+
+    def analyze_training(self):
+        """Analyze training progress and update the analysis panel."""
+        if not hasattr(self, 'analysis_labels'):
+            return
+
+        steps = list(self.steps)
+        losses = list(self.l1_losses)
+
+        if not steps:
+            return
+
+        current_epoch = steps[-1]
+
+        # Need at least 5 epochs of data for meaningful analysis
+        if current_epoch < 5:
+            for key in self.analysis_labels:
+                self.analysis_labels[key].configure(text="Collecting...", fg=COLORS['text_dim'])
+            return
+
+        # Get data from the last 20 epochs (or all if less)
+        window_epochs = min(20, current_epoch * 0.5)
+        cutoff = current_epoch - window_epochs
+        window_steps = []
+        window_losses = []
+        for s, l in zip(steps, losses):
+            if s >= cutoff:
+                window_steps.append(s)
+                window_losses.append(l)
+
+        if len(window_steps) < 10:
+            for key in self.analysis_labels:
+                self.analysis_labels[key].configure(text="Collecting...", fg=COLORS['text_dim'])
+            return
+
+        # Apply heavy smoothing to window data for analysis
+        smoothed = []
+        alpha = 0.95
+        last = window_losses[0]
+        for v in window_losses:
+            last = alpha * last + (1 - alpha) * v
+            smoothed.append(last)
+
+        # Linear regression on smoothed data
+        n = len(smoothed)
+        x_vals = window_steps
+        y_vals = smoothed
+        x_mean = sum(x_vals) / n
+        y_mean = sum(y_vals) / n
+        ss_xy = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_vals, y_vals))
+        ss_xx = sum((x - x_mean) ** 2 for x in x_vals)
+
+        if ss_xx > 0:
+            slope = ss_xy / ss_xx
+        else:
+            slope = 0
+
+        # Normalize slope relative to current loss magnitude
+        current_smooth = smoothed[-1]
+        if current_smooth > 0:
+            relative_slope = slope / current_smooth
+        else:
+            relative_slope = 0
+
+        # Trend label
+        if relative_slope < -0.005:
+            self.analysis_labels['trend'].configure(
+                text="Improving", fg=COLORS['good'])
+        elif relative_slope > 0.005:
+            self.analysis_labels['trend'].configure(
+                text="Diverging", fg=COLORS['bad'])
+        else:
+            self.analysis_labels['trend'].configure(
+                text="Flat", fg=COLORS['warn'])
+
+        # Recent improvement: compare first half vs second half of window
+        mid = len(smoothed) // 2
+        first_half_avg = sum(smoothed[:mid]) / mid if mid > 0 else 0
+        second_half_avg = sum(smoothed[mid:]) / (len(smoothed) - mid) if (len(smoothed) - mid) > 0 else 0
+
+        if first_half_avg > 0:
+            pct_change = ((second_half_avg - first_half_avg) / first_half_avg) * 100
+        else:
+            pct_change = 0
+
+        if pct_change < -1:
+            change_color = COLORS['good']
+        elif pct_change > 1:
+            change_color = COLORS['bad']
+        else:
+            change_color = COLORS['warn']
+        self.analysis_labels['improvement'].configure(
+            text=f"{pct_change:+.1f}%", fg=change_color)
+
+        # Plateau check: epochs since best loss
+        epochs_since_best = current_epoch - self.best_l1_epoch
+        if epochs_since_best < 10:
+            self.analysis_labels['plateau'].configure(
+                text=f"Best {epochs_since_best:.0f}ep ago", fg=COLORS['good'])
+        elif epochs_since_best < 30:
+            self.analysis_labels['plateau'].configure(
+                text=f"Best {epochs_since_best:.0f}ep ago", fg=COLORS['warn'])
+        else:
+            self.analysis_labels['plateau'].configure(
+                text=f"Best {epochs_since_best:.0f}ep ago", fg=COLORS['bad'])
+
+        # Overall recommendation
+        if relative_slope < -0.005 and epochs_since_best < 20:
+            self.analysis_labels['recommendation'].configure(
+                text="Training well", fg=COLORS['good'])
+        elif relative_slope > 0.01:
+            self.analysis_labels['recommendation'].configure(
+                text="Diverging - check LR", fg=COLORS['bad'])
+        elif epochs_since_best > 50:
+            self.analysis_labels['recommendation'].configure(
+                text="Consider stopping", fg=COLORS['bad'])
+        elif epochs_since_best > 30 or abs(relative_slope) < 0.001:
+            self.analysis_labels['recommendation'].configure(
+                text="Plateau - may stop", fg=COLORS['warn'])
+        elif relative_slope < -0.001:
+            self.analysis_labels['recommendation'].configure(
+                text="Slow progress", fg=COLORS['warn'])
+        else:
+            self.analysis_labels['recommendation'].configure(
+                text="Stable", fg=COLORS['text'])
 
     def create_fallback_display(self):
         """Create text-based display if matplotlib not available."""
@@ -897,6 +1063,8 @@ class TrainingMonitor:
             avg_time = sum(self.time_per_step) / len(self.time_per_step)
             self.stat_labels['rate'].configure(text=f"{avg_time:.3f}s")
 
+        self.analyze_training()
+
     def update_text_display(self):
         if not hasattr(self, 'text_display'):
             return
@@ -956,6 +1124,11 @@ class TrainingMonitor:
             for key in self.stat_labels:
                 self.stat_labels[key].configure(text='--')
             self.stat_labels['points'].configure(text='0')
+
+        # Reset analysis labels
+        if hasattr(self, 'analysis_labels'):
+            for key in self.analysis_labels:
+                self.analysis_labels[key].configure(text='--', fg=COLORS['text'])
 
     def update_loop(self):
         if not self.is_monitoring:
