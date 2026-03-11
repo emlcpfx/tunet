@@ -572,7 +572,7 @@ class MainWindow(QMainWindow):
         presets = {
             "Beauty / Paint Fix": {
                 "model_type": "msrn",
-                "model_size_dims": "128",
+                "model_size_dims": "64",
                 "resolution": "512",
                 "overlap_factor": "0.5",
                 "loss": "l1+lpips",
