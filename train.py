@@ -1410,7 +1410,7 @@ def train(config):
     max_steps = getattr(config.training, 'max_steps', 0)
     global_step = start_step; iter_epoch = config.training.iterations_per_epoch
     fixed_src, fixed_dst, fixed_mask = None, None, None; preview_count = 0
-    val_fixed_src, val_fixed_dst = None, None
+    val_fixed_src, val_fixed_dst = None, None; val_preview_count = 0
     ep_l1, ep_lpips, ep_steps = 0.0, 0.0, 0
     batch_times = []
     val_interval = config.logging.val_interval
@@ -1733,7 +1733,12 @@ def train(config):
             # Val preview runs on its own schedule (epoch end or val_interval), even without dst
             run_val_preview_now = is_main_process() and has_val_preview and val_fixed_src is not None and (epoch_end_now or (val_interval > 0 and global_step % val_interval == 0))
             if run_val_preview_now:
-                save_val_previews(model, val_fixed_src, val_fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, use_mask_input=use_mask_input, diff_amplify=float(config.logging.diff_amplify))
+                val_refresh = config.logging.preview_refresh_rate > 0 and val_preview_count > 0 and (val_preview_count % config.logging.preview_refresh_rate == 0)
+                if val_refresh:
+                    new_val_src, new_val_dst = capture_val_preview_batch(config, standard_transform)
+                    if new_val_src is not None: val_fixed_src, val_fixed_dst = new_val_src, new_val_dst
+                    else: logging.warning(f"S{global_step}: Val preview refresh failed, using old.")
+                save_val_previews(model, val_fixed_src, val_fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, use_mask_input=use_mask_input, diff_amplify=float(config.logging.diff_amplify)); val_preview_count += 1
 
             # --- Early Stopping / Plateau Detection ---
             if es_enabled and epoch_end_now and ep_steps > 0:
