@@ -55,10 +55,12 @@ def _ssim(pred, target, window_size=11, C1=0.01**2, C2=0.03**2):
 
 def run_validation(model, val_dataloader, device, device_type, use_amp, use_lpips,
                    loss_fn_lpips, use_bce_dice, criterion_l1, current_ep_idx,
-                   global_step, lambda_lpips=1.0, use_mask_input=False):
+                   global_step, lambda_lpips=1.0, use_mask_input=False,
+                   val_dataset=None):
     """Run validation over entire val dataset, return avg losses.
 
-    Also computes PSNR and SSIM metrics, and logs the worst-performing batch.
+    Also computes PSNR and SSIM metrics, and logs the worst-performing batch
+    with copy-pastable file paths.
     """
     if not is_main_process() or val_dataloader is None:
         return None, None
@@ -141,9 +143,24 @@ def run_validation(model, val_dataloader, device, device_type, use_amp, use_lpip
     log_msg += f', PSNR:{avg_psnr:.2f}dB, SSIM:{avg_ssim:.4f}'
     logging.info(log_msg)
 
-    # Log worst batch info
+    # Log worst batch info with copy-pastable file paths
     if count > 1 and worst_batch_idx >= 0:
+        batch_size = val_dataloader.batch_size or 1
+        start_idx = worst_batch_idx * batch_size
+        worst_paths = []
+        if val_dataset is not None and hasattr(val_dataset, 'slice_info'):
+            end_idx = min(start_idx + batch_size, len(val_dataset.slice_info))
+            seen = set()
+            for i in range(start_idx, end_idx):
+                p = val_dataset.slice_info[i].get('src_path', '')
+                if p and p not in seen:
+                    worst_paths.append(p)
+                    seen.add(p)
         logging.info(f'  Worst val batch: #{worst_batch_idx} ({loss_label}={worst_l1:.4f}, '
                      f'{worst_l1 / avg_l1:.1f}x avg)')
+        if worst_paths:
+            logging.info(f'  Worst batch files ({len(worst_paths)}):')
+            for p in worst_paths:
+                logging.info(f'    {p}')
 
     return avg_l1, avg_lp

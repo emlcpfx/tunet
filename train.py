@@ -135,7 +135,7 @@ class AugmentedImagePairSlicingDataset(Dataset):
 
         for i, src_path in enumerate(src_files):
             base_name = os.path.basename(src_path); dst_path = os.path.join(self.dst_dir, base_name)
-            if not os.path.exists(dst_path): self.skipped_count += 1; self.skipped_file_reasons.append((base_name, "Dst missing")); continue
+            if not os.path.exists(dst_path): self.skipped_count += 1; self.skipped_file_reasons.append((src_path, "Dst missing")); continue
             mask_path = None
             if self.mask_dir:
                 stem = os.path.splitext(base_name)[0]
@@ -143,12 +143,12 @@ class AugmentedImagePairSlicingDataset(Dataset):
                 for mext in mask_exts:
                     candidate = os.path.join(self.mask_dir, stem + mext)
                     if os.path.exists(candidate): mask_path = candidate; break
-                if mask_path is None: self.skipped_count += 1; self.skipped_file_reasons.append((base_name, "Mask missing")); continue
+                if mask_path is None: self.skipped_count += 1; self.skipped_file_reasons.append((src_path, "Mask missing")); continue
             try:
                 img_s = load_image_any_format(src_path); img_d = load_image_any_format(dst_path)
                 w_s, h_s = img_s.size; w_d, h_d = img_d.size
-                if (w_s, h_s) != (w_d, h_d): img_s.close(); img_d.close(); self.skipped_count += 1; self.skipped_file_reasons.append((base_name, f"Dims mismatch: src={w_s}x{h_s} dst={w_d}x{h_d}")); continue
-                if w_s < resolution or h_s < resolution: img_s.close(); img_d.close(); self.skipped_count += 1; self.skipped_file_reasons.append((base_name, f"Too small")); continue
+                if (w_s, h_s) != (w_d, h_d): img_s.close(); img_d.close(); self.skipped_count += 1; self.skipped_file_reasons.append((src_path, f"Dims mismatch: src={w_s}x{h_s} dst={w_d}x{h_d}")); continue
+                if w_s < resolution or h_s < resolution: img_s.close(); img_d.close(); self.skipped_count += 1; self.skipped_file_reasons.append((src_path, f"Too small ({w_s}x{h_s} < {resolution})")); continue
                 # Pre-compute per-pixel diff map for empty patch filtering
                 diff_map = None
                 if self.skip_empty_patches:
@@ -179,11 +179,11 @@ class AugmentedImagePairSlicingDataset(Dataset):
                         self.slice_info.append(info_dict); num_slices_for_file += 1
                 if num_slices_for_file > 0: self.processed_files += 1; self.total_slices_generated += num_slices_for_file
             except (FileNotFoundError, UnidentifiedImageError) as file_err:
-                 self.skipped_count += 1; self.skipped_file_reasons.append((base_name, type(file_err).__name__));
+                 self.skipped_count += 1; self.skipped_file_reasons.append((src_path, type(file_err).__name__));
                  # Keep Warning for bad files
                  if is_main_process(): logging.warning(f"Skipping {base_name}: {file_err}")
             except Exception as e:
-                self.skipped_count += 1; self.skipped_file_reasons.append((base_name, f"Error: {type(e).__name__}"))
+                self.skipped_count += 1; self.skipped_file_reasons.append((src_path, f"Error: {type(e).__name__}"))
                 # Keep Warning for other errors
                 if is_main_process(): logging.warning(f"Skipping {base_name} due to error: {e}", exc_info=False)
 
@@ -196,14 +196,20 @@ class AugmentedImagePairSlicingDataset(Dataset):
                 pcts = np.percentile(diffs, [0, 25, 50, 75, 90, 95, 100])
                 logging.info(f"Patch diff stats (max_pixel/255): min={pcts[0]:.2f} p25={pcts[1]:.2f} p50={pcts[2]:.2f} p75={pcts[3]:.2f} p90={pcts[4]:.2f} p95={pcts[5]:.2f} max={pcts[6]:.2f} | threshold={self.skip_empty_threshold:.1f}")
                 self._patch_diffs = []
-            # Use DEBUG for skip reasons unless count is high? Maybe keep top N as WARNING.
+            # Group skipped files by reason for easy copy-paste
             if self.skipped_count > 0:
-                 limit = 5
-                 logging.warning(f"--- Top {min(limit, self.skipped_count)} File Skip Reasons ---") # Keep Warning
-                 for i, (name, reason) in enumerate(self.skipped_file_reasons):
-                      if i >= limit: logging.warning(f"  ... ({self.skipped_count - limit} more)"); break # Keep Warning
-                      logging.warning(f"  - {name}: {reason}") # Keep Warning
-                 logging.warning("-----------------------------") # Keep Warning
+                 from collections import defaultdict
+                 by_reason = defaultdict(list)
+                 for path, reason in self.skipped_file_reasons:
+                     by_reason[reason].append(path)
+                 logging.warning(f"--- Skipped {self.skipped_count} files ---")
+                 for reason, paths in by_reason.items():
+                     logging.warning(f"  [{reason}] ({len(paths)} files):")
+                     for p in paths[:10]:
+                         logging.warning(f"    {p}")
+                     if len(paths) > 10:
+                         logging.warning(f"    ... ({len(paths) - 10} more)")
+                 logging.warning("-----------------------------")
         if len(self.slice_info) == 0:
              err_msg = f"CRITICAL: Dataset has 0 usable slices. "
              if self.processed_files > 0: err_msg += f"Processed {self.processed_files} files but generated no slices. Check resolution/overlap."
@@ -399,7 +405,7 @@ def _build_datasets(config, src_transforms, dst_transforms, shared_transforms, s
                     use_masks, use_auto_mask, skip_empty, device_type, world_size, rank):
     """Create training and validation datasets and dataloaders.
 
-    Returns (dataset, dataloader, dataloader_iter, val_dataloader, has_val_preview, has_val_loss).
+    Returns (dataset, dataloader, dataloader_iter, val_dataloader, val_dataset, has_val_preview, has_val_loss).
     Raises on fatal errors.
     """
     dataset = AugmentedImagePairSlicingDataset(
@@ -430,6 +436,7 @@ def _build_datasets(config, src_transforms, dst_transforms, shared_transforms, s
 
     # --- Validation Dataset & DataLoader ---
     val_dataloader = None
+    val_dataset = None
     has_val_preview = bool(config.data.val_src_dir)
     has_val_loss = bool(config.data.val_src_dir and config.data.val_dst_dir)
     if has_val_loss and is_main_process():
@@ -444,8 +451,9 @@ def _build_datasets(config, src_transforms, dst_transforms, shared_transforms, s
         except Exception as e:
             logging.warning(f"Validation dataset init failed: {e}. Validation disabled.")
             val_dataloader = None
+            val_dataset = None
 
-    return dataset, dataloader, dataloader_iter, val_dataloader, has_val_preview, has_val_loss
+    return dataset, dataloader, dataloader_iter, val_dataloader, val_dataset, has_val_preview, has_val_loss
 
 
 def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_size,
@@ -784,7 +792,7 @@ def train(config):
     dataset, dataloader, dataloader_iter = None, None, None
     try:
         skip_empty = config.mask.skip_empty_patches and use_auto_mask
-        dataset, dataloader, dataloader_iter, val_dataloader, has_val_preview, has_val_loss = _build_datasets(
+        dataset, dataloader, dataloader_iter, val_dataloader, val_dataset, has_val_preview, has_val_loss = _build_datasets(
             config, src_transforms, dst_transforms, shared_transforms, standard_transform,
             use_masks, use_auto_mask, skip_empty, device_type, world_size, rank)
     except Exception as e: logging.error(f"FATAL: Dataset/DataLoader init failed: {e}. Exiting.", exc_info=True); cleanup_ddp(); return
@@ -1090,7 +1098,7 @@ def train(config):
                 if epoch_end_now: run_val_loss_now = True
                 elif val_interval > 0 and global_step % val_interval == 0: run_val_loss_now = True
             if run_val_loss_now:
-                run_validation(model, val_dataloader, device, device_type, use_amp_eff, use_lpips, loss_fn_lpips, use_bce_dice, criterion_l1, current_ep_idx, global_step, lambda_lpips=config.training.lambda_lpips, use_mask_input=use_mask_input)
+                run_validation(model, val_dataloader, device, device_type, use_amp_eff, use_lpips, loss_fn_lpips, use_bce_dice, criterion_l1, current_ep_idx, global_step, lambda_lpips=config.training.lambda_lpips, use_mask_input=use_mask_input, val_dataset=val_dataset)
             # Val preview runs on its own schedule (epoch end or val_interval), even without dst
             run_val_preview_now = is_main_process() and has_val_preview and val_fixed_src is not None and (epoch_end_now or (val_interval > 0 and global_step % val_interval == 0))
             if run_val_preview_now:
