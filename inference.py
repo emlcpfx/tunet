@@ -23,6 +23,7 @@ from torch.amp import autocast
 from models import create_model
 from config import dict_to_namespace
 from image_io import load_image_any_format, load_mask_image, denormalize, NORM_MEAN, NORM_STD
+from inference_config import InferenceConfig
 
 # --- Updated load_model_and_config ---
 def load_model_and_config(checkpoint_path, device):
@@ -118,7 +119,7 @@ def create_blend_mask(resolution, device):
 
 # --- Main Inference Function ---
 # ... (process_image remains the same) ...
-def process_image(model, image_path, output_path, resolution, stride, device, batch_size, transform, denormalize_fn, use_amp, half_res=False, mask_path=None, use_mask_input=False, loss_mode='l1', src_image=None):
+def process_image(model, image_path, output_path, cfg: InferenceConfig, transform, denormalize_fn, mask_path=None, src_image=None):
     logging.info(f"Processing: {os.path.basename(image_path)}")
     start_time = time.time()
     try:
@@ -126,7 +127,7 @@ def process_image(model, image_path, output_path, resolution, stride, device, ba
         orig_width, orig_height = img.size
 
         # Downscale to half resolution if requested
-        if half_res:
+        if cfg.half_res:
             img_width = orig_width // 2
             img_height = orig_height // 2
             img = img.resize((img_width, img_height), Image.LANCZOS)
@@ -134,30 +135,30 @@ def process_image(model, image_path, output_path, resolution, stride, device, ba
         else:
             img_width, img_height = orig_width, orig_height
 
-        if img_width < resolution or img_height < resolution:
-            logging.warning(f"Image smaller than resolution {resolution}. Skipping.")
+        if img_width < cfg.resolution or img_height < cfg.resolution:
+            logging.warning(f"Image smaller than resolution {cfg.resolution}. Skipping.")
             return
     except Exception as e:
         logging.error(f"Failed to load: {image_path}: {e}")
         return
     # Load mask if needed
     mask_full = None
-    if use_mask_input and mask_path:
+    if cfg.use_mask_input and mask_path:
         try:
             mask_full = load_mask_image(mask_path)
-            if half_res:
+            if cfg.half_res:
                 mask_full = cv2.resize(mask_full, (img_width, img_height), interpolation=cv2.INTER_LINEAR)
         except Exception as e:
             logging.error(f"Failed to load mask: {mask_path}: {e}")
             return
     slice_coords = []
-    possible_y = list(range(0, img_height - resolution, stride)) + ([img_height - resolution] if img_height > resolution else [0])
-    possible_x = list(range(0, img_width - resolution, stride)) + ([img_width - resolution] if img_width > resolution else [0])
+    possible_y = list(range(0, img_height - cfg.resolution, cfg.stride)) + ([img_height - cfg.resolution] if img_height > cfg.resolution else [0])
+    possible_x = list(range(0, img_width - cfg.resolution, cfg.stride)) + ([img_width - cfg.resolution] if img_width > cfg.resolution else [0])
     unique_y = sorted(list(set(possible_y)))
     unique_x = sorted(list(set(possible_x)))
     for y in unique_y:
         for x in unique_x:
-            slice_coords.append((x, y, x + resolution, y + resolution))
+            slice_coords.append((x, y, x + cfg.resolution, y + cfg.resolution))
     num_slices = len(slice_coords)
     if num_slices == 0:
         logging.warning(f"No slices generated for {os.path.basename(image_path)}.")
@@ -165,41 +166,41 @@ def process_image(model, image_path, output_path, resolution, stride, device, ba
     logging.info(f"Generated {num_slices} slices.")
     output_canvas_cpu = torch.zeros(1, 3, img_height, img_width, dtype=torch.float32)
     weight_map_cpu = torch.zeros(1, 1, img_height, img_width, dtype=torch.float32)
-    blend_mask = create_blend_mask(resolution, device)
+    blend_mask = create_blend_mask(cfg.resolution, cfg.device)
     blend_mask_cpu = blend_mask.cpu()[0]
     processed_count = 0
-    device_type = device.type
+    device_type = cfg.device.type
     with torch.no_grad():
-        for i in range(0, num_slices, batch_size):
-            batch_coords = slice_coords[i:min(i + batch_size, num_slices)]
+        for i in range(0, num_slices, cfg.batch_size):
+            batch_coords = slice_coords[i:min(i + cfg.batch_size, num_slices)]
             batch_src_list = [img.crop(coords) for coords in batch_coords]
             batch_src_tensor_list = [transform(src_pil) for src_pil in batch_src_list]
-            batch_src_tensor = torch.stack(batch_src_tensor_list).to(device, non_blocking=True)
+            batch_src_tensor = torch.stack(batch_src_tensor_list).to(cfg.device, non_blocking=True)
             # Concatenate mask as 4th channel if needed
-            if use_mask_input and mask_full is not None:
+            if cfg.use_mask_input and mask_full is not None:
                 batch_mask_list = []
                 for coords in batch_coords:
                     x, y, _, _ = coords
-                    mask_slice = mask_full[y:y + resolution, x:x + resolution]
+                    mask_slice = mask_full[y:y + cfg.resolution, x:x + cfg.resolution]
                     mask_tensor = torch.from_numpy(np.ascontiguousarray(mask_slice)).unsqueeze(0).float()
                     batch_mask_list.append(mask_tensor)
-                batch_mask_tensor = torch.stack(batch_mask_list).to(device, non_blocking=True)
+                batch_mask_tensor = torch.stack(batch_mask_list).to(cfg.device, non_blocking=True)
                 batch_src_tensor = torch.cat([batch_src_tensor, batch_mask_tensor], dim=1)
-            with autocast(device_type=device_type, enabled=use_amp):
+            with autocast(device_type=device_type, enabled=cfg.use_amp):
                 batch_output_tensor = model(batch_src_tensor)
-                if loss_mode == 'bce+dice':
+                if cfg.loss_mode == 'bce+dice':
                     batch_output_tensor = torch.sigmoid(batch_output_tensor)
             batch_output_tensor_cpu = batch_output_tensor.cpu().float()
             for j, coords in enumerate(batch_coords):
                 x, y, _, _ = coords
-                if loss_mode == 'bce+dice':
+                if cfg.loss_mode == 'bce+dice':
                     output_slice_cpu = torch.clamp(batch_output_tensor_cpu[j], 0, 1)
                 else:
                     output_slice_cpu = denormalize_fn(batch_output_tensor_cpu[j].unsqueeze(0))[0]
-                output_canvas_cpu[0, :, y:y + resolution, x:x + resolution] += output_slice_cpu * blend_mask_cpu
-                weight_map_cpu[0, :, y:y + resolution, x:x + resolution] += blend_mask_cpu
+                output_canvas_cpu[0, :, y:y + cfg.resolution, x:x + cfg.resolution] += output_slice_cpu * blend_mask_cpu
+                weight_map_cpu[0, :, y:y + cfg.resolution, x:x + cfg.resolution] += blend_mask_cpu
             processed_count += len(batch_coords)
-            if processed_count % (batch_size * 10) == 0 or processed_count == num_slices:
+            if processed_count % (cfg.batch_size * 10) == 0 or processed_count == num_slices:
                 logging.info(f"  Processed {processed_count}/{num_slices} slices...")
     weight_map_cpu = torch.clamp(weight_map_cpu, min=1e-8)
     final_image_tensor = output_canvas_cpu / weight_map_cpu
@@ -213,16 +214,17 @@ def process_image(model, image_path, output_path, resolution, stride, device, ba
         logging.error(f"Failed to save {output_path}: {e}")
 
 
-def process_image_batch(model, frame_imgs, write_paths, resolution, stride, device,
-                        transform, denormalize_fn, use_amp, half_res=False, loss_mode='l1'):
+def process_image_batch(model, frame_imgs, write_paths, cfg: InferenceConfig,
+                        transform, denormalize_fn):
     """Process multiple frames in a single GPU forward pass.
 
-    Most effective when each frame produces few tiles (e.g. 1 tile for 512×512 frames).
+    Most effective when each frame produces few tiles (e.g. 1 tile for 512x512 frames).
     All tiles from all frames are stacked into one batch and run through the model once.
 
     Args:
         frame_imgs:  list of PIL Images (pre-loaded)
         write_paths: list of output file paths, one per frame
+        cfg:         InferenceConfig with resolution, stride, device, etc.
     """
     frame_records = []   # per-frame metadata + accumulation canvas
     all_tile_tensors = []
@@ -231,20 +233,20 @@ def process_image_batch(model, frame_imgs, write_paths, resolution, stride, devi
 
     for fi, img in enumerate(frame_imgs):
         orig_w, orig_h = img.size
-        if half_res:
+        if cfg.half_res:
             img_w, img_h = orig_w // 2, orig_h // 2
             img = img.resize((img_w, img_h), Image.LANCZOS)
         else:
             img_w, img_h = orig_w, orig_h
 
-        if img_w < resolution or img_h < resolution:
-            logging.warning(f"Frame {fi} ({img_w}×{img_h}) smaller than resolution {resolution}, skipping.")
+        if img_w < cfg.resolution or img_h < cfg.resolution:
+            logging.warning(f"Frame {fi} ({img_w}x{img_h}) smaller than resolution {cfg.resolution}, skipping.")
             frame_records.append(None)
             continue
 
-        possible_y = list(range(0, img_h - resolution, stride)) + ([img_h - resolution] if img_h > resolution else [0])
-        possible_x = list(range(0, img_w - resolution, stride)) + ([img_w - resolution] if img_w > resolution else [0])
-        slice_coords = [(x, y, x + resolution, y + resolution)
+        possible_y = list(range(0, img_h - cfg.resolution, cfg.stride)) + ([img_h - cfg.resolution] if img_h > cfg.resolution else [0])
+        possible_x = list(range(0, img_w - cfg.resolution, cfg.stride)) + ([img_w - cfg.resolution] if img_w > cfg.resolution else [0])
+        slice_coords = [(x, y, x + cfg.resolution, y + cfg.resolution)
                         for y in sorted(set(possible_y)) for x in sorted(set(possible_x))]
 
         canvas = torch.zeros(1, 3, img_h, img_w, dtype=torch.float32)
@@ -264,14 +266,14 @@ def process_image_batch(model, frame_imgs, write_paths, resolution, stride, devi
         return
 
     # One GPU call for all tiles across all frames
-    blend_mask_cpu = create_blend_mask(resolution, device).cpu()[0]
-    batch = torch.stack(all_tile_tensors).to(device, non_blocking=True)
-    device_type = device.type
+    blend_mask_cpu = create_blend_mask(cfg.resolution, cfg.device).cpu()[0]
+    batch = torch.stack(all_tile_tensors).to(cfg.device, non_blocking=True)
+    device_type = cfg.device.type
 
     with torch.no_grad():
-        with autocast(device_type=device_type, enabled=use_amp):
+        with autocast(device_type=device_type, enabled=cfg.use_amp):
             outputs = model(batch)
-            if loss_mode == 'bce+dice':
+            if cfg.loss_mode == 'bce+dice':
                 outputs = torch.sigmoid(outputs)
 
     outputs_cpu = outputs.cpu().float()
@@ -283,12 +285,12 @@ def process_image_batch(model, frame_imgs, write_paths, resolution, stride, devi
         if rec is None:
             continue
         x, y, _, _ = rec['slice_coords'][tile_slice_idx[ti]]
-        if loss_mode == 'bce+dice':
+        if cfg.loss_mode == 'bce+dice':
             out_slice = torch.clamp(outputs_cpu[ti], 0, 1)
         else:
             out_slice = denormalize_fn(outputs_cpu[ti].unsqueeze(0))[0]
-        rec['canvas'][0, :, y:y + resolution, x:x + resolution] += out_slice * blend_mask_cpu
-        rec['weight_map'][0, :, y:y + resolution, x:x + resolution] += blend_mask_cpu
+        rec['canvas'][0, :, y:y + cfg.resolution, x:x + cfg.resolution] += out_slice * blend_mask_cpu
+        rec['weight_map'][0, :, y:y + cfg.resolution, x:x + cfg.resolution] += blend_mask_cpu
 
     # Save each frame
     for fi, (rec, write_path) in enumerate(zip(frame_records, write_paths)):
@@ -395,9 +397,13 @@ if __name__ == "__main__":
             if mask_path is None:
                 logging.warning(f"No mask found for {basename}, using zeros (no mask focus)")
 
-        process_image(model, img_path, output_path, resolution, stride, device,
-                      args.batch_size, transform, denormalize, args.use_amp, args.half_res,
-                      mask_path=mask_path, use_mask_input=use_mask_input, loss_mode=loss_mode)
+        inf_cfg = InferenceConfig(
+            resolution=resolution, stride=stride, device=device,
+            batch_size=args.batch_size, use_amp=args.use_amp,
+            half_res=args.half_res, use_mask_input=use_mask_input,
+            loss_mode=loss_mode)
+        process_image(model, img_path, output_path, inf_cfg, transform, denormalize,
+                      mask_path=mask_path)
 
     total_end_time = time.time()
     logging.info(f"--- Inference finished ---")

@@ -42,10 +42,11 @@ from models import create_model, UNet, MSRNet
 from image_io import load_image_any_format, load_mask_image, load_exr_full_frame, NORM_MEAN, NORM_STD, denormalize
 from config import config_to_dict, dict_to_sns, merge_configs
 from training.loss import dice_loss, diff_heatmap, refine_auto_mask, compute_auto_mask
+from training.context import PreviewContext
 from training.previews import save_previews, capture_preview_batch, save_val_previews, capture_val_preview_batch
 from training.validation import run_validation
 from training.checkpoint import prune_checkpoints
-from training.helpers import cycle, collate_skip_none, auto_detect_num_workers
+from training.dataloader_utils import cycle, collate_skip_none, auto_detect_num_workers
 
 # --- Data Loading and Augmentation ---
 
@@ -334,6 +335,374 @@ def handle_signal(signum, frame):
         logging.warning("Shutdown already requested. Terminating forcefully.") # Keep Warning
         os._exit(1)
 
+# --- Training Helper Functions ---
+
+def _setup_device(config):
+    """Determine the training device and type based on platform and availability.
+
+    Returns (device, device_type) where device_type is 'cuda', 'mps', or 'cpu'.
+    """
+    if CURRENT_OS == 'Darwin' and torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        device = torch.device(f"cuda:{local_rank}")
+        torch.backends.cudnn.benchmark = True
+    else:
+        device = torch.device("cpu")
+    device_type = device.type  # 'cuda', 'mps', or 'cpu'
+    return device, device_type
+
+
+def _setup_logging(config, rank, device, world_size):
+    """Configure console and file logging for training.
+
+    Sets up root logger with console handler (all ranks) and file handler (main process only).
+    """
+    log_level = logging.INFO if is_main_process() else logging.WARNING
+    console_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
+    file_formatter = logging.Formatter(f'%(asctime)s [R{rank}|{CURRENT_OS}|%(levelname)s] %(message)s')
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
+    if is_main_process():
+        try:
+            output_dir_abs = os.path.abspath(config.data.output_dir)
+            os.makedirs(output_dir_abs, exist_ok=True)
+            log_file = os.path.join(output_dir_abs, 'training.log')
+            file_handler = logging.FileHandler(log_file, mode='a')
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.setFormatter(file_formatter)
+            root_logger.addHandler(file_handler)
+            logging.info("=" * 60)
+            logging.info(f" Starting Training ")
+            logging.info(f" Device: {device} | World Size: {world_size}")
+            logging.info(f" Output Dir: {output_dir_abs}")
+            try:
+                logging.debug("--- Effective Configuration ---\n" + yaml.dump(
+                    config_to_dict(config), indent=2, default_flow_style=False, sort_keys=False
+                ) + "-----------------------------")
+            except Exception:
+                logging.debug(f" Config Object: {config}")
+            logging.info("=" * 60)
+            logging.info(">>> Press Ctrl+C for graceful shutdown <<<")
+        except Exception as log_setup_e:
+            logging.error(f"Error setting up file logging: {log_setup_e}")
+
+
+def _build_datasets(config, src_transforms, dst_transforms, shared_transforms, standard_transform,
+                    use_masks, use_auto_mask, skip_empty, device_type, world_size, rank):
+    """Create training and validation datasets and dataloaders.
+
+    Returns (dataset, dataloader, dataloader_iter, val_dataloader, has_val_preview, has_val_loss).
+    Raises on fatal errors.
+    """
+    dataset = AugmentedImagePairSlicingDataset(
+        config.data.src_dir, config.data.dst_dir, config.data.resolution,
+        config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms,
+        standard_transform, mask_dir=config.data.mask_dir if use_masks else None,
+        use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty,
+        skip_empty_threshold=config.mask.skip_empty_threshold)
+    if is_main_process():
+        logging.info(f"Dataset Size: {len(dataset)} slices.")
+        global_bs = config.training.batch_size * world_size
+        est_bpp = math.ceil(len(dataset) / global_bs) if global_bs > 0 else 0
+        logging.debug(f"Global Batch: {global_bs} | Est Batches/Pass: {est_bpp} | Iter/Epoch: {config.training.iterations_per_epoch}")
+    if len(dataset) < world_size:
+        raise ValueError(f"Dataset size ({len(dataset)}) < World size ({world_size}).")
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
+    pin = True if device_type == 'cuda' else False
+    persist = True if config.dataloader.num_workers > 0 else False
+    prefetch = config.dataloader.prefetch_factor if config.dataloader.num_workers > 0 else None
+    if CURRENT_OS == 'Windows' and config.dataloader.num_workers > 0 and is_main_process():
+        logging.warning("Using num_workers > 0 on Windows. If issues occur, try num_workers=0.")
+    dataloader = DataLoader(
+        dataset, batch_size=config.training.batch_size, sampler=sampler,
+        num_workers=config.dataloader.num_workers, pin_memory=pin,
+        prefetch_factor=prefetch, persistent_workers=persist,
+        collate_fn=collate_skip_none, drop_last=True)
+    dataloader_iter = cycle(dataloader)
+
+    # --- Validation Dataset & DataLoader ---
+    val_dataloader = None
+    has_val_preview = bool(config.data.val_src_dir)
+    has_val_loss = bool(config.data.val_src_dir and config.data.val_dst_dir)
+    if has_val_loss and is_main_process():
+        try:
+            val_dataset = AugmentedImagePairSlicingDataset(
+                config.data.val_src_dir, config.data.val_dst_dir, config.data.resolution,
+                config.data.overlap_factor, None, None, None, standard_transform)
+            logging.info(f"Validation Dataset Size: {len(val_dataset)} slices.")
+            val_dataloader = DataLoader(
+                val_dataset, batch_size=config.training.batch_size, shuffle=False,
+                num_workers=0, collate_fn=collate_skip_none, drop_last=False)
+        except Exception as e:
+            logging.warning(f"Validation dataset init failed: {e}. Validation disabled.")
+            val_dataloader = None
+
+    return dataset, dataloader, dataloader_iter, val_dataloader, has_val_preview, has_val_loss
+
+
+def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_size,
+                 use_lpips, use_l2, use_bce_dice, use_amp_eff, loss_fn_lpips, model_type):
+    """Create the model, optimizer, scaler, and load checkpoints if available.
+
+    Returns (model, optimizer, scaler, start_epoch, start_step, ckpt_prefix, use_amp_eff).
+    """
+    recurrence_t = getattr(config.model, 'recurrence_steps', 2)
+    model = create_model(model_type=model_type, n_ch=n_input_ch, n_cls=3,
+                         hidden_size=eff_size, t=recurrence_t).to(device)
+    if is_main_process():
+        logging.debug(f"{model_type.upper()} instantiated: hidden_size={eff_size}, device={device}.")
+    if world_size > 1 and device_type == 'cuda':
+        if model_type == 'unet':
+            if is_main_process(): logging.debug("Converting BatchNorm to SyncBatchNorm.")
+            model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        else:
+            if is_main_process(): logging.debug("MSRNet uses GroupNorm; skipping SyncBatchNorm conversion.")
+        dist.barrier()
+
+    optimizer = optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=1e-5)
+
+    # Determine effective AMP usage
+    use_amp_requested = config.training.use_amp
+    if use_amp_requested:
+        if device_type == 'cuda':
+            use_amp_eff = True
+        elif device_type == 'mps':
+            if is_main_process(): logging.warning("AMP requested but device is MPS. Disabling AMP (limited support).")
+            use_amp_eff = False
+        else:
+            if is_main_process(): logging.warning("AMP requested but device is CPU. AMP disabled.")
+            use_amp_eff = False
+    else:
+        use_amp_eff = False
+
+    scaler = GradScaler(enabled=use_amp_eff)
+    if is_main_process(): logging.info(f"Optimizer: AdamW | AMP Enabled: {use_amp_eff}")
+    criterion_l1 = nn.L1Loss()
+    criterion_l2 = nn.MSELoss() if use_l2 else None
+    criterion_bce = nn.BCEWithLogitsLoss() if use_bce_dice else None
+
+    # Checkpoint naming
+    ckpt_prefix = getattr(config, '_config_stem',
+                          os.path.basename(os.path.normpath(config.data.output_dir)))
+    def_h, bump_h = 64, 96
+
+    # --- Resume from checkpoint ---
+    start_epoch, start_step = 0, 0
+    latest_ckpt = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth')
+    # Fallback chain: config_stem name -> folder name -> legacy tunet_
+    if is_main_process() and not os.path.exists(latest_ckpt):
+        folder_prefix = os.path.basename(os.path.normpath(config.data.output_dir))
+        folder_ckpt = os.path.join(config.data.output_dir, f'{folder_prefix}_tunet_latest.pth')
+        legacy_ckpt = os.path.join(config.data.output_dir, 'tunet_latest.pth')
+        if os.path.exists(folder_ckpt):
+            logging.info(f"Found checkpoint with folder name: {folder_prefix}_tunet_latest.pth")
+            latest_ckpt = folder_ckpt
+        elif os.path.exists(legacy_ckpt):
+            logging.info(f"Found legacy checkpoint: tunet_latest.pth")
+            latest_ckpt = legacy_ckpt
+    exists_list = [False]
+    if is_main_process(): exists_list[0] = os.path.exists(latest_ckpt)
+    if world_size > 1: dist.broadcast_object_list(exists_list, src=0)
+    if exists_list[0]:
+        if is_main_process(): logging.info(f"Attempting resume from checkpoint: {latest_ckpt}")
+        try:
+            ckpt = torch.load(latest_ckpt, map_location='cpu')
+            if 'config' not in ckpt: raise ValueError("Checkpoint missing 'config'")
+            ckpt_cfg = dict_to_sns(ckpt['config'])
+            ckpt_loss = getattr(getattr(ckpt_cfg, 'training', SimpleNamespace()), 'loss', 'l1')
+            ckpt_base = getattr(getattr(ckpt_cfg, 'model', SimpleNamespace()), 'model_size_dims', def_h)
+            ckpt_needs_bump = ((ckpt_loss == 'l1+lpips' and ckpt_base == def_h)
+                               or (ckpt_loss == 'weighted' and ckpt_base == def_h
+                                   and getattr(getattr(ckpt_cfg, 'training', SimpleNamespace()), 'lpips_weight', 0) > 0))
+            ckpt_eff_size = bump_h if ckpt_needs_bump else ckpt_base
+            if ckpt_loss != config.training.loss:
+                raise ValueError(f"Loss mismatch: Ckpt='{ckpt_loss}', Current='{config.training.loss}'")
+            if ckpt_eff_size != eff_size:
+                raise ValueError(f"Effective size mismatch: Ckpt={ckpt_eff_size}, Current={eff_size}")
+            ckpt_n_ch = ckpt.get('n_input_channels', 3)
+            if ckpt_n_ch != n_input_ch:
+                raise ValueError(f"Input channel mismatch: Ckpt={ckpt_n_ch}, Current={n_input_ch}. Cannot resume with different mask input setting.")
+            ckpt_model_type = ckpt.get('model_type', getattr(getattr(ckpt_cfg, 'model', SimpleNamespace()), 'model_type', 'unet'))
+            if ckpt_model_type != model_type:
+                raise ValueError(f"Model type mismatch: Ckpt='{ckpt_model_type}', Current='{model_type}'. Cannot resume across architectures.")
+            if is_main_process(): logging.debug("Checkpoint config compatible.")
+            state_dict = ckpt['model_state_dict']
+            is_ddp_ckpt = any(k.startswith('module.') for k in state_dict)
+            if world_size > 1 and not is_ddp_ckpt:
+                logging.debug("Adding 'module.' prefix to load non-DDP checkpoint into DDP model.")
+                state_dict = {'module.' + k: v for k, v in state_dict.items()}
+            elif world_size == 1 and is_ddp_ckpt:
+                logging.debug("Removing 'module.' prefix to load DDP checkpoint into non-DDP model.")
+                state_dict = {k.replace('module.', '', 1): v for k, v in state_dict.items()}
+            model.load_state_dict(state_dict)
+            if is_main_process(): logging.debug("Loaded model state_dict.")
+
+            if 'optimizer_state_dict' in ckpt:
+                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+                logging.debug("Loaded optimizer state_dict.")
+            else:
+                if is_main_process(): logging.warning("Optimizer state missing in checkpoint.")
+
+            if use_amp_eff and ckpt.get('scaler_state_dict'):
+                try:
+                    scaler.load_state_dict(ckpt['scaler_state_dict'])
+                    logging.debug("Loaded GradScaler state_dict.")
+                except Exception as se:
+                    logging.warning(f"Could not load GradScaler state: {se}.")
+            elif use_amp_eff:
+                if is_main_process(): logging.warning("AMP enabled, but scaler state missing in ckpt.")
+
+            start_step = ckpt.get('global_step', 0) + 1
+            start_epoch = start_step // config.training.iterations_per_epoch
+            if is_main_process():
+                logging.info(f"Resuming from Global Step {start_step} (Logical Epoch {start_epoch + 1}).")
+            del ckpt
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        except Exception as e:
+            logging.error(f"Checkpoint load failed: {e}. Starting fresh.", exc_info=True)
+            start_epoch, start_step = 0, 0
+            optimizer = optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=1e-5)
+            scaler = GradScaler(enabled=use_amp_eff)
+    else:
+        # No checkpoint — check if fine-tuning from an existing model
+        finetune_path = getattr(config.training, 'finetune_from', None)
+        if finetune_path:
+            if is_main_process():
+                logging.info("=" * 60)
+                logging.info("FINE-TUNING MODE")
+                logging.info(f"  Loading model weights from: {finetune_path}")
+                logging.info(f"  Training on new data in: {config.data.src_dir}")
+                logging.info(f"  Optimizer & step counter start fresh (step 0).")
+                logging.info("=" * 60)
+            try:
+                ft_ckpt = torch.load(finetune_path, map_location='cpu')
+                if 'model_state_dict' not in ft_ckpt:
+                    raise KeyError("Checkpoint missing 'model_state_dict'. Is this a valid tunet checkpoint?")
+                ft_state = ft_ckpt['model_state_dict']
+                if any(k.startswith('module.') for k in ft_state):
+                    ft_state = {k.replace('module.', '', 1): v for k, v in ft_state.items()}
+                if world_size > 1 and not any(k.startswith('module.') for k in ft_state):
+                    ft_state = {'module.' + k: v for k, v in ft_state.items()}
+                model.load_state_dict(ft_state)
+                if is_main_process():
+                    logging.info("Fine-tune weights loaded successfully. Starting training from step 0.")
+                del ft_ckpt
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            except Exception as e:
+                logging.error(f"Failed to load fine-tune checkpoint: {e}", exc_info=True)
+                logging.warning("Falling back to training from scratch.")
+        else:
+            if is_main_process(): logging.info("No checkpoint found. Starting fresh.")
+
+    # --- DDP Wrap ---
+    if world_size > 1:
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        cuda_device_ids = [local_rank] if device_type == 'cuda' else None
+        model = DDP(model,
+                    device_ids=cuda_device_ids,
+                    output_device=(local_rank if device_type == 'cuda' else None),
+                    find_unused_parameters=False)
+        if is_main_process(): logging.debug("Model wrapped with DDP.")
+        dist.barrier()
+
+    return model, optimizer, scaler, start_epoch, start_step, ckpt_prefix, use_amp_eff, criterion_l1, criterion_l2, criterion_bce
+
+
+def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion_l1, criterion_l2,
+                           loss_fn_lpips, criterion_bce, config, device, device_type, use_amp_eff,
+                           use_bce_dice, use_lpips, use_weighted, use_l2, use_mask_loss, use_auto_mask,
+                           mask_batch, auto_mask_raw):
+    """Run forward pass, compute loss, backward pass, and optimizer step.
+
+    Handles both AMP and non-AMP paths. Returns (l1_val, lp_val, l2_val, out_tensor, loss_finite).
+    """
+    optimizer.zero_grad(set_to_none=True)
+
+    # --- Forward + Loss (shared logic for AMP and non-AMP) ---
+    def _forward_and_loss(model_input, dst):
+        out = model(model_input)
+        if use_bce_dice:
+            dst_01 = dst * 0.5 + 0.5
+            bce_total = torch.tensor(0.0, device=device)
+            dc_total = torch.tensor(0.0, device=device)
+            n_ch = out.shape[1]
+            for ch in range(n_ch):
+                out_ch = out[:, ch:ch + 1, :, :]
+                dst_ch = dst_01[:, ch:ch + 1, :, :]
+                bce_total = bce_total + criterion_bce(out_ch, dst_ch)
+                dc_total = dc_total + dice_loss(torch.sigmoid(out_ch), dst_ch)
+            l1 = (bce_total + dc_total) / n_ch
+            lp = torch.tensor(0.0, device=device)
+            loss = l1
+            out = torch.sigmoid(out)
+        else:
+            if use_mask_loss and mask_batch is not None:
+                weight_map = 1.0 + mask_batch * (config.mask.mask_weight - 1.0)
+                l1 = (torch.abs(out - dst) * weight_map).mean()
+            elif use_auto_mask and auto_mask_raw is not None:
+                auto_mask_w = refine_auto_mask(auto_mask_raw, gamma=config.mask.auto_mask_gamma)
+                weight_map = 1.0 + auto_mask_w * (config.mask.mask_weight - 1.0)
+                l1 = (torch.abs(out - dst) * weight_map).mean()
+            else:
+                weight_map = None
+                l1 = criterion_l1(out, dst)
+            l2_val = torch.tensor(0.0, device=device)
+            if use_l2 and criterion_l2 is not None:
+                if weight_map is not None:
+                    l2_val = ((out - dst) ** 2 * weight_map).mean()
+                else:
+                    l2_val = criterion_l2(out, dst)
+            lp = torch.tensor(0.0, device=device)
+            if use_lpips and loss_fn_lpips:
+                try:
+                    lp = loss_fn_lpips(out, dst).mean()
+                except Exception:
+                    lp = torch.tensor(0.0, device=device)
+            if use_weighted:
+                loss = (config.training.l1_weight * l1
+                        + config.training.l2_weight * l2_val
+                        + config.training.lpips_weight * lp)
+            else:
+                loss = l1 + config.training.lambda_lpips * lp
+        l2_out = l2_val if not use_bce_dice else torch.tensor(0.0, device=device)
+        return out, l1, lp, l2_out, loss
+
+    # --- AMP vs non-AMP execution ---
+    if use_amp_eff:
+        with autocast(device_type=device_type, enabled=True):
+            out, l1, lp, l2_val, loss = _forward_and_loss(model_input, dst)
+    else:
+        out, l1, lp, l2_val, loss = _forward_and_loss(model_input, dst)
+
+    # --- Check for NaN/Inf loss ---
+    if not torch.isfinite(loss):
+        return l1.detach().item(), 0.0, 0.0, out, False
+
+    # --- Backward + Optimizer Step ---
+    if use_amp_eff:
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        loss.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf'))
+        if not torch.isfinite(grad_norm):
+            logging.warning(f"NaN/Inf gradient (norm={grad_norm:.2e})! Skipping update.")
+            optimizer.zero_grad(set_to_none=True)
+        else:
+            optimizer.step()
+
+    return l1.detach().item(), lp.detach().item() if use_lpips else 0.0, l2_val.detach().item() if use_l2 else 0.0, out, True
+
+
 # --- Training Function ---
 def train(config):
     global shutdown_requested, scaler # Make scaler global for use in save_previews
@@ -348,39 +717,9 @@ def train(config):
     except Exception as ddp_e: logging.error(f"FATAL: DDP setup failed: {ddp_e}. Exiting.", exc_info=True); return # Keep Error
     rank = get_rank(); world_size = get_world_size()
 
-    # <<< SUPORTE MACOS >>>
-    if CURRENT_OS == 'Darwin' and torch.backends.mps.is_available() and torch.backends.mps.is_built():
-        device = torch.device("mps")
-        # No CUDNN benchmark for MPS
-    elif torch.cuda.is_available():
-        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-        device = torch.device(f"cuda:{local_rank}")
-        torch.backends.cudnn.benchmark = True
-    else:
-        device = torch.device("cpu")
-    device_type = device.type # 'cuda', 'mps', or 'cpu'
-    # <<< Talvez usar sem gloo no futuro? >>>
+    device, device_type = _setup_device(config)
 
-
-    # --- Logging Setup ---
-    log_level = logging.INFO if is_main_process() else logging.WARNING
-    console_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
-    file_formatter = logging.Formatter(f'%(asctime)s [R{rank}|{CURRENT_OS}|%(levelname)s] %(message)s')
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
-    for handler in root_logger.handlers[:]: root_logger.removeHandler(handler)
-    console_handler = logging.StreamHandler(); console_handler.setLevel(log_level); console_handler.setFormatter(console_formatter); root_logger.addHandler(console_handler)
-    if is_main_process():
-        try:
-            output_dir_abs = os.path.abspath(config.data.output_dir); os.makedirs(output_dir_abs, exist_ok=True)
-            log_file = os.path.join(output_dir_abs, 'training.log'); file_handler = logging.FileHandler(log_file, mode='a')
-            file_handler.setLevel(logging.DEBUG); file_handler.setFormatter(file_formatter); root_logger.addHandler(file_handler)
-            logging.info("="*60); logging.info(f" Starting Training "); logging.info(f" Device: {device} | World Size: {world_size}")
-            logging.info(f" Output Dir: {output_dir_abs}")
-            try: logging.debug("--- Effective Configuration ---\n" + yaml.dump(config_to_dict(config), indent=2, default_flow_style=False, sort_keys=False) + "-----------------------------")
-            except Exception: logging.debug(f" Config Object: {config}")
-            logging.info("="*60); logging.info(">>> Press Ctrl+C for graceful shutdown <<<")
-        except Exception as log_setup_e: logging.error(f"Error setting up file logging: {log_setup_e}")
+    _setup_logging(config, rank, device, world_size)
 
     # --- Standard Transform ---
     standard_transform = T.Compose([ T.ToTensor(), T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist()) ])
@@ -413,35 +752,10 @@ def train(config):
     dataset, dataloader, dataloader_iter = None, None, None
     try:
         skip_empty = config.mask.skip_empty_patches and use_auto_mask
-        dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, config.data.resolution, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold)
-        if is_main_process():
-             logging.info(f"Dataset Size: {len(dataset)} slices.")
-             global_bs = config.training.batch_size * world_size; est_bpp = math.ceil(len(dataset)/global_bs) if global_bs>0 else 0
-             logging.debug(f"Global Batch: {global_bs} | Est Batches/Pass: {est_bpp} | Iter/Epoch: {config.training.iterations_per_epoch}")
-        if len(dataset) < world_size: logging.error(f"FATAL: Dataset size ({len(dataset)}) < World size ({world_size})."); cleanup_ddp(); return
-        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
-        pin = True if device_type == 'cuda' else False; persist = True if config.dataloader.num_workers > 0 else False
-        prefetch = config.dataloader.prefetch_factor if config.dataloader.num_workers > 0 else None
-        if CURRENT_OS == 'Windows' and config.dataloader.num_workers > 0 and is_main_process():
-             logging.warning("Using num_workers > 0 on Windows. If issues occur, try num_workers=0.")
-        dataloader = DataLoader(dataset, batch_size=config.training.batch_size, sampler=sampler, num_workers=config.dataloader.num_workers, pin_memory=pin, prefetch_factor=prefetch, persistent_workers=persist, collate_fn=collate_skip_none, drop_last=True)
-        dataloader_iter = cycle(dataloader)
+        dataset, dataloader, dataloader_iter, val_dataloader, has_val_preview, has_val_loss = _build_datasets(
+            config, src_transforms, dst_transforms, shared_transforms, standard_transform,
+            use_masks, use_auto_mask, skip_empty, device_type, world_size, rank)
     except Exception as e: logging.error(f"FATAL: Dataset/DataLoader init failed: {e}. Exiting.", exc_info=True); cleanup_ddp(); return
-
-    # --- Validation Dataset & DataLoader ---
-    val_dataloader = None
-    has_val_preview = bool(config.data.val_src_dir)
-    has_val_loss = bool(config.data.val_src_dir and config.data.val_dst_dir)
-    if has_val_loss and is_main_process():
-        try:
-            val_dataset = AugmentedImagePairSlicingDataset(
-                config.data.val_src_dir, config.data.val_dst_dir, config.data.resolution,
-                config.data.overlap_factor, None, None, None, standard_transform)
-            logging.info(f"Validation Dataset Size: {len(val_dataset)} slices.")
-            val_dataloader = DataLoader(val_dataset, batch_size=config.training.batch_size, shuffle=False, num_workers=0, collate_fn=collate_skip_none, drop_last=False)
-        except Exception as e:
-            logging.warning(f"Validation dataset init failed: {e}. Validation disabled.")
-            val_dataloader = None
 
     # --- Model & Loss Setup ---
     model, loss_fn_lpips = None, None
@@ -460,7 +774,6 @@ def train(config):
             if is_main_process(): logging.debug(f"Weighted loss with LPIPS, {msg}.")
         if is_main_process():
             logging.info(f"Using weighted loss: L1={config.training.l1_weight}, L2={config.training.l2_weight}, LPIPS={config.training.lpips_weight}. Hidden size: {eff_size}.")
-        # Initialize LPIPS if needed
         if needs_lpips:
             status = {'success': False, 'error': None}
             if is_main_process():
@@ -488,7 +801,6 @@ def train(config):
         status = {'success': False, 'error': None}
         if is_main_process():
             try:
-                # <<< LPIPS por device >>>
                 if device_type != 'cuda': logging.debug(f"LPIPS running on {device_type}. May be slow.")
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=UserWarning, module="torchvision")
@@ -511,143 +823,12 @@ def train(config):
     # --- Model Instantiation, SyncBN, Resume, DDP Wrap ---
     model, optimizer, scaler = None, None, None
     start_epoch, start_step = 0, 0
+    model_type = getattr(config.model, 'model_type', 'unet')
     try:
-        model_type = getattr(config.model, 'model_type', 'unet')
-        recurrence_t = getattr(config.model, 'recurrence_steps', 2)
-        model = create_model(model_type=model_type, n_ch=n_input_ch, n_cls=3, hidden_size=eff_size, t=recurrence_t).to(device)
-        if is_main_process(): logging.debug(f"{model_type.upper()} instantiated: hidden_size={eff_size}, device={device}.")
-        if world_size > 1 and device_type == 'cuda': # SyncBN only for CUDA DDP
-            if model_type == 'unet':
-                if is_main_process(): logging.debug("Converting BatchNorm to SyncBatchNorm.")
-                model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-            else:
-                if is_main_process(): logging.debug("MSRNet uses GroupNorm; skipping SyncBatchNorm conversion.")
-            dist.barrier()
-
-        optimizer = optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=1e-5)
-
-        # <<< infelizmente Mac sem fp16 >>>
-        use_amp_requested = config.training.use_amp
-        use_amp_eff = False # Default to False
-        if use_amp_requested:
-            if device_type == 'cuda':
-                use_amp_eff = True
-            elif device_type == 'mps':
-                if is_main_process(): logging.warning("AMP requested but device is MPS. Disabling AMP (limited support).")
-                use_amp_eff = False
-            else: # CPU
-                if is_main_process(): logging.warning("AMP requested but device is CPU. AMP disabled.")
-                use_amp_eff = False
-
-
-        scaler = GradScaler(enabled=use_amp_eff) # Scaler is created based on effective usage
-        if is_main_process(): logging.info(f"Optimizer: AdamW | AMP Enabled: {use_amp_eff}")
-        criterion_l1 = nn.L1Loss()
-        criterion_l2 = nn.MSELoss() if use_l2 else None
-        criterion_bce = nn.BCEWithLogitsLoss() if use_bce_dice else None
-        ckpt_prefix = getattr(config, '_config_stem', os.path.basename(os.path.normpath(config.data.output_dir)))
-        latest_ckpt = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth')
-        # Fallback chain: config_stem name -> folder name -> legacy tunet_
-        if is_main_process() and not os.path.exists(latest_ckpt):
-            folder_prefix = os.path.basename(os.path.normpath(config.data.output_dir))
-            folder_ckpt = os.path.join(config.data.output_dir, f'{folder_prefix}_tunet_latest.pth')
-            legacy_ckpt = os.path.join(config.data.output_dir, 'tunet_latest.pth')
-            if os.path.exists(folder_ckpt):
-                logging.info(f"Found checkpoint with folder name: {folder_prefix}_tunet_latest.pth")
-                latest_ckpt = folder_ckpt
-            elif os.path.exists(legacy_ckpt):
-                logging.info(f"Found legacy checkpoint: tunet_latest.pth")
-                latest_ckpt = legacy_ckpt
-        exists_list = [False];
-        if is_main_process(): exists_list[0] = os.path.exists(latest_ckpt)
-        if world_size > 1: dist.broadcast_object_list(exists_list, src=0)
-        if exists_list[0]:
-            if is_main_process(): logging.info(f"Attempting resume from checkpoint: {latest_ckpt}")
-            try:
-                ckpt = torch.load(latest_ckpt, map_location='cpu') # Load to CPU first
-                if 'config' not in ckpt: raise ValueError("Checkpoint missing 'config'")
-                ckpt_cfg = dict_to_sns(ckpt['config']); ckpt_loss = getattr(getattr(ckpt_cfg, 'training', SimpleNamespace()), 'loss', 'l1'); ckpt_base = getattr(getattr(ckpt_cfg, 'model', SimpleNamespace()), 'model_size_dims', def_h)
-                ckpt_needs_bump = (ckpt_loss == 'l1+lpips' and ckpt_base == def_h) or (ckpt_loss == 'weighted' and ckpt_base == def_h and getattr(getattr(ckpt_cfg, 'training', SimpleNamespace()), 'lpips_weight', 0) > 0)
-                ckpt_eff_size = bump_h if ckpt_needs_bump else ckpt_base
-                if ckpt_loss != config.training.loss: raise ValueError(f"Loss mismatch: Ckpt='{ckpt_loss}', Current='{config.training.loss}'")
-                if ckpt_eff_size != eff_size: raise ValueError(f"Effective size mismatch: Ckpt={ckpt_eff_size}, Current={eff_size}")
-                ckpt_n_ch = ckpt.get('n_input_channels', 3)
-                if ckpt_n_ch != n_input_ch: raise ValueError(f"Input channel mismatch: Ckpt={ckpt_n_ch}, Current={n_input_ch}. Cannot resume with different mask input setting.")
-                ckpt_model_type = ckpt.get('model_type', getattr(getattr(ckpt_cfg, 'model', SimpleNamespace()), 'model_type', 'unet'))
-                if ckpt_model_type != model_type: raise ValueError(f"Model type mismatch: Ckpt='{ckpt_model_type}', Current='{model_type}'. Cannot resume across architectures.")
-                if is_main_process(): logging.debug("Checkpoint config compatible.")
-                state_dict = ckpt['model_state_dict']; is_ddp_ckpt = any(k.startswith('module.') for k in state_dict)
-                if world_size > 1 and not is_ddp_ckpt:
-                    logging.debug("Adding 'module.' prefix to load non-DDP checkpoint into DDP model.")
-                    state_dict = {'module.' + k: v for k, v in state_dict.items()}
-                elif world_size == 1 and is_ddp_ckpt:
-                    logging.debug("Removing 'module.' prefix to load DDP checkpoint into non-DDP model.")
-                    state_dict = {k.replace('module.', '', 1): v for k, v in state_dict.items()}
-                model.load_state_dict(state_dict)
-                if is_main_process(): logging.debug("Loaded model state_dict.")
-
-                if 'optimizer_state_dict' in ckpt:
-                     optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-                     logging.debug("Loaded optimizer state_dict.")
-                else:
-                    if is_main_process(): logging.warning("Optimizer state missing in checkpoint.")
-
-                # Load scaler state only if AMP is effectively enabled NOW
-                if use_amp_eff and ckpt.get('scaler_state_dict'):
-                    try: scaler.load_state_dict(ckpt['scaler_state_dict']); logging.debug("Loaded GradScaler state_dict.")
-                    except Exception as se: logging.warning(f"Could not load GradScaler state: {se}.")
-                elif use_amp_eff: # If AMP is on now, but state was missing
-                     if is_main_process(): logging.warning("AMP enabled, but scaler state missing in ckpt.")
-
-                start_step = ckpt.get('global_step', 0) + 1; start_epoch = start_step // config.training.iterations_per_epoch
-                if is_main_process(): logging.info(f"Resuming from Global Step {start_step} (Logical Epoch {start_epoch + 1}).")
-                del ckpt; torch.cuda.empty_cache() if torch.cuda.is_available() else None
-            except Exception as e:
-                logging.error(f"Checkpoint load failed: {e}. Starting fresh.", exc_info=True)
-                start_epoch, start_step = 0, 0; optimizer = optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=1e-5); scaler = GradScaler(enabled=use_amp_eff)
-        else:
-            # No checkpoint in output_dir — check if fine-tuning from an existing model
-            finetune_path = getattr(config.training, 'finetune_from', None)
-            if finetune_path:
-                if is_main_process():
-                    logging.info("=" * 60)
-                    logging.info("FINE-TUNING MODE")
-                    logging.info(f"  Loading model weights from: {finetune_path}")
-                    logging.info(f"  Training on new data in: {config.data.src_dir}")
-                    logging.info(f"  Optimizer & step counter start fresh (step 0).")
-                    logging.info("=" * 60)
-                try:
-                    ft_ckpt = torch.load(finetune_path, map_location='cpu')
-                    if 'model_state_dict' not in ft_ckpt:
-                        raise KeyError("Checkpoint missing 'model_state_dict'. Is this a valid tunet checkpoint?")
-                    ft_state = ft_ckpt['model_state_dict']
-                    # Strip 'module.' prefix if present (DDP checkpoint -> non-DDP model)
-                    if any(k.startswith('module.') for k in ft_state):
-                        ft_state = {k.replace('module.', '', 1): v for k, v in ft_state.items()}
-                    # Add 'module.' prefix if needed (non-DDP checkpoint -> DDP model)
-                    if world_size > 1 and not any(k.startswith('module.') for k in ft_state):
-                        ft_state = {'module.' + k: v for k, v in ft_state.items()}
-                    model.load_state_dict(ft_state)
-                    if is_main_process(): logging.info("Fine-tune weights loaded successfully. Starting training from step 0.")
-                    del ft_ckpt; torch.cuda.empty_cache() if torch.cuda.is_available() else None
-                except Exception as e:
-                    logging.error(f"Failed to load fine-tune checkpoint: {e}", exc_info=True)
-                    logging.warning("Falling back to training from scratch.")
-            else:
-                if is_main_process(): logging.info("No checkpoint found. Starting fresh.")
-
-
-        if world_size > 1:
-            # Pass device_ids only for CUDA backend
-            cuda_device_ids = [local_rank] if device_type == 'cuda' else None
-            model = DDP(model,
-                        device_ids=cuda_device_ids,
-                        output_device=(local_rank if device_type == 'cuda' else None),
-                        find_unused_parameters=False)
-
-
-        if world_size > 1 and is_main_process(): logging.debug("Model wrapped with DDP.")
-        if world_size > 1: dist.barrier()
+        (model, optimizer, scaler, start_epoch, start_step, ckpt_prefix,
+         use_amp_eff, criterion_l1, criterion_l2, criterion_bce) = _build_model(
+            config, device, device_type, world_size, rank, n_input_ch, eff_size,
+            use_lpips, use_l2, use_bce_dice, False, loss_fn_lpips, model_type)
     except Exception as model_err: logging.error(f"FATAL: Model setup/resume error: {model_err}. Exiting.", exc_info=True); cleanup_ddp(); return
 
     # --- Training Loop Variables ---
@@ -791,121 +972,18 @@ def train(config):
 
             # --- Forward, Loss, Backward, Optimize ---
             compute_start = time.time()
-            optimizer.zero_grad(set_to_none=True)
+            batch_l1, batch_lp, batch_l2, out, loss_finite = _compute_training_step(
+                model, model_input, dst, optimizer, scaler, criterion_l1, criterion_l2,
+                loss_fn_lpips, criterion_bce, config, device, device_type, use_amp_eff,
+                use_bce_dice, use_lpips, use_weighted, use_l2, use_mask_loss, use_auto_mask,
+                mask_batch, auto_mask_raw)
 
-            if use_amp_eff:
-                with autocast(device_type=device_type, enabled=True):
-                    out = model(model_input)
-                    if use_bce_dice:
-                        # Denormalize dst from [-1,1] back to [0,1] for BCE targets
-                        dst_01 = dst * 0.5 + 0.5
-                        # Per-channel BCE+Dice: preserves multi-channel mattes (R/G/B sections)
-                        bce_total = torch.tensor(0.0, device=device)
-                        dc_total = torch.tensor(0.0, device=device)
-                        n_ch = out.shape[1]
-                        for ch in range(n_ch):
-                            out_ch = out[:, ch:ch+1, :, :]
-                            dst_ch = dst_01[:, ch:ch+1, :, :]
-                            bce_total = bce_total + criterion_bce(out_ch, dst_ch)
-                            dc_total = dc_total + dice_loss(torch.sigmoid(out_ch), dst_ch)
-                        l1 = (bce_total + dc_total) / n_ch
-                        lp = torch.tensor(0.0, device=device)
-                        loss = l1
-                        out = torch.sigmoid(out)  # sigmoid for preview/metrics after loss
-                    else:
-                        if use_mask_loss and mask_batch is not None:
-                            weight_map = 1.0 + mask_batch * (config.mask.mask_weight - 1.0)
-                            l1 = (torch.abs(out - dst) * weight_map).mean()
-                        elif use_auto_mask and auto_mask_raw is not None:
-                            auto_mask_w = refine_auto_mask(auto_mask_raw, gamma=config.mask.auto_mask_gamma)
-                            weight_map = 1.0 + auto_mask_w * (config.mask.mask_weight - 1.0)
-                            l1 = (torch.abs(out - dst) * weight_map).mean()
-                        else:
-                            weight_map = None
-                            l1 = criterion_l1(out, dst)
-                        l2_val = torch.tensor(0.0, device=device)
-                        if use_l2 and criterion_l2 is not None:
-                            if weight_map is not None:
-                                l2_val = ((out - dst) ** 2 * weight_map).mean()
-                            else:
-                                l2_val = criterion_l2(out, dst)
-                        lp = torch.tensor(0.0, device=device)
-                        if use_lpips and loss_fn_lpips:
-                            try: lp = loss_fn_lpips(out, dst).mean()
-                            except Exception as e_lp: lp = torch.tensor(0.0, device=device)
-                        if use_weighted:
-                            loss = config.training.l1_weight * l1 + config.training.l2_weight * l2_val + config.training.lpips_weight * lp
-                        else:
-                            loss = l1 + config.training.lambda_lpips * lp
-            else:
-                out = model(model_input)
-                if use_bce_dice:
-                    # Denormalize dst from [-1,1] back to [0,1] for BCE targets
-                    dst_01 = dst * 0.5 + 0.5
-                    bce_total = torch.tensor(0.0, device=device)
-                    dc_total = torch.tensor(0.0, device=device)
-                    n_ch = out.shape[1]
-                    for ch in range(n_ch):
-                        out_ch = out[:, ch:ch+1, :, :]
-                        dst_ch = dst_01[:, ch:ch+1, :, :]
-                        bce_total = bce_total + criterion_bce(out_ch, dst_ch)
-                        dc_total = dc_total + dice_loss(torch.sigmoid(out_ch), dst_ch)
-                    l1 = (bce_total + dc_total) / n_ch
-                    lp = torch.tensor(0.0, device=device)
-                    loss = l1
-                    out = torch.sigmoid(out)
-                else:
-                    if use_mask_loss and mask_batch is not None:
-                        weight_map = 1.0 + mask_batch * (config.mask.mask_weight - 1.0)
-                        l1 = (torch.abs(out - dst) * weight_map).mean()
-                    elif use_auto_mask and auto_mask_raw is not None:
-                        auto_mask_w = refine_auto_mask(auto_mask_raw, gamma=config.mask.auto_mask_gamma)
-                        weight_map = 1.0 + auto_mask_w * (config.mask.mask_weight - 1.0)
-                        l1 = (torch.abs(out - dst) * weight_map).mean()
-                    else:
-                        weight_map = None
-                        l1 = criterion_l1(out, dst)
-                    l2_val = torch.tensor(0.0, device=device)
-                    if use_l2 and criterion_l2 is not None:
-                        if weight_map is not None:
-                            l2_val = ((out - dst) ** 2 * weight_map).mean()
-                        else:
-                            l2_val = criterion_l2(out, dst)
-                    lp = torch.tensor(0.0, device=device)
-                    if use_lpips and loss_fn_lpips:
-                        try: lp = loss_fn_lpips(out, dst).mean()
-                        except Exception as e_lp: lp = torch.tensor(0.0, device=device)
-                    if use_weighted:
-                        loss = config.training.l1_weight * l1 + config.training.l2_weight * l2_val + config.training.lpips_weight * lp
-                    else:
-                        loss = l1 + config.training.lambda_lpips * lp
-
-            if not torch.isfinite(loss):
-                logging.error(f"S{global_step}: NaN/Inf loss ({loss.item()})! Skip update.")
+            if not loss_finite:
+                logging.error(f"S{global_step}: NaN/Inf loss ({batch_l1})! Skip update.")
                 global_step += 1
-                continue # Keep Error
-
-            # Scaler step only if effectively enabled
-            if use_amp_eff:
-                 scaler.scale(loss).backward()
-                 scaler.step(optimizer)
-                 scaler.update()
-            else:
-                 loss.backward() # Standard backward if AMP is off
-                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf'))
-                 if not torch.isfinite(grad_norm):
-                     logging.warning(f"S{global_step}: NaN/Inf gradient (norm={grad_norm:.2e})! Skipping update.")
-                     optimizer.zero_grad(set_to_none=True)
-                 else:
-                     optimizer.step() # Standard optimizer step
+                continue
 
             compute_time = time.time() - compute_start
-
-
-            compute_time = time.time() - compute_start
-
-            batch_l1 = l1.detach().item(); batch_lp = lp.detach().item() if use_lpips else 0.0
-            batch_l2 = l2_val.detach().item() if use_l2 else 0.0
             _has_weighted_loss = (use_mask_loss and mask_batch is not None) or use_auto_mask
             batch_l1_raw = criterion_l1(out.detach(), dst).item() if _has_weighted_loss else batch_l1
             if world_size > 1:
@@ -943,7 +1021,9 @@ def train(config):
                      if new_src is not None: fixed_src, fixed_dst, fixed_mask, fixed_auto_mask = new_src, new_dst, new_mask, new_auto
                      elif fixed_src is None: logging.warning(f"S{global_step}: Preview refresh failed (no initial).")
                      else: logging.warning(f"S{global_step}: Preview refresh failed, using old.")
-                if fixed_src is not None: save_previews(model, fixed_src, fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, preview_count, config.logging.preview_refresh_rate, fixed_mask_batch=fixed_mask, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, fixed_auto_mask_batch=fixed_auto_mask, auto_mask_gamma=config.mask.auto_mask_gamma, diff_amplify=float(config.logging.diff_amplify)); preview_count += 1
+                if fixed_src is not None:
+                    preview_ctx = PreviewContext(model=model, output_dir=config.data.output_dir, device=device, current_epoch=current_ep_idx, global_step=global_step, preview_save_count=preview_count, preview_refresh_rate=config.logging.preview_refresh_rate, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, auto_mask_gamma=config.mask.auto_mask_gamma, diff_amplify=float(config.logging.diff_amplify))
+                    save_previews(preview_ctx, fixed_src, fixed_dst, fixed_mask_batch=fixed_mask, fixed_auto_mask_batch=fixed_auto_mask); preview_count += 1
                 elif preview_count == 0: logging.warning(f"S{global_step}: Skipping preview (no batch).")
 
             save_interval = config.saving.save_iterations_interval; save_now = (save_interval > 0 and global_step % save_interval == 0)
@@ -982,7 +1062,8 @@ def train(config):
                     new_val_src, new_val_dst = capture_val_preview_batch(config, standard_transform)
                     if new_val_src is not None: val_fixed_src, val_fixed_dst = new_val_src, new_val_dst
                     else: logging.warning(f"S{global_step}: Val preview refresh failed, using old.")
-                save_val_previews(model, val_fixed_src, val_fixed_dst, config.data.output_dir, current_ep_idx, global_step, device, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, use_mask_input=use_mask_input, diff_amplify=float(config.logging.diff_amplify)); val_preview_count += 1
+                val_ctx = PreviewContext(model=model, output_dir=config.data.output_dir, device=device, current_epoch=current_ep_idx, global_step=global_step, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, diff_amplify=float(config.logging.diff_amplify))
+                save_val_previews(val_ctx, val_fixed_src, val_fixed_dst); val_preview_count += 1
 
             # --- Early Stopping / Plateau Detection ---
             if es_enabled and epoch_end_now and ep_steps > 0:

@@ -1,4 +1,4 @@
-from .helpers import IndentDumper, ProcessStreamReader, FileCopyWorker, ZoomPanScrollArea, QTextEditLogHandler
+from .widgets import IndentDumper, ProcessStreamReader, FileCopyWorker, ZoomPanScrollArea, QTextEditLogHandler
 from .data_tab import DataTabMixin
 from .training_tab import TrainingTabMixin
 from .previews_tab import PreviewsTabMixin
