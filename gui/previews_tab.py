@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
-from .helpers import ZoomPanScrollArea
+from .widgets import ZoomPanScrollArea
 
 
 class PreviewsTabMixin:

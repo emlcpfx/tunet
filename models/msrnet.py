@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from .common import OutConv
+from .blocks import OutConv
 
 
 class RecurrentConv(nn.Module):

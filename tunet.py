@@ -1303,6 +1303,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                             device, use_amp, transform, loss_mode, tile_batch=4):
         """Process all images in a folder (ported from inference_gui.py)."""
         from inference import process_image, denormalize, load_image_any_format
+        from inference_config import InferenceConfig
 
         img_extensions = ['*.png', '*.jpg', '*.jpeg', '*.bmp', '*.tif', '*.tiff', '*.webp', '*.exr']
         input_files = sorted([f for ext in img_extensions
@@ -1415,10 +1416,13 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                               if use_async_copy else output_path)
 
                 t0 = time.perf_counter()
-                process_image(model, img_path, write_path, resolution, stride, device,
-                              tile_batch, transform, denormalize, use_amp,
-                              self.inf_half_res.isChecked(),
-                              loss_mode=loss_mode, src_image=pil_img)
+                inf_cfg = InferenceConfig(
+                    resolution=resolution, stride=stride, device=device,
+                    batch_size=tile_batch, use_amp=use_amp,
+                    half_res=self.inf_half_res.isChecked(),
+                    loss_mode=loss_mode)
+                process_image(model, img_path, write_path, inf_cfg, transform, denormalize,
+                              src_image=pil_img)
                 elapsed = time.perf_counter() - t0
 
                 processed += 1
@@ -1597,13 +1601,13 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
 
     def _build_utility_command(self, target_type, checkpoint_path):
         if target_type == 'flame':
-            script_path = _APP_DIR / "utils" / "convert_flame.py"
+            script_path = _APP_DIR / "exporters" / "flame_exporter.py"
             cmd = [sys.executable, str(script_path), '--checkpoint', checkpoint_path, '--use_gpu']
             if hasattr(self, '_conversion_output_dir') and self._conversion_output_dir:
                 cmd.extend(['--output_dir', self._conversion_output_dir])
             return cmd
         elif target_type == 'nuke':
-            script_path = _APP_DIR / "utils" / "convert_nuke.py"
+            script_path = _APP_DIR / "exporters" / "nuke_exporter.py"
             return [sys.executable, str(script_path), '--generate_nk',
                     '--checkpoint_pth', checkpoint_path, '--method', 'script']
         return None

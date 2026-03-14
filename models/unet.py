@@ -1,6 +1,6 @@
 import torch.nn as nn
 
-from .common import DoubleConv, Down, Up, OutConv
+from .blocks import DoubleConv, Down, Up, OutConv
 
 
 class UNet(nn.Module):
