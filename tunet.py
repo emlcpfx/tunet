@@ -37,119 +37,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QObject, Signal, Slot, QFileSystemWatcher, QTimer, QThread
 from PySide6.QtGui import QPixmap, QTextCursor
 
-
-# =============================================================================
-# Helper Classes
-# =============================================================================
-
-class IndentDumper(yaml.SafeDumper):
-    def increase_indent(self, flow=False, indentless=False):
-        return super().increase_indent(flow, False)
-
-
-class ProcessStreamReader(QObject):
-    """Reads a subprocess stdout/stderr stream in a thread and emits lines."""
-    new_text = Signal(str)
-
-    def __init__(self, stream):
-        super().__init__()
-        self.stream = stream
-        self._thread = threading.Thread(target=self.run, daemon=True)
-        self._thread.start()
-
-    def run(self):
-        for line in iter(self.stream.readline, ''):
-            self.new_text.emit(line)
-
-
-class FileCopyWorker(QObject):
-    """Copies a file in a background thread with progress reporting."""
-    progress = Signal(int)
-    finished = Signal(str)
-    error = Signal(str)
-    _is_cancelled = False
-
-    def run(self, source_path_str, dest_path_str):
-        self._is_cancelled = False
-        source_path = Path(source_path_str)
-        dest_path = Path(dest_path_str)
-        try:
-            total_size = source_path.stat().st_size
-            bytes_copied = 0
-            chunk_size = 4096 * 4
-            with open(source_path, 'rb') as src, open(dest_path, 'wb') as dst:
-                while True:
-                    if self._is_cancelled:
-                        self.error.emit("Copy operation cancelled.")
-                        if dest_path.exists():
-                            dest_path.unlink()
-                        return
-                    chunk = src.read(chunk_size)
-                    if not chunk:
-                        break
-                    dst.write(chunk)
-                    bytes_copied += len(chunk)
-                    percent = int((bytes_copied / total_size) * 100)
-                    self.progress.emit(percent)
-            self.finished.emit(str(dest_path))
-        except Exception as e:
-            self.error.emit(f"File copy failed: {e}")
-
-    def cancel(self):
-        self._is_cancelled = True
-
-
-class ZoomPanScrollArea(QScrollArea):
-    """Scroll area with mouse-wheel zoom and middle-click pan."""
-    zoom_changed = Signal(float)
-
-    def wheelEvent(self, event):
-        delta = event.angleDelta().y()
-        factor = 1.15 if delta > 0 else (1.0 / 1.15)
-        self.zoom_changed.emit(factor)
-        event.accept()
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MiddleButton:
-            self._panning = True
-            self._pan_start = event.position().toPoint()
-            self.setCursor(Qt.ClosedHandCursor)
-            event.accept()
-        else:
-            super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if getattr(self, '_panning', False) and self._pan_start is not None:
-            delta = event.position().toPoint() - self._pan_start
-            self._pan_start = event.position().toPoint()
-            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
-            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
-            event.accept()
-        else:
-            super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MiddleButton:
-            self._panning = False
-            self.setCursor(Qt.ArrowCursor)
-            event.accept()
-        else:
-            super().mouseReleaseEvent(event)
-
-
-class QTextEditLogHandler(logging.Handler):
-    """Logging handler that writes to a QTextEdit from any thread."""
-    def __init__(self, text_widget):
-        super().__init__()
-        self.text_widget = text_widget
-
-    def emit(self, record):
-        msg = self.format(record) + '\n'
-        QTimer.singleShot(0, lambda: self._append(msg))
-
-    def _append(self, msg):
-        self.text_widget.moveCursor(QTextCursor.End)
-        self.text_widget.insertPlainText(msg)
+from gui import (
+    IndentDumper, ProcessStreamReader, FileCopyWorker, ZoomPanScrollArea, QTextEditLogHandler,
+    DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixin, InferenceTabMixin, AboutTabMixin,
+)
 
 
 # =============================================================================
@@ -164,7 +55,7 @@ _LEGACY_INFERENCE_SETTINGS = _APP_DIR / 'inference_gui_settings.json'
 # MainWindow
 # =============================================================================
 
-class MainWindow(QMainWindow):
+class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixin, InferenceTabMixin, AboutTabMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"TuNet — {platform.system()}")
@@ -261,887 +152,6 @@ class MainWindow(QMainWindow):
 
         # --- Populate defaults ---
         self._load_session()
-
-    # =========================================================================
-    # Tab creation
-    # =========================================================================
-
-    def _create_data_tab(self):
-        """Tab 1: Data — paths, patch extraction, masks, augmentation."""
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-
-        # --- Distributed Training (Linux only) ---
-        if platform.system() == 'Linux':
-            grp_dist = QGroupBox("Distributed Training")
-            form_dist = QFormLayout(grp_dist)
-            self.nproc_input = QSpinBox(minimum=1, maximum=16, value=1)
-            self.nproc_input.setToolTip("Number of GPUs for distributed training via torchrun.")
-            form_dist.addRow("GPUs (nproc):", self.nproc_input)
-            layout.addWidget(grp_dist)
-        else:
-            self.nproc_input = None
-
-        # --- Source & Target Data ---
-        grp_data = QGroupBox("Source & Target Data")
-        form_data = QFormLayout(grp_data)
-        self.src_dir_input = self._create_path_selector("Source Directory")
-        self.src_dir_input.setToolTip(
-            "Folder with source/input images the model learns to transform FROM (the 'before' images).")
-        self.dst_dir_input = self._create_path_selector("Destination Directory")
-        self.dst_dir_input.setToolTip(
-            "Folder with target/output images the model learns to transform TO (the 'after' images). "
-            "Must have matching filenames.")
-        self.mask_dir_input = self._create_path_selector("Mask Directory")
-        self.mask_dir_input.setToolTip(
-            "Optional. Grayscale mask images (white = important regions). "
-            "Not needed if Auto Mask is enabled.")
-        self.auto_mask_hint = QLabel("")
-        self.auto_mask_hint.setStyleSheet("color: #8b919d; font-style: italic;")
-        form_data.addRow("Source Directory:", self.src_dir_input)
-        form_data.addRow("Target Directory:", self.dst_dir_input)
-        form_data.addRow("Mask Directory:", self.mask_dir_input)
-        form_data.addRow("", self.auto_mask_hint)
-        layout.addWidget(grp_data)
-
-        # --- Validation Data ---
-        grp_val = QGroupBox("Validation Data (optional)")
-        form_val = QFormLayout(grp_val)
-        self.val_src_dir_input = self._create_path_selector("Val Source Directory")
-        self.val_src_dir_input.setToolTip(
-            "Separate source images used only for validation (never trained on). "
-            "Helps monitor generalization.")
-        self.val_dst_dir_input = self._create_path_selector("Val Destination Directory")
-        self.val_dst_dir_input.setToolTip(
-            "Matching target images for validation.")
-        form_val.addRow("Val Source:", self.val_src_dir_input)
-        form_val.addRow("Val Target:", self.val_dst_dir_input)
-        layout.addWidget(grp_val)
-
-        # --- Patch Extraction ---
-        grp_patch = QGroupBox("Patch Extraction")
-        form_patch = QFormLayout(grp_patch)
-        self.resolution_input = QComboBox()
-        self.resolution_input.setEditable(True)
-        self.resolution_input.addItems(["256", "384", "512", "640", "768", "896", "928", "960", "1024"])
-        self.resolution_input.setCurrentText("512")
-        self.resolution_input.setToolTip(
-            "Size of square patches extracted for training. Larger = more context but more VRAM. "
-            "512 is a good default; 768-1024 for large-scale structure.")
-        self.overlap_factor_input = QComboBox()
-        self.overlap_factor_input.addItems(["0.0", "0.25", "0.5", "0.75"])
-        self.overlap_factor_input.setCurrentText("0.25")
-        self.overlap_factor_input.setToolTip(
-            "How much neighboring patches overlap. Higher = more training patches but slower epochs. "
-            "0.25 is a good balance.")
-        form_patch.addRow("Resolution:", self.resolution_input)
-        form_patch.addRow("Overlap Factor:", self.overlap_factor_input)
-        layout.addWidget(grp_patch)
-
-        # --- Mask Behavior ---
-        grp_mask = QGroupBox("Mask Behavior")
-        form_mask = QFormLayout(grp_mask)
-
-        self.use_mask_loss_input = QCheckBox("Weight loss by mask (white = important)")
-        self.use_mask_loss_input.setToolTip(
-            "Training loss is weighted by mask: white pixels count more, "
-            "making the model focus on those areas.")
-        self.mask_weight_input = QDoubleSpinBox(decimals=1, minimum=1.0, maximum=100.0, value=10.0, singleStep=1.0)
-        self.mask_weight_input.setToolTip(
-            "How much more important masked (white) regions are. "
-            "10 = white pixels contribute 10x more to loss. Only active when mask loss is checked.")
-        self.mask_weight_input.setEnabled(False)
-        self.use_mask_loss_input.toggled.connect(self.mask_weight_input.setEnabled)
-
-        self.use_mask_input_input = QCheckBox("Feed mask as 4th input channel to model")
-        self.use_mask_input_input.setToolTip(
-            "Feed the mask to the model as a 4th channel alongside RGB. "
-            "Changes architecture (cannot toggle mid-training).")
-        self.use_auto_mask_input = QCheckBox("Auto-generate masks from |src - dst| difference")
-        self.use_auto_mask_input.setToolTip(
-            "Automatically create masks from the difference between source and target. "
-            "No mask files needed on disk.")
-        self.use_auto_mask_input.toggled.connect(
-            lambda checked: self.auto_mask_hint.setText(
-                "(Mask directory not needed with Auto Mask)" if checked else ""))
-
-        self.skip_empty_patches_input = QCheckBox("Skip empty patches")
-        self.skip_empty_patches_input.setToolTip(
-            "Filter out training patches where source and destination are identical. "
-            "Speeds up training when only parts of the image have changes. Requires Auto Mask.")
-        self.skip_empty_patches_input.setEnabled(False)
-        self.use_auto_mask_input.toggled.connect(self.skip_empty_patches_input.setEnabled)
-
-        self.skip_empty_threshold_input = QDoubleSpinBox()
-        self.skip_empty_threshold_input.setRange(0.1, 20.0)
-        self.skip_empty_threshold_input.setSingleStep(0.5)
-        self.skip_empty_threshold_input.setDecimals(1)
-        self.skip_empty_threshold_input.setValue(1.0)
-        self.skip_empty_threshold_input.setToolTip(
-            "Max pixel difference threshold (0-255 scale) below which a patch is skipped. "
-            "If no pixel in the crop differs by more than this, the crop is considered empty.")
-        self.skip_empty_threshold_input.setEnabled(False)
-        self.skip_empty_patches_input.toggled.connect(self.skip_empty_threshold_input.setEnabled)
-
-        self.auto_mask_gamma_input = QDoubleSpinBox()
-        self.auto_mask_gamma_input.setRange(0.1, 3.0)
-        self.auto_mask_gamma_input.setSingleStep(0.1)
-        self.auto_mask_gamma_input.setDecimals(2)
-        self.auto_mask_gamma_input.setValue(1.0)
-        self.auto_mask_gamma_input.setToolTip(
-            "Gamma curve applied to auto-mask. Values < 1.0 expand white coverage "
-            "(e.g. 0.5 for subtle beauty work), > 1.0 contracts it, 1.0 = neutral.")
-        self.auto_mask_gamma_input.setEnabled(False)
-        self.use_auto_mask_input.toggled.connect(self.auto_mask_gamma_input.setEnabled)
-
-        mask_weight_row = QHBoxLayout()
-        mask_weight_row.addWidget(self.use_mask_loss_input)
-        mask_weight_row.addWidget(QLabel("Weight:"))
-        mask_weight_row.addWidget(self.mask_weight_input)
-        form_mask.addRow(mask_weight_row)
-        form_mask.addRow(self.use_mask_input_input)
-        form_mask.addRow(self.use_auto_mask_input)
-        auto_mask_gamma_row = QHBoxLayout()
-        auto_mask_gamma_row.addWidget(QLabel("Auto Mask Gamma:"))
-        auto_mask_gamma_row.addWidget(self.auto_mask_gamma_input)
-        form_mask.addRow(auto_mask_gamma_row)
-        skip_empty_row = QHBoxLayout()
-        skip_empty_row.addWidget(self.skip_empty_patches_input)
-        skip_empty_row.addWidget(QLabel("Threshold:"))
-        skip_empty_row.addWidget(self.skip_empty_threshold_input)
-        form_mask.addRow(skip_empty_row)
-        layout.addWidget(grp_mask)
-
-        # --- Data Augmentation ---
-        grp_aug = QGroupBox("Data Augmentation")
-        form_aug = QFormLayout(grp_aug)
-
-        # Horizontal Flip
-        self.hflip_check = QCheckBox("Horizontal Flip")
-        self.hflip_check.setToolTip("Randomly flip images horizontally. Disable for text or directional content.")
-        self.hflip_p = QSpinBox(minimum=0, maximum=100, value=50)
-        self.hflip_p.setSuffix("%")
-        self.hflip_p.setToolTip("Chance each sample gets flipped.")
-        self.hflip_p.setEnabled(False)
-        self.hflip_check.toggled.connect(self.hflip_p.setEnabled)
-        hflip_row = QHBoxLayout()
-        hflip_row.addWidget(self.hflip_check)
-        hflip_row.addWidget(self.hflip_p)
-        form_aug.addRow(hflip_row)
-
-        # Affine
-        self.affine_check = QCheckBox("Random Affine")
-        self.affine_check.setToolTip(
-            "Random scale/translate/rotate/shear. Helps robustness to alignment differences.")
-        self.affine_p = QSpinBox(minimum=0, maximum=100, value=40)
-        self.affine_p.setSuffix("%")
-        self.affine_p.setToolTip("Chance each sample gets an affine transform.")
-        affine_header = QHBoxLayout()
-        affine_header.addWidget(self.affine_check)
-        affine_header.addWidget(self.affine_p)
-        form_aug.addRow(affine_header)
-
-        self.affine_scale_min = QDoubleSpinBox(decimals=2, minimum=0.1, maximum=5.0, value=0.9, singleStep=0.05)
-        self.affine_scale_max = QDoubleSpinBox(decimals=2, minimum=0.1, maximum=5.0, value=1.1, singleStep=0.05)
-        self.affine_scale_min.setToolTip("Min zoom. 0.9 = up to 10% zoom out.")
-        self.affine_scale_max.setToolTip("Max zoom. 1.1 = up to 10% zoom in.")
-        form_aug.addRow("  Scale:", self._create_range_layout(self.affine_scale_min, self.affine_scale_max))
-
-        self.affine_translate_min = QDoubleSpinBox(decimals=2, minimum=-0.5, maximum=0.5, value=-0.1, singleStep=0.01)
-        self.affine_translate_max = QDoubleSpinBox(decimals=2, minimum=-0.5, maximum=0.5, value=0.1, singleStep=0.01)
-        form_aug.addRow("  Translate %:", self._create_range_layout(self.affine_translate_min, self.affine_translate_max))
-
-        self.affine_rotate_min = QSpinBox(minimum=-180, maximum=180, value=-3)
-        self.affine_rotate_max = QSpinBox(minimum=-180, maximum=180, value=3)
-        self.affine_rotate_min.setToolTip("Rotation range in degrees.")
-        form_aug.addRow("  Rotate:", self._create_range_layout(self.affine_rotate_min, self.affine_rotate_max))
-
-        self.affine_shear_min = QSpinBox(minimum=-45, maximum=45, value=-1)
-        self.affine_shear_max = QSpinBox(minimum=-45, maximum=45, value=1)
-        self.affine_shear_min.setToolTip("Shear range in degrees. Skews the image diagonally.")
-        form_aug.addRow("  Shear:", self._create_range_layout(self.affine_shear_min, self.affine_shear_max))
-
-        self.affine_interpolation = QSpinBox(minimum=0, maximum=5, value=2)
-        self.affine_interpolation.setToolTip("0=Nearest, 1=Bilinear, 2=Cubic (recommended).")
-        self.affine_keep_ratio = QCheckBox()
-        self.affine_keep_ratio.setChecked(True)
-        self.affine_keep_ratio.setToolTip("Keep aspect ratio when scaling. Important for paired images.")
-        form_aug.addRow("  Interpolation:", self.affine_interpolation)
-        form_aug.addRow("  Keep Ratio:", self.affine_keep_ratio)
-
-        # Collect affine sub-widgets for conditional enable
-        self._affine_sub_widgets = [
-            self.affine_p, self.affine_scale_min, self.affine_scale_max,
-            self.affine_translate_min, self.affine_translate_max,
-            self.affine_rotate_min, self.affine_rotate_max,
-            self.affine_shear_min, self.affine_shear_max,
-            self.affine_interpolation, self.affine_keep_ratio,
-        ]
-        for w in self._affine_sub_widgets:
-            w.setEnabled(False)
-        self.affine_check.toggled.connect(
-            lambda checked: [w.setEnabled(checked) for w in self._affine_sub_widgets])
-
-        # Random Gamma
-        self.gamma_check = QCheckBox("Random Gamma")
-        self.gamma_check.setToolTip("Randomly adjust brightness curve. Helps with varying exposure.")
-        self.gamma_p = QSpinBox(minimum=0, maximum=100, value=20)
-        self.gamma_p.setSuffix("%")
-        self.gamma_p.setToolTip("Chance each sample gets a gamma adjustment.")
-        gamma_header = QHBoxLayout()
-        gamma_header.addWidget(self.gamma_check)
-        gamma_header.addWidget(self.gamma_p)
-        form_aug.addRow(gamma_header)
-
-        self.gamma_limit_min = QSpinBox(minimum=0, maximum=255, value=40)
-        self.gamma_limit_max = QSpinBox(minimum=0, maximum=255, value=160)
-        self.gamma_limit_min.setToolTip("100 = no change. Below 100 = darken, above 100 = brighten.")
-        form_aug.addRow("  Gamma Limit:", self._create_range_layout(self.gamma_limit_min, self.gamma_limit_max))
-
-        self._gamma_sub_widgets = [self.gamma_p, self.gamma_limit_min, self.gamma_limit_max]
-        for w in self._gamma_sub_widgets:
-            w.setEnabled(False)
-        self.gamma_check.toggled.connect(
-            lambda checked: [w.setEnabled(checked) for w in self._gamma_sub_widgets])
-
-        # Color Augmentation (brightness, contrast, saturation)
-        self.color_check = QCheckBox("Color Augmentation")
-        self.color_check.setToolTip(
-            "Randomly adjust brightness, contrast, and saturation.\n"
-            "Applied identically to source and target pairs.\n"
-            "Helps the model generalize across different lighting conditions and color grades.\n\n"
-            "Use when: your dataset has varied lighting, or you want robustness to color shifts.\n"
-            "Avoid when: precise color matching is critical (e.g. exact color correction tasks).")
-        self.color_p = QSpinBox(minimum=0, maximum=100, value=30)
-        self.color_p.setSuffix("%")
-        self.color_p.setToolTip("Chance each sample gets a color adjustment.")
-        color_header = QHBoxLayout()
-        color_header.addWidget(self.color_check)
-        color_header.addWidget(self.color_p)
-        form_aug.addRow(color_header)
-
-        self.color_brightness_min = QDoubleSpinBox(decimals=2, minimum=-1.0, maximum=1.0, value=-0.2, singleStep=0.05)
-        self.color_brightness_max = QDoubleSpinBox(decimals=2, minimum=-1.0, maximum=1.0, value=0.2, singleStep=0.05)
-        self.color_brightness_min.setToolTip(
-            "Brightness adjustment range. 0 = no change.\n"
-            "Negative = darker, positive = brighter. ±0.2 is a safe default.")
-        form_aug.addRow("  Brightness:", self._create_range_layout(self.color_brightness_min, self.color_brightness_max))
-
-        self.color_contrast_min = QDoubleSpinBox(decimals=2, minimum=-1.0, maximum=1.0, value=-0.2, singleStep=0.05)
-        self.color_contrast_max = QDoubleSpinBox(decimals=2, minimum=-1.0, maximum=1.0, value=0.2, singleStep=0.05)
-        self.color_contrast_min.setToolTip(
-            "Contrast adjustment range. 0 = no change.\n"
-            "Negative = lower contrast, positive = higher contrast.")
-        form_aug.addRow("  Contrast:", self._create_range_layout(self.color_contrast_min, self.color_contrast_max))
-
-        self.color_saturation_min = QSpinBox(minimum=-100, maximum=100, value=-30)
-        self.color_saturation_max = QSpinBox(minimum=-100, maximum=100, value=30)
-        self.color_saturation_min.setToolTip(
-            "Saturation shift range. 0 = no change.\n"
-            "Negative = desaturate toward grayscale, positive = boost color intensity.")
-        form_aug.addRow("  Saturation:", self._create_range_layout(self.color_saturation_min, self.color_saturation_max))
-
-        self._color_sub_widgets = [
-            self.color_p, self.color_brightness_min, self.color_brightness_max,
-            self.color_contrast_min, self.color_contrast_max,
-            self.color_saturation_min, self.color_saturation_max,
-        ]
-        for w in self._color_sub_widgets:
-            w.setEnabled(False)
-        self.color_check.toggled.connect(
-            lambda checked: [w.setEnabled(checked) for w in self._color_sub_widgets])
-
-        layout.addWidget(grp_aug)
-        layout.addStretch()
-
-        # Wrap in scroll area for small screens
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(tab)
-        self.tabs.addTab(scroll, "Data")
-
-    def _apply_preset(self, preset_name):
-        """Apply a training preset, adjusting relevant settings."""
-        if preset_name == "Custom":
-            return
-        presets = {
-            "Beauty / Paint Fix": {
-                "model_type": "msrn",
-                "model_size_dims": "64",
-                "resolution": "512",
-                "overlap_factor": "0.5",
-                "loss": "l1+lpips",
-                "lambda_lpips": 0.2,
-                "lr": 1e-4,
-                "use_auto_mask": True,
-                "auto_mask_gamma": 0.5,
-                "skip_empty_patches": True,
-                "progressive_resolution": False,
-            },
-            "Roto / Matte": {
-                "model_type": "unet",
-                "model_size_dims": "128",
-                "resolution": "512",
-                "overlap_factor": "0.25",
-                "loss": "bce+dice",
-                "lambda_lpips": 0.0,
-                "lr": 3e-4,
-                "use_auto_mask": False,
-                "skip_empty_patches": False,
-                "progressive_resolution": True,
-            },
-        }
-        p = presets.get(preset_name)
-        if not p:
-            return
-        self.model_type_input.setCurrentText(p["model_type"])
-        self.model_size_dims_input.setCurrentText(p["model_size_dims"])
-        self.resolution_input.setCurrentText(p["resolution"])
-        self.overlap_factor_input.setCurrentText(p["overlap_factor"])
-        self.loss_input.setCurrentText(p["loss"])
-        # Set LR by finding matching preset value
-        for i, (_, val) in enumerate(self.lr_presets):
-            if abs(val - p["lr"]) < 1e-8:
-                self.lr_input.setCurrentIndex(i)
-                break
-        # Set LPIPS lambda by finding matching preset value
-        for i, (_, val) in enumerate(self.lambda_presets):
-            if abs(val - p["lambda_lpips"]) < 1e-8:
-                self.lambda_lpips_input.setCurrentIndex(i)
-                break
-        self.use_auto_mask_input.setChecked(p["use_auto_mask"])
-        self.auto_mask_gamma_input.setValue(p.get("auto_mask_gamma", 1.0))
-        self.skip_empty_patches_input.setChecked(p["skip_empty_patches"])
-        self.progressive_res_check.setChecked(p.get("progressive_resolution", False))
-
-    def _create_training_tab(self):
-        """Tab 2: Training — model, optimization, schedule, logging."""
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-
-        # --- Preset ---
-        grp_preset = QGroupBox("Preset")
-        form_preset = QFormLayout(grp_preset)
-        self.preset_input = QComboBox()
-        self.preset_input.addItems(["Custom", "Beauty / Paint Fix", "Roto / Matte"])
-        self.preset_input.setToolTip(
-            "Quick-start presets that configure model, loss, and patch settings.\n"
-            "Select a preset then adjust individual settings as needed.\n"
-            "Changing any setting afterwards keeps your changes (won't revert).")
-        self.preset_input.currentTextChanged.connect(self._apply_preset)
-        form_preset.addRow("Training Preset:", self.preset_input)
-        layout.addWidget(grp_preset)
-
-        # --- Model ---
-        grp_model = QGroupBox("Model")
-        form_model = QFormLayout(grp_model)
-        self.model_folder_input = self._create_path_selector("Model Folder", is_output=True)
-        self.model_folder_input.setToolTip(
-            "Folder where checkpoints, logs, and preview images are saved. "
-            "Each training run should have its own folder.")
-        self.model_type_input = QComboBox()
-        self.model_type_input.addItems(["unet", "msrn"])
-        self.model_type_input.setCurrentText("unet")
-        self.model_type_input.setToolTip(
-            "Architecture type. 'unet' is fast and general-purpose. "
-            "'msrn' uses attention and recurrence for better fine detail but trains slower.")
-        self.model_size_dims_input = QComboBox()
-        self.model_size_dims_input.addItems(["32", "64", "128", "256", "512"])
-        self.model_size_dims_input.setCurrentText("128")
-        self.model_size_dims_input.setToolTip(
-            "Hidden layer width. Larger = more capacity but more VRAM. "
-            "64 = lightweight, 128 = balanced, 256+ = complex transformations.")
-        form_model.addRow("Output Folder:", self.model_folder_input)
-        form_model.addRow("Model Type:", self.model_type_input)
-        form_model.addRow("Model Capacity:", self.model_size_dims_input)
-        layout.addWidget(grp_model)
-
-        # --- Optimization ---
-        grp_opt = QGroupBox("Optimization")
-        form_opt = QFormLayout(grp_opt)
-
-        self.lr_input = QComboBox()
-        self.lr_presets = [
-            ("Slow (5e-5) — Fine texture, lots of data", 5e-5),
-            ("Default (1e-4) — General purpose", 1e-4),
-            ("Medium (3e-4) — Moderate changes", 3e-4),
-            ("Fast (5e-4) — Beauty work, subtle fixes", 5e-4),
-            ("Aggressive (1e-3) — Large changes, quick experiments", 1e-3),
-        ]
-        for label, _ in self.lr_presets:
-            self.lr_input.addItem(label)
-        self.lr_input.setCurrentIndex(1)
-        self.lr_input.setToolTip(
-            "How fast the model updates weights. Start with Default (1e-4). "
-            "Slower = safer, faster = quicker convergence but riskier.")
-        form_opt.addRow("Learning Rate:", self.lr_input)
-
-        self.loss_input = QComboBox()
-        self.loss_input.addItems(["l1", "l1+lpips", "weighted", "bce+dice"])
-        self.loss_input.setToolTip(
-            "'l1' = pixel-level absolute difference (sharp, stable).\n"
-            "'l1+lpips' = pixel + perceptual similarity (better textures).\n"
-            "'weighted' = custom mix of L1 + L2 + LPIPS with individual weight sliders.\n"
-            "'bce+dice' = for binary mask/segmentation outputs.")
-        form_opt.addRow("Loss Function:", self.loss_input)
-
-        self.lambda_lpips_input = QComboBox()
-        self.lambda_presets = [
-            ("Off (0.0) — Pure L1 pixel loss", 0.0),
-            ("Light (0.05) — Mostly pixel accuracy", 0.05),
-            ("Default (0.1) — Recommended balance", 0.1),
-            ("Medium (0.2) — More perceptual texture", 0.2),
-            ("High (0.3) — Strong perceptual push", 0.3),
-            ("Risky (0.5) — LPIPS dominates, watch for artifacts", 0.5),
-        ]
-        for label, _ in self.lambda_presets:
-            self.lambda_lpips_input.addItem(label)
-        self.lambda_lpips_input.setCurrentIndex(2)
-        self.lambda_lpips_input.setToolTip(
-            "Balance between pixel accuracy (L1) and perceptual quality (LPIPS). "
-            "Only active when loss is 'l1+lpips'.")
-        self.lambda_lpips_input.setEnabled(False)
-        form_opt.addRow("LPIPS Lambda:", self.lambda_lpips_input)
-
-        # --- Weighted loss controls (visible only when loss = "weighted") ---
-        self.l1_weight_input = QDoubleSpinBox(decimals=2, minimum=0.0, maximum=10.0, value=1.0, singleStep=0.05)
-        self.l1_weight_input.setToolTip(
-            "Weight for L1 (Mean Absolute Error) loss.\n"
-            "Treats all pixel errors equally. Good baseline for sharpness.\n"
-            "Default 1.0. Set to 0 to disable.")
-        self.l2_weight_input = QDoubleSpinBox(decimals=2, minimum=0.0, maximum=10.0, value=0.0, singleStep=0.05)
-        self.l2_weight_input.setToolTip(
-            "Weight for L2 (Mean Squared Error) loss.\n"
-            "Penalizes large errors more than small ones — smoother results.\n"
-            "Try 0.1–0.5 alongside L1 for a blend of sharp + smooth.")
-        self.lpips_weight_input = QDoubleSpinBox(decimals=2, minimum=0.0, maximum=10.0, value=0.1, singleStep=0.05)
-        self.lpips_weight_input.setToolTip(
-            "Weight for LPIPS perceptual loss.\n"
-            "Matches structures and textures rather than raw pixels.\n"
-            "Makes models less brittle to small misalignments.\n"
-            "Keep below 0.5 to avoid artifacts. 0.1 is a safe start.")
-        weighted_row = QHBoxLayout()
-        weighted_row.addWidget(QLabel("L1:"))
-        weighted_row.addWidget(self.l1_weight_input)
-        weighted_row.addWidget(QLabel("L2:"))
-        weighted_row.addWidget(self.l2_weight_input)
-        weighted_row.addWidget(QLabel("LPIPS:"))
-        weighted_row.addWidget(self.lpips_weight_input)
-        self.weighted_loss_widget = QWidget()
-        self.weighted_loss_widget.setLayout(weighted_row)
-        self.weighted_loss_widget.setVisible(False)
-        form_opt.addRow("Loss Weights:", self.weighted_loss_widget)
-
-        def _on_loss_changed(t):
-            self.lambda_lpips_input.setEnabled(t == "l1+lpips")
-            self.weighted_loss_widget.setVisible(t == "weighted")
-        self.loss_input.currentTextChanged.connect(_on_loss_changed)
-
-        self.use_amp_input = QCheckBox("Enable fp16 Mixed Precision")
-        self.use_amp_input.setChecked(True)
-        self.use_amp_input.setToolTip(
-            "Nearly 2x faster, less VRAM, negligible quality impact. "
-            "Disable only if you see NaN losses.")
-        form_opt.addRow("Mixed Precision:", self.use_amp_input)
-        layout.addWidget(grp_opt)
-
-        # --- Fine-tune ---
-        grp_finetune = QGroupBox("Fine-tune (Optional)")
-        form_finetune = QFormLayout(grp_finetune)
-        self.finetune_from_input = self._create_path_selector(
-            "Fine-tune From", is_file=True, file_filter="PyTorch Checkpoints (*.pth)")
-        self.finetune_from_input.setToolTip(
-            "Pick an existing .pth model to fine-tune on new data.\n"
-            "Only model weights are loaded — optimizer and step counter start fresh.\n"
-            "Just point Source/Destination to your new dataset and hit Train.\n\n"
-            "Leave empty to train from scratch (or auto-resume if output folder has a checkpoint).")
-        form_finetune.addRow("Starting Checkpoint:", self.finetune_from_input)
-        layout.addWidget(grp_finetune)
-
-        # --- Schedule ---
-        grp_sched = QGroupBox("Schedule")
-        form_sched = QFormLayout(grp_sched)
-
-        self.batch_size_input = QSpinBox(minimum=1, maximum=256, value=4)
-        self.batch_size_input.setToolTip(
-            "Patches per training step. Larger = more stable gradients but more VRAM. "
-            "Reduce to 2 if you get out-of-memory errors.")
-        form_sched.addRow("Batch Size (per GPU):", self.batch_size_input)
-
-        self.iter_per_epoch_input = QSpinBox(minimum=1, maximum=10000, value=500)
-        self.iter_per_epoch_input.setToolTip(
-            "Steps before saving a checkpoint and running validation. "
-            "Lower = more frequent saves.")
-        form_sched.addRow("Iterations per Epoch:", self.iter_per_epoch_input)
-
-        self.max_steps_input = QSpinBox(minimum=0, maximum=10000000, value=0)
-        self.max_steps_input.setSpecialValueText("Unlimited")
-        self.max_steps_input.setToolTip(
-            "Total steps before auto-stopping. 0 = train until manually stopped. "
-            "Required for queue items.")
-        form_sched.addRow("Max Steps:", self.max_steps_input)
-
-        self.progressive_res_check = QCheckBox("Progressive Multi-Resolution")
-        self.progressive_res_check.setToolTip(
-            "Start training at lower resolutions and progressively increase to full.\n"
-            "Speeds up early training ~2x by learning coarse structure first.\n\n"
-            "How it works:\n"
-            "  Epoch 1 → trains at 1/4 resolution (fast, learns shapes & layout)\n"
-            "  Epoch 2 → trains at 1/2 resolution (medium detail)\n"
-            "  Epoch 3+ → trains at full resolution (fine detail)\n\n"
-            "Best for: large datasets, high resolutions (512+), long training runs.\n"
-            "Skip when: resolution is already small (256), very short runs, or fine-tuning.")
-        form_sched.addRow(self.progressive_res_check)
-
-        self.num_workers_input = QComboBox()
-        self.num_workers_presets = [
-            ("Auto (Recommended)", -1),
-            ("0 — Disabled (debug)", 0),
-            ("2 — Light", 2),
-            ("4 — Moderate", 4),
-            ("8 — Heavy (many CPU cores)", 8),
-        ]
-        for label, _ in self.num_workers_presets:
-            self.num_workers_input.addItem(label)
-        self.num_workers_input.setCurrentIndex(0)
-        self.num_workers_input.setToolTip(
-            "CPU threads loading data in parallel. 'Auto' picks based on hardware. "
-            "Set to 0 for debugging.")
-        form_sched.addRow("DataLoader Workers:", self.num_workers_input)
-        layout.addWidget(grp_sched)
-
-        # --- Logging & Checkpoints ---
-        grp_log = QGroupBox("Logging & Checkpoints")
-        form_log = QFormLayout(grp_log)
-
-        self.log_interval_input = QSpinBox(minimum=1, maximum=1000, value=5)
-        self.log_interval_input.setToolTip("Print loss to console every N steps.")
-        form_log.addRow("Log Interval:", self.log_interval_input)
-
-        self.preview_interval_input = QSpinBox(minimum=0, maximum=1000, value=35)
-        self.preview_interval_input.setToolTip(
-            "Save preview image (src / dst / model output) every N steps. 0 = disable.")
-        form_log.addRow("Preview Interval:", self.preview_interval_input)
-
-        self.preview_refresh_input = QSpinBox(minimum=0, maximum=1000, value=5)
-        self.preview_refresh_input.setToolTip(
-            "How many preview saves before the viewer refreshes.")
-        form_log.addRow("Preview Refresh Rate:", self.preview_refresh_input)
-
-        self.keep_checkpoints_input = QSpinBox(minimum=1, maximum=50, value=4)
-        self.keep_checkpoints_input.setToolTip(
-            "Number of old checkpoints to keep (plus the latest).")
-        form_log.addRow("Keep Checkpoints:", self.keep_checkpoints_input)
-        layout.addWidget(grp_log)
-
-        # --- Early Stopping / Plateau Detection ---
-        grp_es = QGroupBox("Plateau Detection")
-        form_es = QFormLayout(grp_es)
-
-        self.es_enabled_input = QCheckBox("Enable Plateau Detection")
-        self.es_enabled_input.setChecked(True)
-        self.es_enabled_input.setToolTip(
-            "Saves a _plateau.pth checkpoint when loss stops improving.\n"
-            "Useful as a safety net for overnight runs.")
-        form_es.addRow(self.es_enabled_input)
-
-        self.es_patience_input = QSpinBox(minimum=5, maximum=200, value=30)
-        self.es_patience_input.setToolTip(
-            "Epochs with no improvement before saving a plateau checkpoint.")
-        form_es.addRow("Patience (epochs):", self.es_patience_input)
-
-        self.es_stop_input = QCheckBox("Stop training on plateau")
-        self.es_stop_input.setChecked(False)
-        self.es_stop_input.setToolTip(
-            "Actually stop training when plateau is detected.\n"
-            "Off = just save checkpoint and keep going (recommended).")
-        form_es.addRow(self.es_stop_input)
-
-        layout.addWidget(grp_es)
-
-        layout.addStretch()
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(tab)
-        self.tabs.addTab(scroll, "Training")
-
-    def _create_inference_tab(self):
-        """Tab 5: Inference — apply a trained model to new images."""
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-
-        # --- Model ---
-        grp_model = QGroupBox("Model")
-        form_model = QFormLayout(grp_model)
-
-        self.inf_checkpoint_input = self._create_path_selector("Checkpoint", is_file=True, file_filter="PyTorch Checkpoints (*.pth)")
-        self.inf_checkpoint_input.setToolTip(
-            "Path to a trained .pth checkpoint. Architecture and settings are auto-detected.")
-        form_model.addRow("Checkpoint:", self.inf_checkpoint_input)
-
-        self.inf_use_latest_btn = QPushButton("Use Latest from Training Folder")
-        self.inf_use_latest_btn.setToolTip(
-            "Find the most recent .pth checkpoint from the Model Output Folder in the Training tab.")
-        self.inf_use_latest_btn.clicked.connect(self._inf_use_latest_checkpoint)
-        form_model.addRow("", self.inf_use_latest_btn)
-        layout.addWidget(grp_model)
-
-        # --- Input / Output ---
-        grp_io = QGroupBox("Input / Output")
-        form_io = QFormLayout(grp_io)
-
-        self.inf_input_dir = self._create_path_selector("Input Directory")
-        self.inf_input_dir.setToolTip(
-            "Folder of images to process. Supports PNG, JPG, TIFF, EXR, BMP, WebP.")
-        form_io.addRow("Input Directory:", self.inf_input_dir)
-
-        self.inf_output_root = self._create_path_selector("Output Root Directory")
-        self.inf_output_root.setToolTip(
-            "Root folder for output. Each run creates a versioned subfolder: "
-            "inputname_modelname_v001 (auto-increments).")
-        form_io.addRow("Output Root:", self.inf_output_root)
-        layout.addWidget(grp_io)
-
-        # --- Processing Options ---
-        grp_opts = QGroupBox("Processing Options")
-        form_opts = QFormLayout(grp_opts)
-
-        stride_row = QHBoxLayout()
-        self.inf_stride = QSpinBox(minimum=64, maximum=1024, value=256, singleStep=64)
-        self.inf_stride.setToolTip(
-            "Step size in pixels between overlapping tiles. Smaller = better blending but slower.")
-        self.inf_auto_stride = QCheckBox("Auto")
-        self.inf_auto_stride.setChecked(True)
-        self.inf_auto_stride.setToolTip(
-            "Compute optimal stride from the first image's dimensions for complete pixel coverage.")
-        self.inf_stride.setEnabled(False)
-        self.inf_auto_stride.toggled.connect(lambda c: self.inf_stride.setEnabled(not c))
-        stride_row.addWidget(self.inf_stride)
-        stride_row.addWidget(self.inf_auto_stride)
-        form_opts.addRow("Stride:", stride_row)
-
-        self.inf_half_res = QCheckBox("Half Resolution (~4x faster)")
-        self.inf_half_res.setToolTip("Process at half resolution. Useful for quick previews.")
-        form_opts.addRow(self.inf_half_res)
-
-        self.inf_skip_existing = QCheckBox("Skip Existing Files")
-        self.inf_skip_existing.setChecked(True)
-        self.inf_skip_existing.setToolTip(
-            "Skip files that already exist. Resume partial runs without re-processing.")
-        form_opts.addRow(self.inf_skip_existing)
-        layout.addWidget(grp_opts)
-
-        # --- Progress ---
-        grp_progress = QGroupBox("Progress")
-        progress_layout = QVBoxLayout(grp_progress)
-        self.inf_progress_bar = QProgressBar()
-        self.inf_progress_bar.setValue(0)
-        self.inf_progress_label = QLabel("")
-        progress_layout.addWidget(self.inf_progress_bar)
-        progress_layout.addWidget(self.inf_progress_label)
-        layout.addWidget(grp_progress)
-
-        # --- Buttons ---
-        btn_layout = QHBoxLayout()
-        self.inf_run_btn = QPushButton("Run Inference")
-        self.inf_run_btn.setProperty("cssClass", "start")
-        self.inf_run_btn.clicked.connect(self._inf_run_single)
-        self.inf_run_queue_btn = QPushButton("Run Queue")
-        self.inf_run_queue_btn.setProperty("cssClass", "start")
-        self.inf_run_queue_btn.clicked.connect(self._inf_run_queue)
-        self.inf_stop_btn = QPushButton("Stop")
-        self.inf_stop_btn.setProperty("cssClass", "stop")
-        self.inf_stop_btn.setEnabled(False)
-        self.inf_stop_btn.clicked.connect(self._inf_request_stop)
-        btn_layout.addWidget(self.inf_run_btn)
-        btn_layout.addWidget(self.inf_run_queue_btn)
-        btn_layout.addWidget(self.inf_stop_btn)
-        layout.addLayout(btn_layout)
-
-        layout.addStretch()
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(tab)
-        self.tabs.addTab(scroll, "Inference")
-
-    def _create_previews_tab(self):
-        """Tab 4: Previews — training + validation preview with toggle."""
-        tab = QWidget()
-        main_layout = QVBoxLayout(tab)
-
-        # Toggle buttons
-        toggle_layout = QHBoxLayout()
-        self.preview_train_btn = QPushButton("Training Preview")
-        self.preview_train_btn.setCheckable(True)
-        self.preview_train_btn.setChecked(True)
-        self.preview_train_btn.setToolTip("Show latest training preview (src / dst / model output).")
-        self.preview_val_btn = QPushButton("Validation Preview")
-        self.preview_val_btn.setCheckable(True)
-        self.preview_val_btn.setToolTip("Show latest validation preview (unseen data).")
-
-        self.preview_train_btn.clicked.connect(lambda: self._switch_preview('train'))
-        self.preview_val_btn.clicked.connect(lambda: self._switch_preview('val'))
-        toggle_layout.addWidget(self.preview_train_btn)
-        toggle_layout.addWidget(self.preview_val_btn)
-        toggle_layout.addStretch()
-        main_layout.addLayout(toggle_layout)
-
-        # Scroll area (shared for both previews)
-        self.scroll_area = ZoomPanScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.preview_label = QLabel("Waiting for preview image...")
-        self.preview_label.setAlignment(Qt.AlignCenter)
-        self.scroll_area.setWidget(self.preview_label)
-        self.scroll_area.zoom_changed.connect(self._on_preview_wheel_zoom)
-        main_layout.addWidget(self.scroll_area, stretch=1)
-
-        # Zoom controls + diff amplify
-        controls_layout = QHBoxLayout()
-        self.zoom_combo = QComboBox()
-        self.zoom_combo.addItems(["Fit", "50%", "100%", "200%"])
-        self.zoom_combo.setToolTip("Zoom level. Mouse wheel to zoom, middle-click to pan.")
-        self.zoom_combo.activated.connect(lambda: self._on_zoom_combo_changed(self.zoom_combo.currentText()))
-        controls_layout.addStretch()
-        controls_layout.addWidget(QLabel("Zoom:"))
-        controls_layout.addWidget(self.zoom_combo)
-        controls_layout.addSpacing(20)
-        controls_layout.addWidget(QLabel("Diff Amplify:"))
-        self.diff_amplify_slider = QSlider(Qt.Horizontal)
-        self.diff_amplify_slider.setRange(1, 50)
-        self.diff_amplify_slider.setValue(5)
-        self.diff_amplify_slider.setFixedWidth(120)
-        self.diff_amplify_slider.setToolTip("Amplification for the diff heatmap. Higher = more visible subtle differences.")
-        self.diff_amplify_label = QLabel("5x")
-        self.diff_amplify_slider.valueChanged.connect(lambda v: self.diff_amplify_label.setText(f"{v}x"))
-        controls_layout.addWidget(self.diff_amplify_slider)
-        controls_layout.addWidget(self.diff_amplify_label)
-        controls_layout.addStretch()
-        main_layout.addLayout(controls_layout)
-
-        # Column labels
-        self.labels_container = QWidget()
-        labels_layout = QHBoxLayout(self.labels_container)
-        labels_layout.setContentsMargins(0, 0, 0, 0)
-        lbl_src = QLabel("src data")
-        lbl_dst = QLabel("dst data")
-        lbl_model = QLabel("Model result")
-        lbl_src.setAlignment(Qt.AlignLeft)
-        lbl_dst.setAlignment(Qt.AlignCenter)
-        lbl_model.setAlignment(Qt.AlignRight)
-        labels_layout.addWidget(lbl_src)
-        labels_layout.addWidget(lbl_dst)
-        labels_layout.addWidget(lbl_model)
-        main_layout.addWidget(self.labels_container)
-
-        # Track which preview is active
-        self._active_preview = 'train'
-
-        self.tabs.addTab(tab, "Previews")
-
-    def _create_export_tab(self):
-        """Tab 5: Export — convert checkpoint for VFX apps."""
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.addStretch()
-
-        info = QLabel("Export your trained model checkpoint for use in\nthird-party compositing applications.")
-        info.setAlignment(Qt.AlignCenter)
-        layout.addWidget(info)
-        layout.addSpacing(15)
-
-        self.convert_flame_btn = QPushButton("Export for Flame / After Effects")
-        self.convert_flame_btn.setToolTip(
-            "Convert checkpoint to ONNX for Autodesk Flame or Adobe After Effects.")
-        self.convert_flame_btn.clicked.connect(lambda: self._start_conversion('flame'))
-        layout.addWidget(self.convert_flame_btn)
-
-        self.convert_nuke_btn = QPushButton("Export for Nuke")
-        self.convert_nuke_btn.setToolTip(
-            "Convert checkpoint for Foundry Nuke. A .nk script file is also generated.")
-        self.convert_nuke_btn.clicked.connect(lambda: self._start_conversion('nuke'))
-        layout.addWidget(self.convert_nuke_btn)
-
-        self.copy_before_convert_check = QCheckBox("Copy checkpoint to export subfolder first")
-        self.copy_before_convert_check.setChecked(True)
-        self.copy_before_convert_check.setToolTip(
-            "Copy checkpoint into a subfolder before converting. Keeps exports separate from training.")
-        self.copy_before_convert_check.setContentsMargins(0, 10, 0, 0)
-        layout.addWidget(self.copy_before_convert_check, alignment=Qt.AlignCenter)
-
-        layout.addStretch()
-        self.tabs.addTab(tab, "Export")
-
-    def _create_about_tab(self):
-        """Tab 6: About / Info."""
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setAlignment(Qt.AlignCenter)
-
-        # --- Original project credit ---
-        orig_title = QLabel("TuNet")
-        orig_title.setStyleSheet("font-size: 22pt; font-weight: bold; color: #5a9bf6;")
-        orig_title.setAlignment(Qt.AlignCenter)
-        orig_author = QLabel("Created by tpo.comp")
-        orig_author.setStyleSheet("font-size: 12pt; color: #8b919d;")
-        orig_author.setAlignment(Qt.AlignCenter)
-        orig_desc = QLabel(
-            "A direct, pixel-level mapping from source to destination images\n"
-            "via an encoder-decoder network.")
-        orig_desc.setAlignment(Qt.AlignCenter)
-        orig_desc.setWordWrap(True)
-        orig_link = QLabel('<a href="https://github.com/tpc2233/tunet">github.com/tpc2233/tunet</a>')
-        orig_link.setOpenExternalLinks(True)
-        orig_link.setAlignment(Qt.AlignCenter)
-
-        # --- Separator ---
-        separator = QFrame()
-        separator.setFrameShape(QFrame.HLine)
-        separator.setFrameShadow(QFrame.Sunken)
-
-        # --- Fork credit ---
-        fork_title = QLabel("VFX Tools Fork")
-        fork_title.setStyleSheet("font-size: 14pt; font-weight: bold; color: #6bc77a;")
-        fork_title.setAlignment(Qt.AlignCenter)
-        fork_author = QLabel("Maintained by emlcpfx")
-        fork_author.setStyleSheet("font-size: 11pt; color: #8b919d;")
-        fork_author.setAlignment(Qt.AlignCenter)
-        fork_changes = QLabel(
-            "Changes since fork:\n"
-            "\u2022 Unified PyQt GUI for training, inference, and export\n"
-            "\u2022 Render queue with progress monitoring\n"
-            "\u2022 Live preview with pan/zoom\n"
-            "\u2022 Auto-matte / auto-mask generation\n"
-            "\u2022 MSRN architecture option and BigCat features\n"
-            "\u2022 Checkpoint resume, validation, and improved naming\n"
-            "\u2022 Export to Flame (.gizmo) and Nuke (.nk) formats\n"
-            "\u2022 Multi-OS support")
-        fork_changes.setAlignment(Qt.AlignCenter)
-        fork_changes.setWordWrap(True)
-        fork_link = QLabel('<a href="https://github.com/emlcpfx/tunet">github.com/emlcpfx/tunet</a>')
-        fork_link.setOpenExternalLinks(True)
-        fork_link.setAlignment(Qt.AlignCenter)
-
-        # --- Layout ---
-        layout.addStretch()
-        layout.addWidget(orig_title)
-        layout.addWidget(orig_author)
-        layout.addSpacing(8)
-        layout.addWidget(orig_desc)
-        layout.addSpacing(4)
-        layout.addWidget(orig_link)
-        layout.addSpacing(20)
-        layout.addWidget(separator)
-        layout.addSpacing(20)
-        layout.addWidget(fork_title)
-        layout.addWidget(fork_author)
-        layout.addSpacing(8)
-        layout.addWidget(fork_changes)
-        layout.addSpacing(4)
-        layout.addWidget(fork_link)
-        layout.addStretch()
-        self.tabs.addTab(tab, "About")
 
     # =========================================================================
     # UI helpers
@@ -2684,7 +1694,7 @@ class MainWindow(QMainWindow):
 
 def apply_dark_theme(app):
     """Apply a cohesive dark theme stylesheet to the application."""
-    # ── Palette ──
+    # -- Palette --
     BG         = "#1b1d23"
     BG_ALT     = "#22252c"
     SURFACE    = "#282b33"
@@ -2704,7 +1714,7 @@ def apply_dark_theme(app):
     BLUE_SOFT  = "#7eb8da"
 
     app.setStyleSheet(f"""
-        /* ── Global ── */
+        /* -- Global -- */
         QWidget {{
             background-color: {BG};
             color: {TEXT};
@@ -2714,12 +1724,12 @@ def apply_dark_theme(app):
             selection-color: {TEXT_BRT};
         }}
 
-        /* ── Main Window ── */
+        /* -- Main Window -- */
         QMainWindow {{
             background-color: {BG};
         }}
 
-        /* ── Tab Widget ── */
+        /* -- Tab Widget -- */
         QTabWidget::pane {{
             border: 1px solid {BORDER};
             border-radius: 4px;
@@ -2747,7 +1757,7 @@ def apply_dark_theme(app):
             color: {TEXT};
         }}
 
-        /* ── Group Box ── */
+        /* -- Group Box -- */
         QGroupBox {{
             background-color: {SURFACE};
             border: 1px solid {BORDER};
@@ -2768,7 +1778,7 @@ def apply_dark_theme(app):
             color: {ACCENT};
         }}
 
-        /* ── Buttons ── */
+        /* -- Buttons -- */
         QPushButton {{
             background-color: {SURFACE_HI};
             color: {TEXT};
@@ -2827,7 +1837,7 @@ def apply_dark_theme(app):
             border-color: {BLUE_SOFT};
         }}
 
-        /* ── Inputs ── */
+        /* -- Inputs -- */
         QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
             background-color: {BG};
             color: {TEXT};
@@ -2859,7 +1869,7 @@ def apply_dark_theme(app):
             outline: none;
         }}
 
-        /* ── Checkbox ── */
+        /* -- Checkbox -- */
         QCheckBox {{
             spacing: 6px;
             color: {TEXT};
@@ -2882,7 +1892,7 @@ def apply_dark_theme(app):
             color: {TEXT_DIM};
         }}
 
-        /* ── Scroll Area ── */
+        /* -- Scroll Area -- */
         QScrollArea {{
             border: none;
             background-color: {BG_ALT};
@@ -2924,7 +1934,7 @@ def apply_dark_theme(app):
             width: 0;
         }}
 
-        /* ── Text Edit (console) ── */
+        /* -- Text Edit (console) -- */
         QTextEdit {{
             background-color: #14161a;
             color: #a9b7c6;
@@ -2935,7 +1945,7 @@ def apply_dark_theme(app):
             padding: 4px;
         }}
 
-        /* ── Splitter ── */
+        /* -- Splitter -- */
         QSplitter::handle {{
             background-color: {BORDER};
             height: 3px;
@@ -2944,7 +1954,7 @@ def apply_dark_theme(app):
             background-color: {ACCENT};
         }}
 
-        /* ── Progress Bar ── */
+        /* -- Progress Bar -- */
         QProgressBar {{
             background-color: {BG};
             border: 1px solid {BORDER};
@@ -2959,13 +1969,13 @@ def apply_dark_theme(app):
             border-radius: 3px;
         }}
 
-        /* ── Labels ── */
+        /* -- Labels -- */
         QLabel {{
             background-color: transparent;
             color: {TEXT};
         }}
 
-        /* ── Slider ── */
+        /* -- Slider -- */
         QSlider::groove:horizontal {{
             background-color: {BORDER};
             height: 4px;
@@ -2982,7 +1992,7 @@ def apply_dark_theme(app):
             background-color: {ACCENT_HI};
         }}
 
-        /* ── List Widget (queues) ── */
+        /* -- List Widget (queues) -- */
         QListWidget {{
             background-color: {BG};
             color: {TEXT};
@@ -3004,12 +2014,12 @@ def apply_dark_theme(app):
             background-color: {SURFACE_HI};
         }}
 
-        /* ── Frame separator ── */
+        /* -- Frame separator -- */
         QFrame[frameShape="4"] {{
             color: {BORDER};
         }}
 
-        /* ── Tool Tips ── */
+        /* -- Tool Tips -- */
         QToolTip {{
             background-color: {SURFACE};
             color: {TEXT};
@@ -3019,7 +2029,7 @@ def apply_dark_theme(app):
             font-size: 9pt;
         }}
 
-        /* ── Form Layout label alignment ── */
+        /* -- Form Layout label alignment -- */
         QFormLayout {{
             margin: 4px;
         }}
