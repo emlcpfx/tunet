@@ -469,6 +469,31 @@ def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_
 
     optimizer = optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=1e-5)
 
+    # --- LR Scheduler ---
+    lr_scheduler_type = getattr(config.training, 'lr_scheduler', 'none')
+    scheduler = None
+    if lr_scheduler_type == 'cosine':
+        # CosineAnnealingLR: decays LR from initial to min over T_max steps then restarts
+        # T_max defaults to 1 epoch worth of steps; min_lr defaults to 1/10th of initial LR
+        t_max = getattr(config.training, 'lr_scheduler_T_max', config.training.iterations_per_epoch)
+        eta_min = getattr(config.training, 'lr_scheduler_min_lr', config.training.lr * 0.1)
+        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=t_max, T_mult=1, eta_min=eta_min)
+        if is_main_process():
+            logging.info(f"LR Scheduler: CosineAnnealingWarmRestarts (T_0={t_max}, eta_min={eta_min:.1e})")
+    elif lr_scheduler_type == 'plateau':
+        # ReduceLROnPlateau: reduce LR when loss plateaus
+        plateau_factor = getattr(config.training, 'lr_scheduler_factor', 0.5)
+        plateau_patience = getattr(config.training, 'lr_scheduler_patience', 10)
+        eta_min = getattr(config.training, 'lr_scheduler_min_lr', config.training.lr * 0.01)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=plateau_factor, patience=plateau_patience,
+            min_lr=eta_min, verbose=False)
+        if is_main_process():
+            logging.info(f"LR Scheduler: ReduceLROnPlateau (factor={plateau_factor}, patience={plateau_patience}, min_lr={eta_min:.1e})")
+    elif lr_scheduler_type != 'none':
+        if is_main_process():
+            logging.warning(f"Unknown lr_scheduler '{lr_scheduler_type}', using constant LR.")
+
     # Determine effective AMP usage
     use_amp_requested = config.training.use_amp
     if use_amp_requested:
@@ -560,6 +585,13 @@ def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_
             elif use_amp_eff:
                 if is_main_process(): logging.warning("AMP enabled, but scaler state missing in ckpt.")
 
+            if scheduler is not None and ckpt.get('scheduler_state_dict'):
+                try:
+                    scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+                    logging.debug("Loaded LR scheduler state_dict.")
+                except Exception as se:
+                    logging.warning(f"Could not load LR scheduler state: {se}.")
+
             start_step = ckpt.get('global_step', 0) + 1
             start_epoch = start_step // config.training.iterations_per_epoch
             if is_main_process():
@@ -613,7 +645,7 @@ def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_
         if is_main_process(): logging.debug("Model wrapped with DDP.")
         dist.barrier()
 
-    return model, optimizer, scaler, start_epoch, start_step, ckpt_prefix, use_amp_eff, criterion_l1, criterion_l2, criterion_bce
+    return model, optimizer, scaler, scheduler, start_epoch, start_step, ckpt_prefix, use_amp_eff, criterion_l1, criterion_l2, criterion_bce
 
 
 def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion_l1, criterion_l2,
@@ -825,7 +857,7 @@ def train(config):
     start_epoch, start_step = 0, 0
     model_type = getattr(config.model, 'model_type', 'unet')
     try:
-        (model, optimizer, scaler, start_epoch, start_step, ckpt_prefix,
+        (model, optimizer, scaler, scheduler, start_epoch, start_step, ckpt_prefix,
          use_amp_eff, criterion_l1, criterion_l2, criterion_bce) = _build_model(
             config, device, device_type, world_size, rank, n_input_ch, eff_size,
             use_lpips, use_l2, use_bce_dice, False, loss_fn_lpips, model_type)
@@ -992,6 +1024,10 @@ def train(config):
                 batch_l1 = l1_t.item(); batch_lp = lp_t.item()
             ep_l1 += batch_l1; ep_lpips += batch_lp; ep_steps += 1
 
+            # Step LR scheduler (cosine steps per-iteration)
+            if scheduler is not None and not isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(global_step)
+
             iter_time = time.time() - loop_iter_start; batch_times.append(iter_time); batch_times = batch_times[-100:]
             avg_time = sum(batch_times) / len(batch_times) if batch_times else 0.0
 
@@ -1034,8 +1070,9 @@ def train(config):
                  m_state = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
                  # Save scaler state only if AMP was effectively used
                  scaler_state = scaler.state_dict() if use_amp_eff else None
+                 scheduler_state = scheduler.state_dict() if scheduler is not None else None
                  ckpt_data = {'epoch': ckpt_ep, 'global_step': global_step, 'model_state_dict': m_state, 'optimizer_state_dict': optimizer.state_dict(),
-                              'scaler_state_dict': scaler_state, 'config': cfg_dict, 'effective_model_size': eff_size, 'n_input_channels': n_input_ch, 'model_type': model_type}
+                              'scaler_state_dict': scaler_state, 'scheduler_state_dict': scheduler_state, 'config': cfg_dict, 'effective_model_size': eff_size, 'n_input_channels': n_input_ch, 'model_type': model_type}
                  try:
                      reason = "interval" if save_now else "epoch end"
                      torch.save(ckpt_data, latest_path)
@@ -1064,6 +1101,15 @@ def train(config):
                     else: logging.warning(f"S{global_step}: Val preview refresh failed, using old.")
                 val_ctx = PreviewContext(model=model, output_dir=config.data.output_dir, device=device, current_epoch=current_ep_idx, global_step=global_step, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, diff_amplify=float(config.logging.diff_amplify))
                 save_val_previews(val_ctx, val_fixed_src, val_fixed_dst); val_preview_count += 1
+
+            # --- LR Scheduler: ReduceLROnPlateau steps at epoch end ---
+            if epoch_end_now and ep_steps > 0 and scheduler is not None and isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                ep_avg_for_sched = ep_l1 / ep_steps
+                old_lr = optimizer.param_groups[0]['lr']
+                scheduler.step(ep_avg_for_sched)
+                new_lr = optimizer.param_groups[0]['lr']
+                if is_main_process() and new_lr != old_lr:
+                    logging.info(f"LR reduced: {old_lr:.1e} -> {new_lr:.1e}")
 
             # --- Early Stopping / Plateau Detection ---
             if es_enabled and epoch_end_now and ep_steps > 0:
@@ -1119,8 +1165,9 @@ def train(config):
                  if model and optimizer and scaler:
                      m_state = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
                      scaler_state = scaler.state_dict() if use_amp_eff else None # Check effective use
+                     scheduler_state = scheduler.state_dict() if scheduler is not None else None
                      final_data = {'epoch': final_ep, 'global_step': final_global_step, 'model_state_dict': m_state, 'optimizer_state_dict': optimizer.state_dict(),
-                                   'scaler_state_dict': scaler_state, 'config': cfg_dict, 'effective_model_size': eff_size, 'n_input_channels': n_input_ch, 'model_type': model_type}
+                                   'scaler_state_dict': scaler_state, 'scheduler_state_dict': scheduler_state, 'config': cfg_dict, 'effective_model_size': eff_size, 'n_input_channels': n_input_ch, 'model_type': model_type}
                      torch.save(final_data, latest_path); logging.info(f"Final checkpoint saved: {latest_path}")
                  else: logging.error("Cannot save final checkpoint: Model/Optimizer/Scaler missing.")
             except Exception as e: logging.error(f"Final checkpoint save failed: {e}", exc_info=True)
@@ -1229,6 +1276,11 @@ if __name__ == "__main__":
     config.model.recurrence_steps = getattr(config.model, 'recurrence_steps', 2)
     # Progressive resolution & weighted loss defaults
     config.training.progressive_resolution = getattr(config.training, 'progressive_resolution', False)
+    config.training.lr_scheduler = getattr(config.training, 'lr_scheduler', 'none')
+    config.training.lr_scheduler_T_max = getattr(config.training, 'lr_scheduler_T_max', config.training.iterations_per_epoch)
+    config.training.lr_scheduler_min_lr = getattr(config.training, 'lr_scheduler_min_lr', 0)
+    config.training.lr_scheduler_factor = getattr(config.training, 'lr_scheduler_factor', 0.5)
+    config.training.lr_scheduler_patience = getattr(config.training, 'lr_scheduler_patience', 10)
     config.training.l1_weight = getattr(config.training, 'l1_weight', 1.0)
     config.training.l2_weight = getattr(config.training, 'l2_weight', 0.0)
     config.training.lpips_weight = getattr(config.training, 'lpips_weight', 0.1)

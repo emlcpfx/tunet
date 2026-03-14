@@ -88,6 +88,8 @@ class TrainingMonitor:
         self.val_steps = deque(maxlen=self.max_points)
         self.val_l1_losses = deque(maxlen=self.max_points)
         self.val_lpips_losses = deque(maxlen=self.max_points)
+        self.val_psnr = deque(maxlen=self.max_points)
+        self.val_ssim = deque(maxlen=self.max_points)
         self.has_val_data = False
         self.best_val_l1 = float('inf')
         self.best_val_l1_epoch = 0
@@ -391,6 +393,8 @@ class TrainingMonitor:
             ('val_l1_best', 'Val Best', '--'),
             ('lpips_cur', 'LPIPS Current', '--'),
             ('lpips_best', 'LPIPS Best', '--'),
+            ('psnr', 'PSNR (dB)', '--'),
+            ('ssim', 'SSIM', '--'),
             ('points', 'Data Points', '0'),
             ('rate', 'Step Time', '--'),
         ]
@@ -895,6 +899,8 @@ class TrainingMonitor:
         time_pattern = r'T/Step:([\d.]+)s'
         val_pattern = r'Val Epoch\[(\d+)\]\s*Step\[(\d+)\].*?Val_(L1|BCE\+Dice):([\d.]+)'
         val_lpips_pattern = r'Val_LPIPS:([\d.]+)'
+        val_psnr_pattern = r'PSNR:([\d.]+)dB'
+        val_ssim_pattern = r'SSIM:([\d.]+)'
 
         lines = content.split('\n')
         new_data = False
@@ -967,6 +973,12 @@ class TrainingMonitor:
                 val_lp_match = re.search(val_lpips_pattern, line)
                 if val_lp_match:
                     self.val_lpips_losses.append(float(val_lp_match.group(1)))
+                psnr_match = re.search(val_psnr_pattern, line)
+                if psnr_match:
+                    self.val_psnr.append(float(psnr_match.group(1)))
+                ssim_match = re.search(val_ssim_pattern, line)
+                if ssim_match:
+                    self.val_ssim.append(float(ssim_match.group(1)))
                 new_data = True
 
         if new_data:
@@ -1143,6 +1155,11 @@ class TrainingMonitor:
             if self.best_lpips < float('inf'):
                 self.stat_labels['lpips_best'].configure(text=f"{self.best_lpips:.5f}")
 
+        if self.val_psnr:
+            self.stat_labels['psnr'].configure(text=f"{self.val_psnr[-1]:.2f}")
+        if self.val_ssim:
+            self.stat_labels['ssim'].configure(text=f"{self.val_ssim[-1]:.4f}")
+
         if self.time_per_step:
             avg_time = sum(self.time_per_step) / len(self.time_per_step)
             self.stat_labels['rate'].configure(text=f"{avg_time:.3f}s")
@@ -1187,6 +1204,8 @@ class TrainingMonitor:
         self.val_steps.clear()
         self.val_l1_losses.clear()
         self.val_lpips_losses.clear()
+        self.val_psnr.clear()
+        self.val_ssim.clear()
         self.has_val_data = False
         self.best_val_l1 = float('inf')
         self.best_val_l1_epoch = 0

@@ -532,6 +532,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                 'lambda_lpips': lambda_value,
                 'lr': lr_value,
                 'progressive_resolution': self.progressive_res_check.isChecked(),
+                'lr_scheduler': self.lr_scheduler_input.currentText(),
                 'l1_weight': self.l1_weight_input.value(),
                 'l2_weight': self.l2_weight_input.value(),
                 'lpips_weight': self.lpips_weight_input.value(),
@@ -634,8 +635,9 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                 break
         self.lr_input.setCurrentIndex(best_lr_idx)
 
-        # Progressive resolution & weighted loss
+        # Progressive resolution, LR scheduler & weighted loss
         self.progressive_res_check.setChecked(training.get('progressive_resolution', False))
+        self.lr_scheduler_input.setCurrentText(training.get('lr_scheduler', 'none'))
         self.l1_weight_input.setValue(training.get('l1_weight', 1.0))
         self.l2_weight_input.setValue(training.get('l2_weight', 0.0))
         self.lpips_weight_input.setValue(training.get('lpips_weight', 0.1))
