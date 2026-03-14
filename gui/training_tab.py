@@ -190,6 +190,16 @@ class TrainingTabMixin:
             "Nearly 2x faster, less VRAM, negligible quality impact. "
             "Disable only if you see NaN losses.")
         form_opt.addRow("Mixed Precision:", self.use_amp_input)
+
+        # --- LR Scheduler ---
+        self.lr_scheduler_input = QComboBox()
+        self.lr_scheduler_input.addItems(["none", "cosine", "plateau"])
+        self.lr_scheduler_input.setToolTip(
+            "'none' = constant learning rate (default).\n"
+            "'cosine' = CosineAnnealing with warm restarts — LR decays then resets each cycle.\n"
+            "'plateau' = ReduceLROnPlateau — halves LR when epoch loss stops improving.")
+        form_opt.addRow("LR Scheduler:", self.lr_scheduler_input)
+
         layout.addWidget(grp_opt)
 
         # --- Fine-tune ---
