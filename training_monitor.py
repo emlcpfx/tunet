@@ -39,32 +39,32 @@ except ImportError:
     print("Warning: matplotlib not installed. Install with: pip install matplotlib")
 
 
-# Dark theme colors
+# Dark theme colors — matched to TuNet main app palette
 COLORS = {
-    'bg': '#1e1e1e',
-    'bg_light': '#2d2d2d',
-    'bg_panel': '#252525',
-    'border': '#555555',
-    'grid': '#404040',
-    'text': '#d4d4d4',
-    'text_bright': '#ffffff',
-    'text_dim': '#999999',
-    'l1': '#ff6b6b',
-    'l1_raw': '#ff6b6b',
+    'bg': '#1b1d23',
+    'bg_light': '#22252c',
+    'bg_panel': '#282b33',
+    'border': '#3a3f4b',
+    'grid': '#31353f',
+    'text': '#c8ccd4',
+    'text_bright': '#e2e5eb',
+    'text_dim': '#8b919d',
+    'l1': '#e86b6b',
+    'l1_raw': '#e86b6b',
     'lpips': '#4ecdc4',
     'lpips_raw': '#4ecdc4',
-    'val_l1': '#ffa726',
-    'val_l1_raw': '#ffa726',
-    'accent': '#61afef',
-    'best_marker': '#98c379',
-    'crosshair': '#888888',
-    'btn_active': '#4a85c4',
-    'btn_normal': '#484848',
-    'btn_text': '#e8e8e8',
-    'btn_border': '#666666',
-    'good': '#98c379',
+    'val_l1': '#f0a050',
+    'val_l1_raw': '#f0a050',
+    'accent': '#5a9bf6',
+    'best_marker': '#6bc77a',
+    'crosshair': '#6a7080',
+    'btn_active': '#3d6db5',
+    'btn_normal': '#31353f',
+    'btn_text': '#c8ccd4',
+    'btn_border': '#4a5060',
+    'good': '#6bc77a',
     'warn': '#e5c07b',
-    'bad': '#e06c75',
+    'bad': '#e86b6b',
 }
 
 
@@ -110,6 +110,7 @@ class TrainingMonitor:
         self.show_grid = True
         self.zoom_mode = 'all'  # 'all', 'last_1', 'last_5', 'last_10', 'last_20'
         self.crosshair_visible = False
+        self._pan_start_px = None
 
         # Best loss tracking
         self.best_l1 = float('inf')
@@ -330,18 +331,30 @@ class TrainingMonitor:
         self.canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
         self.canvas.draw()
 
-        # Navigation toolbar (zoom, pan, save built-in)
-        toolbar_container = tk.Frame(graph_frame, bg=COLORS['bg'])
+        # Navigation toolbar - use lighter bg so dark icons are visible
+        toolbar_bg = '#b0b0b0'
+        toolbar_container = tk.Frame(graph_frame, bg=toolbar_bg)
         toolbar_container.pack(fill=tk.X, side=tk.BOTTOM)
         self.nav_toolbar = NavigationToolbar2Tk(self.canvas, toolbar_container)
-        self.nav_toolbar.configure(bg=COLORS['bg'])
+        self.nav_toolbar.configure(bg=toolbar_bg)
         self.nav_toolbar.update()
-        # Style toolbar children
         for child in self.nav_toolbar.winfo_children():
             try:
-                child.configure(bg=COLORS['bg'])
+                child.configure(bg=toolbar_bg, fg='#1e1e1e')
             except tk.TclError:
-                pass
+                try:
+                    child.configure(bg=toolbar_bg)
+                except tk.TclError:
+                    pass
+        # Style the coordinate label text
+        for attr in ('_message_label', 'message'):
+            label = getattr(self.nav_toolbar, attr, None)
+            if label is not None:
+                try:
+                    label.configure(fg='#1e1e1e', bg=toolbar_bg)
+                except (tk.TclError, AttributeError):
+                    pass
+                break
 
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
@@ -353,6 +366,10 @@ class TrainingMonitor:
         self.canvas.mpl_connect('axes_leave_event', self.on_mouse_leave)
         # Scroll zoom
         self.canvas.mpl_connect('scroll_event', self.on_scroll)
+        # Middle mouse button pan
+        self._pan_start_px = None
+        self.canvas.mpl_connect('button_press_event', self.on_button_press)
+        self.canvas.mpl_connect('button_release_event', self.on_button_release)
 
     def create_stats_panel(self):
         """Create bottom stats panel with key metrics."""
@@ -641,6 +658,11 @@ class TrainingMonitor:
             self.on_mouse_leave(event)
             return
 
+        # Handle MMB drag panning
+        if getattr(self, '_pan_start_px', None) is not None:
+            self.on_mmb_drag(event)
+            return
+
         x, y = event.xdata, event.ydata
         if x is None or y is None:
             return
@@ -697,27 +719,89 @@ class TrainingMonitor:
         self.canvas.draw_idle()
 
     def on_scroll(self, event):
-        """Scroll to zoom in/out centered on cursor position."""
+        """Scroll to zoom in/out centered on cursor position. Zooms both axes."""
         if not event.inaxes or not self.steps:
             return
 
         scale_factor = 0.8 if event.button == 'up' else 1.25
+
+        # Get cursor position in primary axis coords (works even if hovering ax2)
+        # Use pixel coords to convert to ax data coords reliably
+        px, py = event.x, event.y
+        xdata, _ = self.ax.transData.inverted().transform((px, py))
+
         xlim = self.ax.get_xlim()
         ylim = self.ax.get_ylim()
-        xdata, ydata = event.xdata, event.ydata
 
-        # Zoom X
+        # Zoom X (shared between axes)
         new_width = (xlim[1] - xlim[0]) * scale_factor
         rel_x = (xdata - xlim[0]) / (xlim[1] - xlim[0])
         self.ax.set_xlim(xdata - new_width * rel_x, xdata + new_width * (1 - rel_x))
 
-        # Zoom Y (primary axis only, secondary follows on redraw)
+        # Zoom primary Y axis
         if not self.log_scale:
+            _, ydata_ax = self.ax.transData.inverted().transform((px, py))
             new_height = (ylim[1] - ylim[0]) * scale_factor
-            rel_y = (ydata - ylim[0]) / (ylim[1] - ylim[0])
-            self.ax.set_ylim(ydata - new_height * rel_y, ydata + new_height * (1 - rel_y))
+            rel_y = (ydata_ax - ylim[0]) / (ylim[1] - ylim[0])
+            self.ax.set_ylim(ydata_ax - new_height * rel_y, ydata_ax + new_height * (1 - rel_y))
+
+        # Zoom secondary Y axis (LPIPS) proportionally
+        if self.ax2.get_visible() and not self.log_scale:
+            y2lim = self.ax2.get_ylim()
+            _, ydata_ax2 = self.ax2.transData.inverted().transform((px, py))
+            new_h2 = (y2lim[1] - y2lim[0]) * scale_factor
+            rel_y2 = (ydata_ax2 - y2lim[0]) / (y2lim[1] - y2lim[0])
+            self.ax2.set_ylim(ydata_ax2 - new_h2 * rel_y2, ydata_ax2 + new_h2 * (1 - rel_y2))
 
         # Switch to custom zoom mode
+        self.zoom_mode = 'custom'
+        self._highlight_zoom_button()
+        self.canvas.draw_idle()
+
+    def on_button_press(self, event):
+        """Start MMB pan. Store pixel coords so both axes pan together."""
+        if event.button == 2 and event.inaxes and self.steps:
+            self._pan_start_px = (event.x, event.y)
+            self._pan_start_xlim = self.ax.get_xlim()
+            self._pan_start_ylim = self.ax.get_ylim()
+            self._pan_start_y2lim = self.ax2.get_ylim() if self.ax2.get_visible() else None
+
+    def on_button_release(self, event):
+        """End MMB pan."""
+        if event.button == 2:
+            self._pan_start_px = None
+
+    def on_mmb_drag(self, event):
+        """Handle MMB drag for panning. Uses pixel delta so both axes move together."""
+        if self._pan_start_px is None or event.x is None or event.y is None:
+            return
+        # Pixel deltas
+        dpx = self._pan_start_px[0] - event.x
+        dpy = self._pan_start_px[1] - event.y
+
+        # Convert pixel delta to data coords for primary axis
+        inv = self.ax.transData.inverted()
+        origin = inv.transform((0, 0))
+        delta = inv.transform((dpx, dpy))
+        dx = delta[0] - origin[0]
+        dy = -(delta[1] - origin[1])  # Y pixel axis is inverted
+
+        # Pan primary axis
+        x0, x1 = self._pan_start_xlim
+        self.ax.set_xlim(x0 + dx, x1 + dx)
+        if not self.log_scale:
+            y0, y1 = self._pan_start_ylim
+            self.ax.set_ylim(y0 + dy, y1 + dy)
+
+        # Pan secondary axis (LPIPS) proportionally
+        if self._pan_start_y2lim is not None and not self.log_scale:
+            inv2 = self.ax2.transData.inverted()
+            origin2 = inv2.transform((0, 0))
+            delta2 = inv2.transform((0, dpy))
+            dy2 = -(delta2[1] - origin2[1])
+            y2_0, y2_1 = self._pan_start_y2lim
+            self.ax2.set_ylim(y2_0 + dy2, y2_1 + dy2)
+
         self.zoom_mode = 'custom'
         self._highlight_zoom_button()
         self.canvas.draw_idle()

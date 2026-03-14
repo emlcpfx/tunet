@@ -260,7 +260,6 @@ class MainWindow(QMainWindow):
         logging.getLogger().setLevel(logging.INFO)
 
         # --- Populate defaults ---
-        self._populate_default_script_path()
         self._load_session()
 
     # =========================================================================
@@ -272,20 +271,16 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        # --- Training Script ---
-        grp_script = QGroupBox("Training Script")
-        form_script = QFormLayout(grp_script)
-        self.train_script_input = self._create_path_selector("Training Script", is_file=True)
-        self.train_script_input.setToolTip(
-            "Path to train.py that runs the training loop. Usually auto-detected.")
-        form_script.addRow("Script:", self.train_script_input)
+        # --- Distributed Training (Linux only) ---
         if platform.system() == 'Linux':
+            grp_dist = QGroupBox("Distributed Training")
+            form_dist = QFormLayout(grp_dist)
             self.nproc_input = QSpinBox(minimum=1, maximum=16, value=1)
             self.nproc_input.setToolTip("Number of GPUs for distributed training via torchrun.")
-            form_script.addRow("GPUs (nproc):", self.nproc_input)
+            form_dist.addRow("GPUs (nproc):", self.nproc_input)
+            layout.addWidget(grp_dist)
         else:
             self.nproc_input = None
-        layout.addWidget(grp_script)
 
         # --- Source & Target Data ---
         grp_data = QGroupBox("Source & Target Data")
@@ -302,7 +297,7 @@ class MainWindow(QMainWindow):
             "Optional. Grayscale mask images (white = important regions). "
             "Not needed if Auto Mask is enabled.")
         self.auto_mask_hint = QLabel("")
-        self.auto_mask_hint.setStyleSheet("color: gray; font-style: italic;")
+        self.auto_mask_hint.setStyleSheet("color: #8b919d; font-style: italic;")
         form_data.addRow("Source Directory:", self.src_dir_input)
         form_data.addRow("Target Directory:", self.dst_dir_input)
         form_data.addRow("Mask Directory:", self.mask_dir_input)
@@ -950,13 +945,13 @@ class MainWindow(QMainWindow):
         # --- Buttons ---
         btn_layout = QHBoxLayout()
         self.inf_run_btn = QPushButton("Run Inference")
-        self.inf_run_btn.setStyleSheet("background-color: #a8e6cf; color: #1a1a1a;")
+        self.inf_run_btn.setProperty("cssClass", "start")
         self.inf_run_btn.clicked.connect(self._inf_run_single)
         self.inf_run_queue_btn = QPushButton("Run Queue")
-        self.inf_run_queue_btn.setStyleSheet("background-color: #a8e6cf; color: #1a1a1a;")
+        self.inf_run_queue_btn.setProperty("cssClass", "start")
         self.inf_run_queue_btn.clicked.connect(self._inf_run_queue)
         self.inf_stop_btn = QPushButton("Stop")
-        self.inf_stop_btn.setStyleSheet("background-color: #ff8a80; color: #1a1a1a;")
+        self.inf_stop_btn.setProperty("cssClass", "stop")
         self.inf_stop_btn.setEnabled(False)
         self.inf_stop_btn.clicked.connect(self._inf_request_stop)
         btn_layout.addWidget(self.inf_run_btn)
@@ -1072,7 +1067,7 @@ class MainWindow(QMainWindow):
         self.copy_before_convert_check.setChecked(True)
         self.copy_before_convert_check.setToolTip(
             "Copy checkpoint into a subfolder before converting. Keeps exports separate from training.")
-        self.copy_before_convert_check.setStyleSheet("margin-top: 10px;")
+        self.copy_before_convert_check.setContentsMargins(0, 10, 0, 0)
         layout.addWidget(self.copy_before_convert_check, alignment=Qt.AlignCenter)
 
         layout.addStretch()
@@ -1086,10 +1081,10 @@ class MainWindow(QMainWindow):
 
         # --- Original project credit ---
         orig_title = QLabel("TuNet")
-        orig_title.setStyleSheet("font-size: 20px; font-weight: bold;")
+        orig_title.setStyleSheet("font-size: 22pt; font-weight: bold; color: #5a9bf6;")
         orig_title.setAlignment(Qt.AlignCenter)
         orig_author = QLabel("Created by tpo.comp")
-        orig_author.setStyleSheet("font-size: 14px;")
+        orig_author.setStyleSheet("font-size: 12pt; color: #8b919d;")
         orig_author.setAlignment(Qt.AlignCenter)
         orig_desc = QLabel(
             "A direct, pixel-level mapping from source to destination images\n"
@@ -1107,10 +1102,10 @@ class MainWindow(QMainWindow):
 
         # --- Fork credit ---
         fork_title = QLabel("VFX Tools Fork")
-        fork_title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        fork_title.setStyleSheet("font-size: 14pt; font-weight: bold; color: #6bc77a;")
         fork_title.setAlignment(Qt.AlignCenter)
         fork_author = QLabel("Maintained by emlcpfx")
-        fork_author.setStyleSheet("font-size: 13px;")
+        fork_author.setStyleSheet("font-size: 11pt; color: #8b919d;")
         fork_author.setAlignment(Qt.AlignCenter)
         fork_changes = QLabel(
             "Changes since fork:\n"
@@ -1221,7 +1216,6 @@ class MainWindow(QMainWindow):
         tq_layout = QVBoxLayout(train_queue_page)
         tq_layout.setContentsMargins(0, 0, 0, 0)
         self.queue_listbox = QListWidget()
-        self.queue_listbox.setStyleSheet("font-family: monospace; font-size: 10px;")
         self.queue_listbox.setSelectionMode(QListWidget.ExtendedSelection)
         tq_layout.addWidget(self.queue_listbox, stretch=1)
 
@@ -1233,7 +1227,7 @@ class MainWindow(QMainWindow):
         self.queue_clear_btn.clicked.connect(self._clear_training_queue)
         self.queue_run_btn = QPushButton("Run Queue")
         self.queue_run_btn.clicked.connect(self._run_training_queue)
-        self.queue_run_btn.setStyleSheet("background-color: #a8e6cf; color: #1a1a1a;")
+        self.queue_run_btn.setProperty("cssClass", "start")
         tq_layout.addWidget(self.queue_add_btn)
         tq_layout.addWidget(self.queue_remove_btn)
         tq_layout.addWidget(self.queue_clear_btn)
@@ -1245,7 +1239,6 @@ class MainWindow(QMainWindow):
         iq_layout = QVBoxLayout(inf_queue_page)
         iq_layout.setContentsMargins(0, 0, 0, 0)
         self.inf_queue_listbox = QListWidget()
-        self.inf_queue_listbox.setStyleSheet("font-family: monospace; font-size: 10px;")
         self.inf_queue_listbox.setSelectionMode(QListWidget.ExtendedSelection)
         iq_layout.addWidget(self.inf_queue_listbox, stretch=1)
 
@@ -1274,13 +1267,13 @@ class MainWindow(QMainWindow):
         self.save_btn = QPushButton("Save Config")
         self.save_btn.clicked.connect(self._save_config_to_file)
         self.monitor_btn = QPushButton("Training Monitor")
-        self.monitor_btn.setStyleSheet("background-color: #b3e5fc; color: #1a1a1a;")
+        self.monitor_btn.setProperty("cssClass", "accent")
         self.monitor_btn.clicked.connect(self._launch_training_monitor)
         self.start_btn = QPushButton("Start Training")
-        self.start_btn.setStyleSheet("background-color: #a8e6cf; color: #1a1a1a;")
+        self.start_btn.setProperty("cssClass", "start")
         self.start_btn.clicked.connect(self._start_training)
         self.stop_btn = QPushButton("Stop Training")
-        self.stop_btn.setStyleSheet("background-color: #ff8a80; color: #1a1a1a;")
+        self.stop_btn.setProperty("cssClass", "stop")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self._stop_training)
 
@@ -1579,7 +1572,6 @@ class MainWindow(QMainWindow):
 
         # UI-only settings
         config['_ui_settings'] = {
-            'train_script_path': gp(self.train_script_input),
             'nproc_per_node': self.nproc_input.value() if self.nproc_input else 1,
         }
         return config
@@ -1588,7 +1580,6 @@ class MainWindow(QMainWindow):
         """Populate all UI fields from a config dict."""
         sp = self._set_path
         ui_settings = config.get('_ui_settings', {})
-        sp(self.train_script_input, ui_settings.get('train_script_path', ''))
         if self.nproc_input:
             self.nproc_input.setValue(ui_settings.get('nproc_per_node', 1))
 
@@ -1818,25 +1809,15 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def _populate_default_script_path(self):
-        try:
-            default_script = _APP_DIR / "train.py"
-            if default_script.is_file():
-                le = self.train_script_input.findChild(QLineEdit)
-                if le:
-                    le.setText(str(default_script.resolve()))
-        except Exception:
-            pass
-
     # =========================================================================
     # Training process management
     # =========================================================================
 
     def _launch_training(self, full_config):
         """Launch a training subprocess. Returns True if started."""
-        train_script = full_config['_ui_settings']['train_script_path']
-        if not train_script or not Path(train_script).is_file():
-            QMessageBox.warning(self, "Error", "Training script path is invalid.")
+        train_script = str(_APP_DIR / "train.py")
+        if not Path(train_script).is_file():
+            QMessageBox.warning(self, "Error", f"Training script not found:\n{train_script}")
             return False
         model_folder = Path(full_config['data']['output_dir'])
         if not model_folder.is_dir():
@@ -2701,8 +2682,353 @@ class MainWindow(QMainWindow):
 # Entry point
 # =============================================================================
 
+def apply_dark_theme(app):
+    """Apply a cohesive dark theme stylesheet to the application."""
+    # ── Palette ──
+    BG         = "#1b1d23"
+    BG_ALT     = "#22252c"
+    SURFACE    = "#282b33"
+    SURFACE_HI = "#31353f"
+    BORDER     = "#3a3f4b"
+    BORDER_LT  = "#4a5060"
+    TEXT       = "#c8ccd4"
+    TEXT_DIM   = "#8b919d"
+    TEXT_BRT   = "#e2e5eb"
+    ACCENT     = "#5a9bf6"
+    ACCENT_HI  = "#74aef8"
+    ACCENT_DIM = "#3d6db5"
+    GREEN      = "#6bc77a"
+    GREEN_DIM  = "#2a553a"
+    RED        = "#e86b6b"
+    RED_DIM    = "#5a2a2a"
+    BLUE_SOFT  = "#7eb8da"
+
+    app.setStyleSheet(f"""
+        /* ── Global ── */
+        QWidget {{
+            background-color: {BG};
+            color: {TEXT};
+            font-family: "Segoe UI", "SF Pro Text", "Helvetica Neue", sans-serif;
+            font-size: 10pt;
+            selection-background-color: {ACCENT_DIM};
+            selection-color: {TEXT_BRT};
+        }}
+
+        /* ── Main Window ── */
+        QMainWindow {{
+            background-color: {BG};
+        }}
+
+        /* ── Tab Widget ── */
+        QTabWidget::pane {{
+            border: 1px solid {BORDER};
+            border-radius: 4px;
+            background-color: {BG_ALT};
+            top: -1px;
+        }}
+        QTabBar::tab {{
+            background-color: {SURFACE};
+            color: {TEXT_DIM};
+            border: 1px solid {BORDER};
+            border-bottom: none;
+            padding: 7px 18px;
+            margin-right: 2px;
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+            font-weight: 500;
+        }}
+        QTabBar::tab:selected {{
+            background-color: {BG_ALT};
+            color: {ACCENT};
+            border-bottom: 2px solid {ACCENT};
+        }}
+        QTabBar::tab:hover:!selected {{
+            background-color: {SURFACE_HI};
+            color: {TEXT};
+        }}
+
+        /* ── Group Box ── */
+        QGroupBox {{
+            background-color: {SURFACE};
+            border: 1px solid {BORDER};
+            border-radius: 6px;
+            margin-top: 14px;
+            padding: 14px 10px 10px 10px;
+            font-weight: 600;
+            font-size: 10pt;
+        }}
+        QGroupBox::title {{
+            subcontrol-origin: margin;
+            subcontrol-position: top left;
+            left: 12px;
+            padding: 2px 8px;
+            background-color: {SURFACE};
+            border: 1px solid {BORDER};
+            border-radius: 3px;
+            color: {ACCENT};
+        }}
+
+        /* ── Buttons ── */
+        QPushButton {{
+            background-color: {SURFACE_HI};
+            color: {TEXT};
+            border: 1px solid {BORDER_LT};
+            border-radius: 4px;
+            padding: 6px 16px;
+            font-weight: 500;
+            min-height: 18px;
+        }}
+        QPushButton:hover {{
+            background-color: {BORDER_LT};
+            border-color: {ACCENT_DIM};
+        }}
+        QPushButton:pressed {{
+            background-color: {ACCENT_DIM};
+        }}
+        QPushButton:disabled {{
+            background-color: {SURFACE};
+            color: {TEXT_DIM};
+            border-color: {BORDER};
+        }}
+        QPushButton:checked {{
+            background-color: {ACCENT_DIM};
+            color: {TEXT_BRT};
+            border-color: {ACCENT};
+        }}
+
+        /* Special button classes via object names */
+        QPushButton[cssClass="start"] {{
+            background-color: {GREEN_DIM};
+            color: {GREEN};
+            border-color: {GREEN_DIM};
+            font-weight: 600;
+        }}
+        QPushButton[cssClass="start"]:hover {{
+            background-color: #346b42;
+            border-color: {GREEN};
+        }}
+        QPushButton[cssClass="stop"] {{
+            background-color: {RED_DIM};
+            color: {RED};
+            border-color: {RED_DIM};
+            font-weight: 600;
+        }}
+        QPushButton[cssClass="stop"]:hover {{
+            background-color: #6b3535;
+            border-color: {RED};
+        }}
+        QPushButton[cssClass="accent"] {{
+            background-color: #253a55;
+            color: {BLUE_SOFT};
+            border-color: #253a55;
+        }}
+        QPushButton[cssClass="accent"]:hover {{
+            background-color: #2d4a6b;
+            border-color: {BLUE_SOFT};
+        }}
+
+        /* ── Inputs ── */
+        QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+            background-color: {BG};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: 3px;
+            padding: 4px 8px;
+            min-height: 18px;
+        }}
+        QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
+            border-color: {ACCENT};
+        }}
+        QComboBox::drop-down {{
+            border: none;
+            width: 20px;
+        }}
+        QComboBox::down-arrow {{
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 5px solid {TEXT_DIM};
+            margin-right: 6px;
+        }}
+        QComboBox QAbstractItemView {{
+            background-color: {SURFACE};
+            color: {TEXT};
+            border: 1px solid {BORDER_LT};
+            selection-background-color: {ACCENT_DIM};
+            selection-color: {TEXT_BRT};
+            outline: none;
+        }}
+
+        /* ── Checkbox ── */
+        QCheckBox {{
+            spacing: 6px;
+            color: {TEXT};
+        }}
+        QCheckBox::indicator {{
+            width: 16px;
+            height: 16px;
+            border: 1px solid {BORDER_LT};
+            border-radius: 3px;
+            background-color: {BG};
+        }}
+        QCheckBox::indicator:checked {{
+            background-color: {ACCENT};
+            border-color: {ACCENT};
+        }}
+        QCheckBox::indicator:hover {{
+            border-color: {ACCENT};
+        }}
+        QCheckBox:disabled {{
+            color: {TEXT_DIM};
+        }}
+
+        /* ── Scroll Area ── */
+        QScrollArea {{
+            border: none;
+            background-color: {BG_ALT};
+        }}
+        QScrollBar:vertical {{
+            background-color: {BG};
+            width: 10px;
+            margin: 0;
+            border: none;
+        }}
+        QScrollBar::handle:vertical {{
+            background-color: {BORDER};
+            min-height: 30px;
+            border-radius: 5px;
+            margin: 2px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background-color: {BORDER_LT};
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+            height: 0;
+        }}
+        QScrollBar:horizontal {{
+            background-color: {BG};
+            height: 10px;
+            margin: 0;
+            border: none;
+        }}
+        QScrollBar::handle:horizontal {{
+            background-color: {BORDER};
+            min-width: 30px;
+            border-radius: 5px;
+            margin: 2px;
+        }}
+        QScrollBar::handle:horizontal:hover {{
+            background-color: {BORDER_LT};
+        }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+            width: 0;
+        }}
+
+        /* ── Text Edit (console) ── */
+        QTextEdit {{
+            background-color: #14161a;
+            color: #a9b7c6;
+            border: 1px solid {BORDER};
+            border-radius: 4px;
+            font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
+            font-size: 9pt;
+            padding: 4px;
+        }}
+
+        /* ── Splitter ── */
+        QSplitter::handle {{
+            background-color: {BORDER};
+            height: 3px;
+        }}
+        QSplitter::handle:hover {{
+            background-color: {ACCENT};
+        }}
+
+        /* ── Progress Bar ── */
+        QProgressBar {{
+            background-color: {BG};
+            border: 1px solid {BORDER};
+            border-radius: 4px;
+            text-align: center;
+            color: {TEXT};
+            height: 20px;
+            font-size: 9pt;
+        }}
+        QProgressBar::chunk {{
+            background-color: {ACCENT};
+            border-radius: 3px;
+        }}
+
+        /* ── Labels ── */
+        QLabel {{
+            background-color: transparent;
+            color: {TEXT};
+        }}
+
+        /* ── Slider ── */
+        QSlider::groove:horizontal {{
+            background-color: {BORDER};
+            height: 4px;
+            border-radius: 2px;
+        }}
+        QSlider::handle:horizontal {{
+            background-color: {ACCENT};
+            width: 14px;
+            height: 14px;
+            margin: -5px 0;
+            border-radius: 7px;
+        }}
+        QSlider::handle:horizontal:hover {{
+            background-color: {ACCENT_HI};
+        }}
+
+        /* ── List Widget (queues) ── */
+        QListWidget {{
+            background-color: {BG};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: 4px;
+            font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
+            font-size: 9pt;
+            outline: none;
+        }}
+        QListWidget::item {{
+            padding: 3px 6px;
+            border-bottom: 1px solid {SURFACE};
+        }}
+        QListWidget::item:selected {{
+            background-color: {ACCENT_DIM};
+            color: {TEXT_BRT};
+        }}
+        QListWidget::item:hover {{
+            background-color: {SURFACE_HI};
+        }}
+
+        /* ── Frame separator ── */
+        QFrame[frameShape="4"] {{
+            color: {BORDER};
+        }}
+
+        /* ── Tool Tips ── */
+        QToolTip {{
+            background-color: {SURFACE};
+            color: {TEXT};
+            border: 1px solid {BORDER_LT};
+            padding: 6px;
+            border-radius: 4px;
+            font-size: 9pt;
+        }}
+
+        /* ── Form Layout label alignment ── */
+        QFormLayout {{
+            margin: 4px;
+        }}
+    """)
+
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+    apply_dark_theme(app)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
