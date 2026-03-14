@@ -30,17 +30,22 @@ def main():
             # Find the bundled script
             base_dir = get_base_dir()
 
-            # Check in base dir first, then in utils/ subdirectory
+            # Check in base dir first, then in subdirectories (exporters/, utils/)
             script_path = os.path.join(base_dir, script_name)
             if not os.path.isfile(script_path):
-                # Try preserving the relative path (e.g. utils/convert_flame.py)
-                rel_path = first_arg
-                # Handle both forward and backslash
+                # Try preserving the relative path (e.g. exporters/flame_exporter.py)
                 for prefix in [base_dir, os.path.dirname(sys.executable)]:
+                    # Try the directory from the argument path
                     candidate = os.path.join(prefix, os.path.basename(os.path.dirname(first_arg)), script_name)
                     if os.path.isfile(candidate):
                         script_path = candidate
                         break
+                    # Also search known subdirectories
+                    for subdir in ['exporters', 'utils']:
+                        candidate = os.path.join(prefix, subdir, script_name)
+                        if os.path.isfile(candidate):
+                            script_path = candidate
+                            break
                 else:
                     # Try the original path as-is (might be an absolute path into _MEIPASS)
                     if os.path.isfile(first_arg):
