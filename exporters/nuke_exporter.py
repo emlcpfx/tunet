@@ -2,8 +2,10 @@
 
 import os
 import sys
+import re
 import argparse
 import logging
+from datetime import datetime
 import torch
 import time # For the sleep warning
 from types import SimpleNamespace # Ensure this is imported
@@ -16,6 +18,14 @@ if _project_root not in sys.path:
 from models import create_model
 from models.normalized import NormalizedUNet
 from config import dict_to_namespace
+
+
+def _clean_export_name(base_name):
+    """Strip checkpoint suffixes like _tunet_latest or _tunet_epoch_000000034
+    and append a _MMDDYY_HHMM timestamp."""
+    cleaned = re.sub(r'_tunet_(latest|epoch_\d+)', '', base_name)
+    timestamp = datetime.now().strftime('_%m%d%y_%H%M')
+    return cleaned + timestamp
 
 # --- To DO load_model_for_conversion ---
 def load_model_for_conversion(checkpoint_path, device='cpu'):
@@ -323,10 +333,10 @@ def main(args):
         checkpoint_dir = os.path.dirname(args.checkpoint_pth)
         checkpoint_basename = os.path.basename(args.checkpoint_pth)
         checkpoint_basename_no_ext = os.path.splitext(checkpoint_basename)[0]
-        # Ensure the base name doesn't somehow end in .pth (e.g. if input was already .pt)
         if checkpoint_basename_no_ext.endswith('.pth'):
             checkpoint_basename_no_ext = checkpoint_basename_no_ext[:-4]
-        final_output_pt_path = os.path.join(checkpoint_dir, f"{checkpoint_basename_no_ext}.pt")
+        clean_name = _clean_export_name(checkpoint_basename_no_ext)
+        final_output_pt_path = os.path.join(checkpoint_dir, f"{clean_name}.pt")
         logging.info(f"--output_pt not specified, defaulting to: {final_output_pt_path}")
     else:
         final_output_pt_path = args.output_pt
