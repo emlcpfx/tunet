@@ -1,11 +1,17 @@
 # converter.py (Revised for Cross-Platform support - Minimal Change)
 
 import os
+import sys
 import argparse
 import logging
 import torch
 import time # For the sleep warning
 from types import SimpleNamespace # Ensure this is imported
+
+# Ensure project root is on sys.path so imports work when run as a standalone script
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 from models import create_model
 from models.normalized import NormalizedUNet
