@@ -11,9 +11,20 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+import re
+from datetime import datetime
+
 import torch
 import torch.onnx
 from types import SimpleNamespace
+
+
+def _clean_export_name(base_name):
+    """Strip checkpoint suffixes like _tunet_latest or _tunet_epoch_000000034
+    and append a _MMDDYY_HHMM timestamp."""
+    cleaned = re.sub(r'_tunet_(latest|epoch_\d+)', '', base_name)
+    timestamp = datetime.now().strftime('_%m%d%y_%H%M')
+    return cleaned + timestamp
 
 # Ensure project root is on sys.path so imports work when run as a standalone script
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -159,7 +170,8 @@ def convert(args):
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
     if not os.path.isfile(args.checkpoint): logging.error(f"Checkpoint file not found: {args.checkpoint}"); return 1
     checkpoint_dir = os.path.dirname(args.checkpoint); checkpoint_basename = os.path.basename(args.checkpoint)
-    base_name = os.path.splitext(checkpoint_basename)[0]
+    raw_base = os.path.splitext(checkpoint_basename)[0]
+    base_name = _clean_export_name(raw_base)
     output_dir = args.output_dir if args.output_dir else checkpoint_dir
     output_onnx_path = args.output_onnx if args.output_onnx else os.path.join(output_dir, f"{base_name}.onnx")
     output_json_path = args.output_json if args.output_json else os.path.join(output_dir, f"{base_name}.json")
