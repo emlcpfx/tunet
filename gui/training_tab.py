@@ -291,6 +291,33 @@ class TrainingTabMixin:
         form_log.addRow("Keep Checkpoints:", self.keep_checkpoints_input)
         layout.addWidget(grp_log)
 
+        # --- Auto Export ---
+        grp_export = QGroupBox("Auto Export")
+        form_export = QFormLayout(grp_export)
+
+        self.auto_export_interval_input = QSpinBox(minimum=0, maximum=1000, value=0)
+        self.auto_export_interval_input.setSpecialValueText("Disabled")
+        self.auto_export_interval_input.setToolTip(
+            "Export the model every N epochs during training.\n"
+            "0 = disabled. Exports are saved to an 'exports/' subfolder.\n"
+            "Useful for testing intermediate models in your compositing app.")
+        form_export.addRow("Export Every N Epochs:", self.auto_export_interval_input)
+
+        self.auto_export_flame_check = QCheckBox("Flame / After Effects (ONNX + JSON)")
+        self.auto_export_flame_check.setToolTip(
+            "Export to ONNX format with a Flame JSON sidecar.\n"
+            "Works with Autodesk Flame ML nodes and Adobe After Effects (via ONNX plugins).")
+        form_export.addRow(self.auto_export_flame_check)
+
+        self.auto_export_nuke_check = QCheckBox("Nuke (TorchScript .pt + .nk helper)")
+        self.auto_export_nuke_check.setToolTip(
+            "Export to TorchScript (.pt) with a Nuke helper script (.nk).\n"
+            "Open the .nk in Nuke and run the CatFileCreator node to produce\n"
+            "the final .cat file for the Inference node.")
+        form_export.addRow(self.auto_export_nuke_check)
+
+        layout.addWidget(grp_export)
+
         # --- Early Stopping / Plateau Detection ---
         grp_es = QGroupBox("Plateau Detection")
         form_es = QFormLayout(grp_es)
