@@ -7,12 +7,18 @@ without reloading from disk. Called at epoch boundaries by train.py.
 import os
 import json
 import logging
+from datetime import datetime
 
 import torch
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from models.normalized import NormalizedUNet
+
+
+def _timestamp_suffix():
+    """Return a timestamp suffix like _031526_1430 (MMDDYY_HHMM)."""
+    return datetime.now().strftime('_%m%d%y_%H%M')
 
 
 def export_flame(model, config, output_dir, epoch, resolution, loss_mode='l1', ckpt_prefix='model'):
@@ -30,7 +36,7 @@ def export_flame(model, config, output_dir, epoch, resolution, loss_mode='l1', c
     export_subdir = os.path.join(output_dir, 'exports', 'flame')
     os.makedirs(export_subdir, exist_ok=True)
 
-    base_name = f'{ckpt_prefix}_epoch_{epoch:04d}'
+    base_name = f'{ckpt_prefix}_epoch_{epoch:04d}{_timestamp_suffix()}'
     onnx_path = os.path.join(export_subdir, f'{base_name}.onnx')
     json_path = os.path.join(export_subdir, f'{base_name}.json')
 
@@ -109,7 +115,7 @@ def export_nuke(model, config, output_dir, epoch, resolution, loss_mode='l1', ck
     export_subdir = os.path.join(output_dir, 'exports', 'nuke')
     os.makedirs(export_subdir, exist_ok=True)
 
-    base_name = f'{ckpt_prefix}_epoch_{epoch:04d}'
+    base_name = f'{ckpt_prefix}_epoch_{epoch:04d}{_timestamp_suffix()}'
     pt_path = os.path.join(export_subdir, f'{base_name}.pt')
     nk_path = os.path.join(export_subdir, f'{base_name}.nk')
     cat_path = os.path.join(export_subdir, f'{base_name}.cat')
