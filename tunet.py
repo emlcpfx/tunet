@@ -551,6 +551,11 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                 'patience': self.es_patience_input.value(),
                 'stop': self.es_stop_input.isChecked(),
             },
+            'auto_export': {
+                'interval': self.auto_export_interval_input.value(),
+                'flame': self.auto_export_flame_check.isChecked(),
+                'nuke': self.auto_export_nuke_check.isChecked(),
+            },
             'dataloader': {
                 'num_workers': self.num_workers_presets[self.num_workers_input.currentIndex()][1],
                 'datasets': {'shared_augs': augs},
@@ -655,6 +660,12 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         self.es_enabled_input.setChecked(es_cfg.get('enabled', True))
         self.es_patience_input.setValue(es_cfg.get('patience', 30))
         self.es_stop_input.setChecked(es_cfg.get('stop', False))
+
+        # Auto export
+        ae_cfg = config.get('auto_export', {})
+        self.auto_export_interval_input.setValue(ae_cfg.get('interval', 0))
+        self.auto_export_flame_check.setChecked(ae_cfg.get('flame', False))
+        self.auto_export_nuke_check.setChecked(ae_cfg.get('nuke', False))
 
         # Dataloader workers
         saved_workers = config.get('dataloader', {}).get('num_workers', -1)

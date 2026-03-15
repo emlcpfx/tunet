@@ -107,6 +107,12 @@ logging:
 saving:
   keep_last_checkpoints: 4           # Number of checkpoints to keep (excluding latest)
 
+# --- Auto Export ---
+auto_export:
+  interval: 0                        # Export every N epochs (0 = disabled)
+  flame: false                       # Export ONNX + JSON for Flame / After Effects
+  nuke: false                        # Export TorchScript .pt + .nk for Nuke
+
 # --- Early Stopping (Plateau Detection) ---
 early_stopping:
   enabled: true                      # Enable plateau detection (saves _plateau.pth when loss flatlines)

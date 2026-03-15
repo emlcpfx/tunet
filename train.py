@@ -1092,6 +1092,19 @@ def train(config):
                               prune_checkpoints(config.data.output_dir, config.saving.keep_last_checkpoints, ckpt_prefix)
                  except Exception as e: logging.error(f"Checkpoint save failed @ Step {global_step}: {e}", exc_info=True)
 
+            # --- Auto Export ---
+            if is_main_process() and epoch_end_now and config.auto_export.interval > 0:
+                completed_ep = global_step // iter_epoch
+                if completed_ep % config.auto_export.interval == 0:
+                    from exporters.auto_export import export_flame, export_nuke
+                    export_res = current_training_res if config.training.progressive_resolution else config.data.resolution
+                    if config.auto_export.flame:
+                        export_flame(model, config, config.data.output_dir, completed_ep, export_res,
+                                     loss_mode=config.training.loss, ckpt_prefix=ckpt_prefix)
+                    if config.auto_export.nuke:
+                        export_nuke(model, config, config.data.output_dir, completed_ep, export_res,
+                                    loss_mode=config.training.loss, ckpt_prefix=ckpt_prefix)
+
             # --- Validation ---
             run_val_loss_now = False
             if is_main_process() and val_dataloader is not None:
@@ -1296,6 +1309,11 @@ if __name__ == "__main__":
     config.data.val_src_dir = getattr(config.data, 'val_src_dir', None)
     config.data.val_dst_dir = getattr(config.data, 'val_dst_dir', None)
     config.logging.val_interval = getattr(config.logging, 'val_interval', 0)
+    # Auto-export defaults
+    config.auto_export = getattr(config, 'auto_export', SimpleNamespace())
+    config.auto_export.interval = getattr(config.auto_export, 'interval', 0)
+    config.auto_export.flame = getattr(config.auto_export, 'flame', False)
+    config.auto_export.nuke = getattr(config.auto_export, 'nuke', False)
     # Final Value Checks
     if not missing:
         try: # Combine checks for brevity
