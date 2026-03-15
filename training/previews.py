@@ -219,7 +219,8 @@ def save_val_previews(ctx: PreviewContext, fixed_src_batch, fixed_dst_batch):
 
 
 def capture_val_preview_batch(config, standard_transform, SourceOnlyDatasetClass=None,
-                              AugmentedDatasetClass=None):
+                              AugmentedDatasetClass=None, use_auto_mask=False,
+                              skip_empty=False, skip_empty_threshold=1.0):
     """Capture a fixed batch from the validation dataset for previews."""
     if not is_main_process():
         return None, None
@@ -237,14 +238,19 @@ def capture_val_preview_batch(config, standard_transform, SourceOnlyDatasetClass
                 val_dataset = AugmentedDatasetClass(
                     config.data.val_src_dir, config.data.val_dst_dir,
                     config.data.resolution, config.data.overlap_factor,
-                    None, None, None, standard_transform)
+                    None, None, None, standard_transform,
+                    use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty,
+                    skip_empty_threshold=skip_empty_threshold)
                 if len(val_dataset) > 0:
                     num_to_load = min(num_preview_samples, len(val_dataset))
                     loader = DataLoader(val_dataset, batch_size=num_to_load, shuffle=True,
                                         num_workers=0, collate_fn=collate_skip_none)
                     batch_data = next(iter(loader))
                     if batch_data is not None:
-                        fixed_src, fixed_dst = batch_data
+                        if use_auto_mask and len(batch_data) == 3:
+                            fixed_src, fixed_dst, _ = batch_data
+                        else:
+                            fixed_src, fixed_dst = batch_data
                         if fixed_src is not None and fixed_dst is not None and fixed_src.size(0) > 0:
                             return fixed_src.cpu(), fixed_dst.cpu()
             except Exception as e:

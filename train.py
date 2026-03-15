@@ -327,6 +327,22 @@ class SourceOnlySlicingDataset(Dataset):
 
 # --- Signal Handler ---
 shutdown_requested = False
+_stop_file_path = None
+
+def _check_stop_file():
+    """Check if the stop-signal file exists (written by the GUI). Returns True if stop requested."""
+    global shutdown_requested
+    if _stop_file_path and os.path.exists(_stop_file_path):
+        if not shutdown_requested:
+            if is_main_process():
+                print("\nStop file detected. Requesting graceful shutdown...")
+                logging.warning("Stop file detected. Requesting graceful shutdown...")
+            shutdown_requested = True
+            try: os.remove(_stop_file_path)
+            except OSError: pass
+        return True
+    return False
+
 def handle_signal(signum, frame):
     global shutdown_requested
     try: sig_name = signal.Signals(signum).name
@@ -745,8 +761,14 @@ def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion
 
 # --- Training Function ---
 def train(config):
-    global shutdown_requested, scaler # Make scaler global for use in save_previews
+    global shutdown_requested, scaler, _stop_file_path # Make scaler global for use in save_previews
     training_successful = False; final_global_step = 0
+
+    # --- Stop file setup (file-based stop signal from GUI) ---
+    _stop_file_path = getattr(config, '_stop_file', None)
+    if _stop_file_path:
+        try: os.remove(_stop_file_path)
+        except OSError: pass
 
     # --- Signal Registration ---
     signal.signal(signal.SIGINT, handle_signal)
@@ -898,7 +920,7 @@ def train(config):
         fixed_src, fixed_dst, fixed_mask, fixed_auto_mask = capture_preview_batch(config, src_transforms, dst_transforms, shared_transforms, standard_transform, use_masks=use_masks, use_auto_mask=use_auto_mask, skip_empty=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold)
         if fixed_src is None: logging.warning("Initial preview batch capture failed.")
         if has_val_preview:
-            val_fixed_src, val_fixed_dst = capture_val_preview_batch(config, standard_transform)
+            val_fixed_src, val_fixed_dst = capture_val_preview_batch(config, standard_transform, use_auto_mask=use_auto_mask, skip_empty=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold)
             if val_fixed_src is None: logging.warning("Initial val preview batch capture failed.")
 
     # --- Progressive Multi-Resolution Setup ---
@@ -947,6 +969,7 @@ def train(config):
     model.train()
     try:
         while True:
+            _check_stop_file()
             if shutdown_requested:
                 if is_main_process(): logging.info(f"Shutdown requested @ step {global_step}.")
                 break
@@ -1117,7 +1140,7 @@ def train(config):
             if run_val_preview_now:
                 val_refresh = config.logging.preview_refresh_rate > 0 and val_preview_count > 0 and (val_preview_count % config.logging.preview_refresh_rate == 0)
                 if val_refresh:
-                    new_val_src, new_val_dst = capture_val_preview_batch(config, standard_transform)
+                    new_val_src, new_val_dst = capture_val_preview_batch(config, standard_transform, use_auto_mask=use_auto_mask, skip_empty=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold)
                     if new_val_src is not None: val_fixed_src, val_fixed_dst = new_val_src, new_val_dst
                     else: logging.warning(f"S{global_step}: Val preview refresh failed, using old.")
                 val_ctx = PreviewContext(model=model, output_dir=config.data.output_dir, device=device, current_epoch=current_ep_idx, global_step=global_step, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, diff_amplify=float(config.logging.diff_amplify))
@@ -1207,6 +1230,7 @@ if __name__ == "__main__":
     parser.add_argument('--training.batch_size', type=int, dest='training_batch_size', default=None, help='Override training batch_size')
     parser.add_argument('--training.lr', type=float, dest='training_lr', default=None, help='Override training learning_rate')
     parser.add_argument('--data.output_dir', type=str, dest='data_output_dir', default=None, help='Override data output_dir')
+    parser.add_argument('--stop-file', type=str, default=None, help='Path to a stop-signal file; training exits gracefully when this file appears')
     cli_args = parser.parse_args()
 
     # --- Initial Config Loading Logging (Simple Console) ---
@@ -1367,6 +1391,7 @@ if __name__ == "__main__":
 
     # --- Store config file stem for checkpoint naming ---
     config._config_stem = os.path.splitext(os.path.basename(cli_args.config))[0]
+    config._stop_file = cli_args.stop_file
 
     # --- Start Training ---
     try: train(config)
