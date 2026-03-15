@@ -866,6 +866,12 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             QMessageBox.critical(self, "Unsupported OS", f"'{current_os}' is not supported.")
             return False
 
+        # Stop file: a sentinel file that train.py polls for graceful shutdown
+        self._stop_file_path = str(model_folder / '.stop_training')
+        try: os.remove(self._stop_file_path)
+        except OSError: pass
+        command += ['--stop-file', self._stop_file_path]
+
         self.console_output.append(f"OS: {current_os}\nCommand: {' '.join(command)}\n\n")
         creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if platform.system() == "Windows" else 0
 
@@ -903,6 +909,10 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
 
     def _on_training_finished(self):
         self.preview_timer.stop()
+        # Clean up stop file
+        if hasattr(self, '_stop_file_path') and self._stop_file_path:
+            try: os.remove(self._stop_file_path)
+            except OSError: pass
         self.console_output.append("\n--- Training Process Terminated ---\n")
         self.process = None
         QTimer.singleShot(100, self._update_all_previews)
@@ -926,9 +936,14 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
     def _stop_training(self):
         if self.process and self.process.poll() is None:
             self.console_output.append("\n--- Sending stop signal ---\n")
-            if platform.system() == "Windows":
-                self.process.send_signal(signal.CTRL_BREAK_EVENT)
-            else:
+            if hasattr(self, '_stop_file_path') and self._stop_file_path:
+                # File-based stop: create sentinel file that train.py polls for
+                try:
+                    with open(self._stop_file_path, 'w') as f:
+                        f.write('stop')
+                except OSError:
+                    pass
+            if platform.system() != "Windows":
                 self.process.send_signal(signal.SIGINT)
             if self.queue_running:
                 self.queue_stop_requested = True
@@ -1695,7 +1710,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             if reply == QMessageBox.Yes:
                 self._stop_training()
                 try:
-                    self.process.wait(timeout=2)
+                    self.process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     self.process.terminate()
                 event.accept()
