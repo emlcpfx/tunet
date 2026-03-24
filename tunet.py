@@ -199,6 +199,22 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         return widget
 
     @staticmethod
+    def _combo_value(combo):
+        """Extract the numeric/value prefix from a combo item like '512 — Good default'."""
+        return combo.currentText().split("\u2014")[0].strip()
+
+    @staticmethod
+    def _set_combo_by_prefix(combo, value):
+        """Select the combo item whose text starts with the given value."""
+        value_str = str(value)
+        for i in range(combo.count()):
+            if combo.itemText(i).split("\u2014")[0].strip() == value_str:
+                combo.setCurrentIndex(i)
+                return
+        # Fallback: set as raw text (works for editable combos)
+        combo.setCurrentText(value_str)
+
+    @staticmethod
     def _get_path(widget):
         """Extract path string from a path selector widget."""
         return widget.findChild(QLineEdit).text()
@@ -215,13 +231,34 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
     # =========================================================================
 
     def _create_sidebar(self):
-        sidebar_layout = QVBoxLayout()
-        self.sidebar_label = QLabel("Training Queue")
-        sidebar_layout.addWidget(self.sidebar_label)
+        sidebar_layout = QHBoxLayout()
+        sidebar_layout.setSpacing(0)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
 
+        # --- Toggle button (thin vertical strip, always visible) ---
+        self.sidebar_toggle = QPushButton("◀")
+        self.sidebar_toggle.setCheckable(True)
+        self.sidebar_toggle.setChecked(True)
+        self.sidebar_toggle.setProperty("cssClass", "sidebar-toggle")
+        self.sidebar_toggle.setFixedWidth(22)
+        self.sidebar_toggle.setToolTip("Show / hide the queue panel")
+        self.sidebar_toggle.toggled.connect(self._on_sidebar_toggled)
+        sidebar_layout.addWidget(self.sidebar_toggle)
+
+        # --- Panel (the part that expands/collapses) ---
+        self.sidebar_panel = QWidget()
+        self.sidebar_panel.setMinimumWidth(200)
+        self.sidebar_panel.setMaximumWidth(280)
+        panel_layout = QVBoxLayout(self.sidebar_panel)
+        panel_layout.setContentsMargins(4, 0, 0, 0)
+
+        # Queue title label
+        self.sidebar_queue_label = QLabel("Training Queue")
+        self.sidebar_queue_label.setStyleSheet("font-weight: 600; padding: 4px 0;")
+        panel_layout.addWidget(self.sidebar_queue_label)
+
+        # Stacked widget for switching between training/inference queues
         self.sidebar_stack = QStackedWidget()
-        self.sidebar_stack.setMinimumWidth(200)
-        self.sidebar_stack.setMaximumWidth(280)
 
         # --- Page 0: Training Queue ---
         train_queue_page = QWidget()
@@ -265,8 +302,14 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         iq_layout.addWidget(self.inf_queue_clear_btn)
         self.sidebar_stack.addWidget(inf_queue_page)
 
-        sidebar_layout.addWidget(self.sidebar_stack, stretch=1)
+        panel_layout.addWidget(self.sidebar_stack, stretch=1)
+        sidebar_layout.addWidget(self.sidebar_panel)
+
         return sidebar_layout
+
+    def _on_sidebar_toggled(self, expanded):
+        self.sidebar_panel.setVisible(expanded)
+        self.sidebar_toggle.setText("◀" if expanded else "▶")
 
     # =========================================================================
     # Bottom control panel
@@ -305,10 +348,10 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
     def _on_tab_changed(self, index):
         if index == self._inference_tab_index:
             self.sidebar_stack.setCurrentIndex(1)
-            self.sidebar_label.setText("Inference Queue")
+            self.sidebar_queue_label.setText("Inference Queue")
         else:
             self.sidebar_stack.setCurrentIndex(0)
-            self.sidebar_label.setText("Training Queue")
+            self.sidebar_queue_label.setText("Training Queue")
 
         # Refresh previews when switching to previews tab
         tab_name = self.tabs.tabText(index)
@@ -503,8 +546,8 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             'src_dir': gp(self.src_dir_input),
             'dst_dir': gp(self.dst_dir_input),
             'output_dir': gp(self.model_folder_input),
-            'resolution': int(self.resolution_input.currentText()),
-            'overlap_factor': float(self.overlap_factor_input.currentText()),
+            'resolution': int(self._combo_value(self.resolution_input)),
+            'overlap_factor': float(self._combo_value(self.overlap_factor_input)),
             'color_space': self.color_space_input.currentText(),
         }
         if mask_dir:
@@ -608,8 +651,8 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         sp(self.dst_dir_input, data.get('dst_dir', ''))
         sp(self.mask_dir_input, data.get('mask_dir', ''))
         sp(self.model_folder_input, data.get('output_dir', ''))
-        self.resolution_input.setCurrentText(str(data.get('resolution', 512)))
-        self.overlap_factor_input.setCurrentText(str(data.get('overlap_factor', 0.25)))
+        self._set_combo_by_prefix(self.resolution_input, data.get('resolution', 512))
+        self._set_combo_by_prefix(self.overlap_factor_input, data.get('overlap_factor', 0.25))
         self.color_space_input.setCurrentText(data.get('color_space', 'srgb'))
         sp(self.val_src_dir_input, data.get('val_src_dir', ''))
         sp(self.val_dst_dir_input, data.get('val_dst_dir', ''))
@@ -914,7 +957,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         mask_dir = self._get_path(self.mask_dir_input) or None
         if mask_dir and not os.path.isdir(mask_dir):
             mask_dir = None
-        resolution = int(self.resolution_input.currentText())
+        resolution = int(self._combo_value(self.resolution_input))
         color_space = self.color_space_input.currentText()
 
         # Show a progress dialog (verification can take a while on large datasets)
@@ -1806,7 +1849,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
 
 def apply_dark_theme(app):
     """Apply a cohesive dark theme stylesheet to the application."""
-    # -- Palette --
+    # -- Palette (Spark-inspired purple accent) --
     BG         = "#1b1d23"
     BG_ALT     = "#22252c"
     SURFACE    = "#282b33"
@@ -1816,14 +1859,14 @@ def apply_dark_theme(app):
     TEXT       = "#c8ccd4"
     TEXT_DIM   = "#8b919d"
     TEXT_BRT   = "#e2e5eb"
-    ACCENT     = "#5a9bf6"
-    ACCENT_HI  = "#74aef8"
-    ACCENT_DIM = "#3d6db5"
+    ACCENT     = "#ae69f4"
+    ACCENT_HI  = "#c084fc"
+    ACCENT_DIM = "#5b3a8a"
     GREEN      = "#6bc77a"
     GREEN_DIM  = "#2a553a"
     RED        = "#e86b6b"
     RED_DIM    = "#5a2a2a"
-    BLUE_SOFT  = "#7eb8da"
+    PURPLE_SOFT = "#c9a4f7"
 
     app.setStyleSheet(f"""
         /* -- Global -- */
@@ -1890,6 +1933,39 @@ def apply_dark_theme(app):
             color: {ACCENT};
         }}
 
+        /* -- Collapsible Section Header -- */
+        QPushButton[cssClass="collapse-header"] {{
+            background-color: {SURFACE};
+            color: {ACCENT};
+            border: 1px solid {BORDER};
+            border-radius: 6px 6px 6px 6px;
+            padding: 7px 12px;
+            font-weight: 600;
+            font-size: 10pt;
+            text-align: left;
+        }}
+        QPushButton[cssClass="collapse-header"]:hover {{
+            background-color: {SURFACE_HI};
+            border-color: {ACCENT_DIM};
+        }}
+
+        /* -- Collapsible Section Body -- */
+        QWidget[cssClass="collapse-body"] {{
+            background-color: {SURFACE};
+            border: 1px solid {BORDER};
+            border-top: none;
+            border-radius: 0 0 6px 6px;
+        }}
+
+        /* Section description labels */
+        QLabel[cssClass="section-desc"] {{
+            color: {TEXT_DIM};
+            font-size: 9pt;
+            font-style: italic;
+            padding: 2px 4px 6px 4px;
+            background-color: transparent;
+        }}
+
         /* -- Buttons -- */
         QPushButton {{
             background-color: {SURFACE_HI};
@@ -1939,14 +2015,34 @@ def apply_dark_theme(app):
             background-color: #6b3535;
             border-color: {RED};
         }}
+        QPushButton[cssClass="sidebar-toggle"] {{
+            background-color: {SURFACE};
+            color: {TEXT_DIM};
+            border: 1px solid {BORDER};
+            border-radius: 3px;
+            padding: 0;
+            font-size: 10pt;
+            min-height: 40px;
+        }}
+        QPushButton[cssClass="sidebar-toggle"]:hover {{
+            background-color: {SURFACE_HI};
+            color: {ACCENT};
+            border-color: {ACCENT_DIM};
+        }}
+        QPushButton[cssClass="sidebar-toggle"]:checked {{
+            background-color: {SURFACE};
+            color: {TEXT_DIM};
+            border-color: {BORDER};
+        }}
+
         QPushButton[cssClass="accent"] {{
-            background-color: #253a55;
-            color: {BLUE_SOFT};
-            border-color: #253a55;
+            background-color: #352550;
+            color: {PURPLE_SOFT};
+            border-color: #352550;
         }}
         QPushButton[cssClass="accent"]:hover {{
-            background-color: #2d4a6b;
-            border-color: {BLUE_SOFT};
+            background-color: #45356a;
+            border-color: {PURPLE_SOFT};
         }}
 
         /* -- Inputs -- */

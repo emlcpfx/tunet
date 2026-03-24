@@ -2,8 +2,10 @@ import logging
 import threading
 import yaml
 
-from PySide6.QtWidgets import QScrollArea
-from PySide6.QtCore import Qt, QObject, Signal, QTimer
+from PySide6.QtWidgets import (
+    QScrollArea, QVBoxLayout, QWidget, QLabel, QPushButton,
+)
+from PySide6.QtCore import Qt, QObject, Signal, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QTextCursor
 
 
@@ -101,6 +103,87 @@ class ZoomPanScrollArea(QScrollArea):
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+
+
+class CollapsibleGroupBox(QWidget):
+    """A section with a clickable arrow + title bar that expands/collapses content.
+
+    Uses ▶/▼ arrows instead of a checkbox so it's clear this is a
+    disclosure control, not an on/off toggle.
+
+    Parameters
+    ----------
+    title : str
+        Section heading shown in the title bar.
+    description : str, optional
+        Brief helper text shown below the title when expanded (for beginners).
+    collapsed : bool
+        Whether the section starts collapsed (default True).
+    """
+
+    def __init__(self, title="", description="", collapsed=True, parent=None):
+        super().__init__(parent)
+        self._title = title
+        self._expanded = not collapsed
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 6, 0, 0)
+        outer.setSpacing(0)
+
+        # --- Clickable header row ---
+        self._header = QPushButton(self._header_text())
+        self._header.setProperty("cssClass", "collapse-header")
+        self._header.setCursor(Qt.PointingHandCursor)
+        self._header.clicked.connect(self._toggle)
+        outer.addWidget(self._header)
+
+        # --- Body (description + content), wrapped in a styled frame ---
+        self._body = QWidget()
+        self._body.setProperty("cssClass", "collapse-body")
+        body_layout = QVBoxLayout(self._body)
+        body_layout.setContentsMargins(10, 6, 10, 10)
+        body_layout.setSpacing(4)
+
+        self._desc_label = None
+        if description:
+            self._desc_label = QLabel(description)
+            self._desc_label.setWordWrap(True)
+            self._desc_label.setProperty("cssClass", "section-desc")
+            body_layout.addWidget(self._desc_label)
+
+        self._content = QWidget()
+        self._content_layout = QVBoxLayout(self._content)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.addWidget(self._content)
+
+        outer.addWidget(self._body)
+        self._body.setVisible(self._expanded)
+
+    def _header_text(self):
+        arrow = "\u25BC" if self._expanded else "\u25B6"
+        return f"  {arrow}  {self._title}"
+
+    def _toggle(self):
+        self._expanded = not self._expanded
+        self._body.setVisible(self._expanded)
+        self._header.setText(self._header_text())
+
+    def isExpanded(self):
+        return self._expanded
+
+    def contentLayout(self):
+        """Return the layout where child widgets should be added."""
+        return self._content_layout
+
+    def setContentLayout(self, layout):
+        """Replace the content area's layout."""
+        old = self._content.layout()
+        if old is not None:
+            QWidget().setLayout(old)  # reparent to discard
+        self._content.setLayout(layout)
+
+    def title(self):
+        return self._title
 
 
 class QTextEditLogHandler(logging.Handler):
