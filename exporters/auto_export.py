@@ -50,7 +50,8 @@ def export_flame(model, config, output_dir, epoch, resolution, loss_mode='l1', c
         base_model_cpu.eval()
 
         use_sigmoid = (loss_mode == 'bce+dice')
-        wrapped = NormalizedUNet(base_model_cpu, use_sigmoid=use_sigmoid)
+        color_space = getattr(getattr(config, 'data', None), 'color_space', 'srgb') if config else 'srgb'
+        wrapped = NormalizedUNet(base_model_cpu, use_sigmoid=use_sigmoid, color_space=color_space)
         wrapped.eval()
 
         dummy_input = torch.rand(1, 3, resolution, resolution)
@@ -129,7 +130,8 @@ def export_nuke(model, config, output_dir, epoch, resolution, loss_mode='l1', ck
         base_model_cpu.eval()
 
         use_sigmoid = (loss_mode == 'bce+dice')
-        wrapped = NormalizedUNet(base_model_cpu, use_sigmoid=use_sigmoid)
+        color_space = getattr(getattr(config, 'data', None), 'color_space', 'srgb') if config else 'srgb'
+        wrapped = NormalizedUNet(base_model_cpu, use_sigmoid=use_sigmoid, color_space=color_space)
         wrapped.eval()
 
         scripted = torch.jit.script(wrapped)

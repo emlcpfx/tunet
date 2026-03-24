@@ -9,10 +9,25 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
 from distributed import is_main_process
-from image_io.image_loader import denormalize
+from image_io.image_loader import denormalize, denormalize_linear
 from .context import PreviewContext
 from .loss import diff_heatmap, refine_auto_mask, compute_auto_mask
 from .dataloader_utils import collate_skip_none
+
+
+def _denorm_for_preview(tensor, color_space):
+    """Denormalize and tonemap for JPEG preview display.
+
+    sRGB: standard denormalize to [0,1].
+    Linear: denormalize to linear HDR, then Reinhard tonemap for viewable JPEG.
+    """
+    if color_space == 'linear':
+        linear = denormalize_linear(tensor)
+        if linear is None:
+            return None
+        tonemapped = linear / (1.0 + linear)
+        return tonemapped.clamp(0, 1)
+    return denormalize(tensor)
 
 
 def save_previews(ctx: PreviewContext, fixed_src_batch, fixed_dst_batch,
@@ -48,13 +63,14 @@ def save_previews(ctx: PreviewContext, fixed_src_batch, fixed_dst_batch,
         ctx.model.train()
         return
     ctx.model.train()
-    src_denorm = denormalize(src_select)
+    cs = ctx.color_space
+    src_denorm = _denorm_for_preview(src_select, cs)
     if ctx.use_bce_dice:
         pred_denorm = torch.clamp(pred_select, 0, 1)
-        dst_denorm = torch.clamp(denormalize(dst_select), 0, 1)
+        dst_denorm = torch.clamp(_denorm_for_preview(dst_select, cs), 0, 1)
     else:
-        pred_denorm = denormalize(pred_select)
-        dst_denorm = denormalize(dst_select)
+        pred_denorm = _denorm_for_preview(pred_select, cs)
+        dst_denorm = _denorm_for_preview(dst_select, cs)
     if src_denorm is None or pred_denorm is None or dst_denorm is None:
         return
 
@@ -174,13 +190,14 @@ def save_val_previews(ctx: PreviewContext, fixed_src_batch, fixed_dst_batch):
         ctx.model.train()
         return
     ctx.model.train()
-    src_denorm = denormalize(src_select)
+    cs = ctx.color_space
+    src_denorm = _denorm_for_preview(src_select, cs)
     if ctx.use_bce_dice:
         pred_denorm = torch.clamp(pred_select, 0, 1)
-        dst_denorm = torch.clamp(denormalize(dst_select), 0, 1) if has_dst else None
+        dst_denorm = torch.clamp(_denorm_for_preview(dst_select, cs), 0, 1) if has_dst else None
     else:
-        pred_denorm = denormalize(pred_select)
-        dst_denorm = denormalize(dst_select) if has_dst else None
+        pred_denorm = _denorm_for_preview(pred_select, cs)
+        dst_denorm = _denorm_for_preview(dst_select, cs) if has_dst else None
     if src_denorm is None or pred_denorm is None:
         return
     auto_mask_vis = None

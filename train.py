@@ -39,7 +39,9 @@ from albumentations.pytorch import ToTensorV2
 # --- Extracted module imports ---
 from distributed import setup_ddp, cleanup_ddp, get_rank, get_world_size, is_main_process, CURRENT_OS
 from models import create_model, UNet, MSRNet
-from image_io import load_image_any_format, load_mask_image, load_exr_full_frame, NORM_MEAN, NORM_STD, denormalize
+from image_io import (load_image_any_format, load_image_linear, load_mask_image,
+                      load_exr_full_frame, NORM_MEAN, NORM_STD, denormalize,
+                      denormalize_linear, linear_to_log, log_to_linear)
 from config import config_to_dict, dict_to_sns, merge_configs
 from training.loss import dice_loss, diff_heatmap, refine_auto_mask, compute_auto_mask
 from training.context import PreviewContext
@@ -108,9 +110,12 @@ def create_augmentations(augmentation_list, has_mask=False, use_auto_mask=False)
 class AugmentedImagePairSlicingDataset(Dataset):
     def __init__(self, src_dir, dst_dir, resolution, overlap_factor=0.0,
                  src_transforms=None, dst_transforms=None, shared_transforms=None,
-                 final_transform=None, mask_dir=None, use_auto_mask=False, skip_empty_patches=False, skip_empty_threshold=1.0):
+                 final_transform=None, mask_dir=None, use_auto_mask=False, skip_empty_patches=False, skip_empty_threshold=1.0,
+                 color_space='srgb'):
         self.src_dir = os.path.abspath(src_dir)
         self.dst_dir = os.path.abspath(dst_dir)
+        self.color_space = color_space
+        self.is_linear = color_space == 'linear'
         if not os.path.isdir(self.src_dir): raise FileNotFoundError(f"Src dir not found: {self.src_dir}")
         if not os.path.isdir(self.dst_dir): raise FileNotFoundError(f"Dst dir not found: {self.dst_dir}")
         self.mask_dir = os.path.abspath(mask_dir) if mask_dir else None
@@ -145,17 +150,25 @@ class AugmentedImagePairSlicingDataset(Dataset):
                     if os.path.exists(candidate): mask_path = candidate; break
                 if mask_path is None: self.skipped_count += 1; self.skipped_file_reasons.append((src_path, "Mask missing")); continue
             try:
-                img_s = load_image_any_format(src_path); img_d = load_image_any_format(dst_path)
-                w_s, h_s = img_s.size; w_d, h_d = img_d.size
-                if (w_s, h_s) != (w_d, h_d): img_s.close(); img_d.close(); self.skipped_count += 1; self.skipped_file_reasons.append((src_path, f"Dims mismatch: src={w_s}x{h_s} dst={w_d}x{h_d}")); continue
-                if w_s < resolution or h_s < resolution: img_s.close(); img_d.close(); self.skipped_count += 1; self.skipped_file_reasons.append((src_path, f"Too small ({w_s}x{h_s} < {resolution})")); continue
-                # Pre-compute per-pixel diff map for empty patch filtering
-                diff_map = None
-                if self.skip_empty_patches:
-                    src_np = np.array(img_s).astype(np.float32)
-                    dst_np = np.array(img_d).astype(np.float32)
-                    diff_map = np.abs(src_np - dst_np).mean(axis=2)  # (H, W) in [0, 255]
-                img_s.close(); img_d.close()
+                if self.is_linear:
+                    img_s_np = load_image_linear(src_path); img_d_np = load_image_linear(dst_path)
+                    h_s, w_s = img_s_np.shape[:2]; h_d, w_d = img_d_np.shape[:2]
+                    if (w_s, h_s) != (w_d, h_d): self.skipped_count += 1; self.skipped_file_reasons.append((src_path, f"Dims mismatch: src={w_s}x{h_s} dst={w_d}x{h_d}")); continue
+                    if w_s < resolution or h_s < resolution: self.skipped_count += 1; self.skipped_file_reasons.append((src_path, f"Too small ({w_s}x{h_s} < {resolution})")); continue
+                    diff_map = None
+                    if self.skip_empty_patches:
+                        diff_map = np.abs(linear_to_log(img_s_np) - linear_to_log(img_d_np)).mean(axis=2) * 255.0  # scale to match srgb range
+                else:
+                    img_s = load_image_any_format(src_path); img_d = load_image_any_format(dst_path)
+                    w_s, h_s = img_s.size; w_d, h_d = img_d.size
+                    if (w_s, h_s) != (w_d, h_d): img_s.close(); img_d.close(); self.skipped_count += 1; self.skipped_file_reasons.append((src_path, f"Dims mismatch: src={w_s}x{h_s} dst={w_d}x{h_d}")); continue
+                    if w_s < resolution or h_s < resolution: img_s.close(); img_d.close(); self.skipped_count += 1; self.skipped_file_reasons.append((src_path, f"Too small ({w_s}x{h_s} < {resolution})")); continue
+                    diff_map = None
+                    if self.skip_empty_patches:
+                        src_np = np.array(img_s).astype(np.float32)
+                        dst_np = np.array(img_d).astype(np.float32)
+                        diff_map = np.abs(src_np - dst_np).mean(axis=2)  # (H, W) in [0, 255]
+                    img_s.close(); img_d.close()
                 num_slices_for_file = 0
                 y_coords = list(range(0, max(0, h_s - resolution) + 1, self.stride)); x_coords = list(range(0, max(0, w_s - resolution) + 1, self.stride))
                 if (h_s > resolution) and ((h_s - resolution) % self.stride != 0): y_coords.append(h_s - resolution)
@@ -225,7 +238,11 @@ class AugmentedImagePairSlicingDataset(Dataset):
     def __getitem__(self, idx):
         try: info = self.slice_info[idx]; src_path, dst_path, crop_box = info['src_path'], info['dst_path'], info['crop_box']
         except IndexError: logging.error(f"Index {idx} out of bounds for slice_info (len {len(self.slice_info)})."); return None
-        try: src_img = load_image_any_format(src_path); dst_img = load_image_any_format(dst_path)
+        try:
+            if self.is_linear:
+                src_img_np = load_image_linear(src_path); dst_img_np = load_image_linear(dst_path)
+            else:
+                src_img = load_image_any_format(src_path); dst_img = load_image_any_format(dst_path)
         except Exception as load_e: logging.error(f"Item {idx}: Img load error ({os.path.basename(src_path)}): {load_e}"); return None
         # Load mask if configured
         mask_slice = None
@@ -235,21 +252,20 @@ class AugmentedImagePairSlicingDataset(Dataset):
             x1, y1, x2, y2 = crop_box
             mask_slice = mask_full[y1:y2, x1:x2]
         try:
-            src_slice_pil = src_img.crop(crop_box); dst_slice_pil = dst_img.crop(crop_box)
-            src_img.close(); dst_img.close()
-            use_numpy = isinstance(self.shared_transforms, A.Compose) or isinstance(self.src_transforms, A.Compose) or isinstance(self.dst_transforms, A.Compose)
-            if use_numpy: src_slice_current, dst_slice_current = np.array(src_slice_pil), np.array(dst_slice_pil)
-            else: src_slice_current, dst_slice_current = src_slice_pil, dst_slice_pil
+            if self.is_linear:
+                # --- Linear float32 path ---
+                x1, y1, x2, y2 = crop_box
+                src_slice_current = src_img_np[y1:y2, x1:x2].copy()
+                dst_slice_current = dst_img_np[y1:y2, x1:x2].copy()
 
-            # Compute auto-mask raw diff BEFORE augmentation (no border artifacts)
-            auto_mask_slice = None
-            if self.use_auto_mask:
-                src_np = src_slice_current if use_numpy else np.array(src_slice_current)
-                dst_np = dst_slice_current if use_numpy else np.array(dst_slice_current)
-                auto_mask_slice = np.abs(src_np.astype(np.float32) - dst_np.astype(np.float32)).mean(axis=2) / 255.0
+                # Auto-mask in log-space before augmentation
+                auto_mask_slice = None
+                if self.use_auto_mask:
+                    auto_mask_slice = np.abs(linear_to_log(src_slice_current) - linear_to_log(dst_slice_current)).mean(axis=2)
+                    auto_mask_slice = np.clip(auto_mask_slice / 2.0, 0, 1)  # log1p(10)~2.4, so /2 normalizes
 
-            if self.shared_transforms:
-                if isinstance(self.shared_transforms, A.Compose):
+                # Geometric augmentations work on float32 numpy directly
+                if self.shared_transforms and isinstance(self.shared_transforms, A.Compose):
                     aug_kwargs = {'image': src_slice_current, 'mask': dst_slice_current}
                     if mask_slice is not None: aug_kwargs['loss_mask'] = mask_slice
                     if auto_mask_slice is not None: aug_kwargs['auto_mask'] = auto_mask_slice
@@ -257,22 +273,54 @@ class AugmentedImagePairSlicingDataset(Dataset):
                     src_slice_current, dst_slice_current = aug['image'], aug['mask']
                     if mask_slice is not None: mask_slice = aug['loss_mask']
                     if auto_mask_slice is not None: auto_mask_slice = aug['auto_mask']
-                elif isinstance(self.shared_transforms, T.Compose): seed = random.randint(0, 2**32-1); torch.manual_seed(seed); random.seed(seed); src_slice_current = self.shared_transforms(src_slice_current); torch.manual_seed(seed); random.seed(seed); dst_slice_current = self.shared_transforms(dst_slice_current)
-            if self.src_transforms:
-                if isinstance(self.src_transforms, A.Compose): src_slice_current = self.src_transforms(image=src_slice_current)['image']
-                elif isinstance(self.src_transforms, T.Compose): src_slice_current = self.src_transforms(src_slice_current)
-            if self.dst_transforms:
-                if isinstance(self.dst_transforms, A.Compose): dst_slice_current = self.dst_transforms(image=dst_slice_current)['image']
-                elif isinstance(self.dst_transforms, T.Compose): dst_slice_current = self.dst_transforms(dst_slice_current)
 
-            if self.final_transform:
-                if use_numpy: src_final_input, dst_final_input = Image.fromarray(src_slice_current), Image.fromarray(dst_slice_current)
-                else: src_final_input, dst_final_input = src_slice_current, dst_slice_current
-                src_tensor, dst_tensor = self.final_transform(src_final_input), self.final_transform(dst_final_input)
+                # Apply log1p encoding then normalize to [-1,1]
+                src_log = np.log1p(np.clip(src_slice_current, 0.0, None))
+                dst_log = np.log1p(np.clip(dst_slice_current, 0.0, None))
+                src_tensor = torch.from_numpy(src_log.transpose(2, 0, 1)).float()
+                dst_tensor = torch.from_numpy(dst_log.transpose(2, 0, 1)).float()
+                norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist())
+                src_tensor, dst_tensor = norm(src_tensor), norm(dst_tensor)
             else:
-                if not use_numpy: src_slice_current, dst_slice_current = np.array(src_slice_current), np.array(dst_slice_current)
-                src_tensor = torch.from_numpy(src_slice_current.transpose(2, 0, 1)).float() / 255.0; dst_tensor = torch.from_numpy(dst_slice_current.transpose(2, 0, 1)).float() / 255.0
-                norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist()); src_tensor, dst_tensor = norm(src_tensor), norm(dst_tensor)
+                # --- sRGB uint8 path (original) ---
+                src_slice_pil = src_img.crop(crop_box); dst_slice_pil = dst_img.crop(crop_box)
+                src_img.close(); dst_img.close()
+                use_numpy = isinstance(self.shared_transforms, A.Compose) or isinstance(self.src_transforms, A.Compose) or isinstance(self.dst_transforms, A.Compose)
+                if use_numpy: src_slice_current, dst_slice_current = np.array(src_slice_pil), np.array(dst_slice_pil)
+                else: src_slice_current, dst_slice_current = src_slice_pil, dst_slice_pil
+
+                # Compute auto-mask raw diff BEFORE augmentation (no border artifacts)
+                auto_mask_slice = None
+                if self.use_auto_mask:
+                    src_np = src_slice_current if use_numpy else np.array(src_slice_current)
+                    dst_np = dst_slice_current if use_numpy else np.array(dst_slice_current)
+                    auto_mask_slice = np.abs(src_np.astype(np.float32) - dst_np.astype(np.float32)).mean(axis=2) / 255.0
+
+                if self.shared_transforms:
+                    if isinstance(self.shared_transforms, A.Compose):
+                        aug_kwargs = {'image': src_slice_current, 'mask': dst_slice_current}
+                        if mask_slice is not None: aug_kwargs['loss_mask'] = mask_slice
+                        if auto_mask_slice is not None: aug_kwargs['auto_mask'] = auto_mask_slice
+                        aug = self.shared_transforms(**aug_kwargs)
+                        src_slice_current, dst_slice_current = aug['image'], aug['mask']
+                        if mask_slice is not None: mask_slice = aug['loss_mask']
+                        if auto_mask_slice is not None: auto_mask_slice = aug['auto_mask']
+                    elif isinstance(self.shared_transforms, T.Compose): seed = random.randint(0, 2**32-1); torch.manual_seed(seed); random.seed(seed); src_slice_current = self.shared_transforms(src_slice_current); torch.manual_seed(seed); random.seed(seed); dst_slice_current = self.shared_transforms(dst_slice_current)
+                if self.src_transforms:
+                    if isinstance(self.src_transforms, A.Compose): src_slice_current = self.src_transforms(image=src_slice_current)['image']
+                    elif isinstance(self.src_transforms, T.Compose): src_slice_current = self.src_transforms(src_slice_current)
+                if self.dst_transforms:
+                    if isinstance(self.dst_transforms, A.Compose): dst_slice_current = self.dst_transforms(image=dst_slice_current)['image']
+                    elif isinstance(self.dst_transforms, T.Compose): dst_slice_current = self.dst_transforms(dst_slice_current)
+
+                if self.final_transform:
+                    if use_numpy: src_final_input, dst_final_input = Image.fromarray(src_slice_current), Image.fromarray(dst_slice_current)
+                    else: src_final_input, dst_final_input = src_slice_current, dst_slice_current
+                    src_tensor, dst_tensor = self.final_transform(src_final_input), self.final_transform(dst_final_input)
+                else:
+                    if not use_numpy: src_slice_current, dst_slice_current = np.array(src_slice_current), np.array(dst_slice_current)
+                    src_tensor = torch.from_numpy(src_slice_current.transpose(2, 0, 1)).float() / 255.0; dst_tensor = torch.from_numpy(dst_slice_current.transpose(2, 0, 1)).float() / 255.0
+                    norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist()); src_tensor, dst_tensor = norm(src_tensor), norm(dst_tensor)
             # Convert mask to tensor (1, H, W) in [0,1] - no normalization
             if mask_slice is not None:
                 mask_tensor = torch.from_numpy(np.ascontiguousarray(mask_slice)).unsqueeze(0).float()
@@ -289,14 +337,18 @@ class AugmentedImagePairSlicingDataset(Dataset):
 # --- Source-Only Dataset (for val preview without dst) ---
 class SourceOnlySlicingDataset(Dataset):
     """Loads source images only. For validation preview when no dst is available."""
-    def __init__(self, src_dir, resolution, overlap_factor=0.0, final_transform=None):
+    def __init__(self, src_dir, resolution, overlap_factor=0.0, final_transform=None, color_space='srgb'):
         self.src_dir = os.path.abspath(src_dir); self.resolution = resolution; self.final_transform = final_transform
+        self.color_space = color_space; self.is_linear = color_space == 'linear'
         self.slice_info = []
         overlap_pixels = int(resolution * overlap_factor); self.stride = max(1, resolution - overlap_pixels)
         src_files = sorted(glob.glob(os.path.join(self.src_dir, '*.*')))
         for src_path in src_files:
             try:
-                img = load_image_any_format(src_path); w, h = img.size; img.close()
+                if self.is_linear:
+                    img_np = load_image_linear(src_path); h, w = img_np.shape[:2]
+                else:
+                    img = load_image_any_format(src_path); w, h = img.size; img.close()
                 if w < resolution or h < resolution:
                     self.slice_info.append({'src_path': src_path, 'crop_box': None})
                     continue
@@ -316,13 +368,25 @@ class SourceOnlySlicingDataset(Dataset):
     def __getitem__(self, idx):
         info = self.slice_info[idx]
         try:
-            src_img = load_image_any_format(info['src_path'])
-            if info['crop_box'] is not None: src_slice = src_img.crop(info['crop_box'])
-            else: src_slice = src_img.resize((self.resolution, self.resolution), Image.LANCZOS)
-            src_img.close()
-            if self.final_transform: src_tensor = self.final_transform(src_slice)
-            else: src_np = np.array(src_slice); src_tensor = torch.from_numpy(src_np.transpose(2, 0, 1)).float() / 255.0; norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist()); src_tensor = norm(src_tensor)
-            return src_tensor
+            if self.is_linear:
+                src_np = load_image_linear(info['src_path'])
+                if info['crop_box'] is not None:
+                    x1, y1, x2, y2 = info['crop_box']
+                    src_slice_np = src_np[y1:y2, x1:x2]
+                else:
+                    src_slice_np = cv2.resize(src_np, (self.resolution, self.resolution), interpolation=cv2.INTER_LANCZOS4)
+                src_log = np.log1p(np.clip(src_slice_np, 0.0, None))
+                src_tensor = torch.from_numpy(src_log.transpose(2, 0, 1)).float()
+                norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist())
+                return norm(src_tensor)
+            else:
+                src_img = load_image_any_format(info['src_path'])
+                if info['crop_box'] is not None: src_slice = src_img.crop(info['crop_box'])
+                else: src_slice = src_img.resize((self.resolution, self.resolution), Image.LANCZOS)
+                src_img.close()
+                if self.final_transform: src_tensor = self.final_transform(src_slice)
+                else: src_np = np.array(src_slice); src_tensor = torch.from_numpy(src_np.transpose(2, 0, 1)).float() / 255.0; norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist()); src_tensor = norm(src_tensor)
+                return src_tensor
         except Exception as e: logging.error(f"SrcOnly item {idx} error: {e}"); return None
 
 # --- Signal Handler ---
@@ -424,12 +488,14 @@ def _build_datasets(config, src_transforms, dst_transforms, shared_transforms, s
     Returns (dataset, dataloader, dataloader_iter, val_dataloader, val_dataset, has_val_preview, has_val_loss).
     Raises on fatal errors.
     """
+    color_space = getattr(config.data, 'color_space', 'srgb')
     dataset = AugmentedImagePairSlicingDataset(
         config.data.src_dir, config.data.dst_dir, config.data.resolution,
         config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms,
         standard_transform, mask_dir=config.data.mask_dir if use_masks else None,
         use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty,
-        skip_empty_threshold=config.mask.skip_empty_threshold)
+        skip_empty_threshold=config.mask.skip_empty_threshold,
+        color_space=color_space)
     if is_main_process():
         logging.info(f"Dataset Size: {len(dataset)} slices.")
         global_bs = config.training.batch_size * world_size
@@ -459,7 +525,8 @@ def _build_datasets(config, src_transforms, dst_transforms, shared_transforms, s
         try:
             val_dataset = AugmentedImagePairSlicingDataset(
                 config.data.val_src_dir, config.data.val_dst_dir, config.data.resolution,
-                config.data.overlap_factor, None, None, None, standard_transform)
+                config.data.overlap_factor, None, None, None, standard_transform,
+                color_space=color_space)
             logging.info(f"Validation Dataset Size: {len(val_dataset)} slices.")
             val_dataloader = DataLoader(
                 val_dataset, batch_size=config.training.batch_size, shuffle=False,
@@ -784,7 +851,10 @@ def train(config):
     _setup_logging(config, rank, device, world_size)
 
     # --- Standard Transform ---
-    standard_transform = T.Compose([ T.ToTensor(), T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist()) ])
+    color_space = getattr(config.data, 'color_space', 'srgb')
+    is_linear = color_space == 'linear'
+    # In linear mode, final_transform is None — the dataset handles log1p + normalize internally
+    standard_transform = None if is_linear else T.Compose([ T.ToTensor(), T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist()) ])
 
     # --- Create Augmentation Pipelines ---
     use_auto_mask = config.mask.use_auto_mask
@@ -953,7 +1023,7 @@ def train(config):
             if current_training_res != config.data.resolution:
                 if is_main_process(): logging.info(f"Progressive: starting at {current_training_res}px resolution")
                 try:
-                    dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, current_training_res, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold)
+                    dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, current_training_res, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold, color_space=color_space)
                     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
                     pin = True if device_type == 'cuda' else False; persist = True if config.dataloader.num_workers > 0 else False
                     prefetch = config.dataloader.prefetch_factor if config.dataloader.num_workers > 0 else None
@@ -996,7 +1066,7 @@ def train(config):
                         current_training_res = target_res
                         if is_main_process(): logging.info(f"Progressive: switching to {current_training_res}px resolution")
                         try:
-                            dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, current_training_res, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold)
+                            dataset = AugmentedImagePairSlicingDataset(config.data.src_dir, config.data.dst_dir, current_training_res, config.data.overlap_factor, src_transforms, dst_transforms, shared_transforms, standard_transform, mask_dir=config.data.mask_dir if use_masks else None, use_auto_mask=use_auto_mask, skip_empty_patches=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold, color_space=color_space)
                             sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
                             pin = True if device_type == 'cuda' else False; persist = True if config.dataloader.num_workers > 0 else False
                             prefetch = config.dataloader.prefetch_factor if config.dataloader.num_workers > 0 else None
@@ -1089,7 +1159,7 @@ def train(config):
                      elif fixed_src is None: logging.warning(f"S{global_step}: Preview refresh failed (no initial).")
                      else: logging.warning(f"S{global_step}: Preview refresh failed, using old.")
                 if fixed_src is not None:
-                    preview_ctx = PreviewContext(model=model, output_dir=config.data.output_dir, device=device, current_epoch=current_ep_idx, global_step=global_step, preview_save_count=preview_count, preview_refresh_rate=config.logging.preview_refresh_rate, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, auto_mask_gamma=config.mask.auto_mask_gamma, diff_amplify=float(config.logging.diff_amplify))
+                    preview_ctx = PreviewContext(model=model, output_dir=config.data.output_dir, device=device, current_epoch=current_ep_idx, global_step=global_step, preview_save_count=preview_count, preview_refresh_rate=config.logging.preview_refresh_rate, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, auto_mask_gamma=config.mask.auto_mask_gamma, diff_amplify=float(config.logging.diff_amplify), color_space=color_space)
                     save_previews(preview_ctx, fixed_src, fixed_dst, fixed_mask_batch=fixed_mask, fixed_auto_mask_batch=fixed_auto_mask); preview_count += 1
                 elif preview_count == 0: logging.warning(f"S{global_step}: Skipping preview (no batch).")
 
@@ -1143,7 +1213,7 @@ def train(config):
                     new_val_src, new_val_dst = capture_val_preview_batch(config, standard_transform, use_auto_mask=use_auto_mask, skip_empty=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold)
                     if new_val_src is not None: val_fixed_src, val_fixed_dst = new_val_src, new_val_dst
                     else: logging.warning(f"S{global_step}: Val preview refresh failed, using old.")
-                val_ctx = PreviewContext(model=model, output_dir=config.data.output_dir, device=device, current_epoch=current_ep_idx, global_step=global_step, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, diff_amplify=float(config.logging.diff_amplify))
+                val_ctx = PreviewContext(model=model, output_dir=config.data.output_dir, device=device, current_epoch=current_ep_idx, global_step=global_step, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, diff_amplify=float(config.logging.diff_amplify), color_space=color_space)
                 save_val_previews(val_ctx, val_fixed_src, val_fixed_dst); val_preview_count += 1
 
             # --- LR Scheduler: ReduceLROnPlateau steps at epoch end ---

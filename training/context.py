@@ -20,3 +20,4 @@ class PreviewContext:
     use_auto_mask: bool = False
     auto_mask_gamma: float = 1.0
     diff_amplify: float = 5.0
+    color_space: str = 'srgb'

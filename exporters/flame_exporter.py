@@ -143,8 +143,9 @@ def load_model_for_export(checkpoint_path, device):
 
     # --- Instantiate the WRAPPER ---
     use_sigmoid = (loss_mode == 'bce+dice')
-    logging.info(f"Wrapping UNet model with Normalization layer (use_sigmoid={use_sigmoid})...")
-    wrapped_model = NormalizedUNet(base_model, use_sigmoid=use_sigmoid)
+    color_space = getattr(data_config, 'color_space', 'srgb')
+    logging.info(f"Wrapping UNet model with Normalization layer (use_sigmoid={use_sigmoid}, color_space={color_space})...")
+    wrapped_model = NormalizedUNet(base_model, use_sigmoid=use_sigmoid, color_space=color_space)
     logging.info(f"Moving wrapped model to device: {device}")
     wrapped_model.to(device)
     wrapped_model.eval()
