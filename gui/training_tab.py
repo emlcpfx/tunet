@@ -12,6 +12,18 @@ class TrainingTabMixin:
         if preset_name == "Custom":
             return
         presets = {
+            "General (Image-to-Image)": {
+                "model_type": "msrn",
+                "model_size_dims": "64",
+                "resolution": "512",
+                "overlap_factor": "0.5",
+                "loss": "l1",
+                "lambda_lpips": 0.0,
+                "lr": 1e-4,
+                "use_auto_mask": False,
+                "skip_empty_patches": False,
+                "progressive_resolution": False,
+            },
             "Beauty / Paint Fix": {
                 "model_type": "msrn",
                 "model_size_dims": "64",
@@ -70,7 +82,7 @@ class TrainingTabMixin:
         grp_preset = QGroupBox("Preset")
         form_preset = QFormLayout(grp_preset)
         self.preset_input = QComboBox()
-        self.preset_input.addItems(["Custom", "Beauty / Paint Fix", "Roto / Matte"])
+        self.preset_input.addItems(["Custom", "General (Image-to-Image)", "Beauty / Paint Fix", "Roto / Matte"])
         self.preset_input.setToolTip(
             "Quick-start presets that configure model, loss, and patch settings.\n"
             "Select a preset then adjust individual settings as needed.\n"
@@ -124,12 +136,18 @@ class TrainingTabMixin:
         form_opt.addRow("Learning Rate:", self.lr_input)
 
         self.loss_input = QComboBox()
-        self.loss_input.addItems(["l1", "l1+lpips", "weighted", "bce+dice"])
+        self.loss_input.addItems(["l1", "l2", "l1+lpips", "weighted", "bce+dice"])
         self.loss_input.setToolTip(
-            "'l1' = pixel-level absolute difference (sharp, stable).\n"
-            "'l1+lpips' = pixel + perceptual similarity (better textures).\n"
-            "'weighted' = custom mix of L1 + L2 + LPIPS with individual weight sliders.\n"
-            "'bce+dice' = for binary mask/segmentation outputs.")
+            "'l1' \u2014 Pixel difference. Sharp, stable. Best general-purpose choice "
+            "for relighting, color matching, cleanup.\n"
+            "'l2' \u2014 Squared pixel difference. Smoother results, can blur fine detail. "
+            "Rarely preferred over L1 for VFX work.\n"
+            "'l1+lpips' \u2014 Pixel + perceptual similarity. Uses a neural net to judge "
+            "if textures/detail look right. Best for faces, skin, hair.\n"
+            "'weighted' \u2014 Custom mix of L1 + L2 + LPIPS with individual weight sliders. "
+            "For advanced users who want manual control.\n"
+            "'bce+dice' \u2014 For mask/matte outputs only. Handles foreground vs background "
+            "imbalance. Use this when your target is a black & white mask.")
         form_opt.addRow("Loss Function:", self.loss_input)
 
         self.lambda_lpips_input = QComboBox()
@@ -223,7 +241,15 @@ class TrainingTabMixin:
         self.batch_size_input.setToolTip(
             "Patches per training step. Larger = more stable gradients but more VRAM. "
             "Reduce to 2 if you get out-of-memory errors.")
-        form_sched.addRow("Batch Size (per GPU):", self.batch_size_input)
+        self.auto_batch_check = QCheckBox("Auto")
+        self.auto_batch_check.setToolTip(
+            "Automatically calculate batch size from available GPU memory.\n"
+            "Probes VRAM at training start and picks the largest safe batch size.")
+        self.auto_batch_check.toggled.connect(self.batch_size_input.setDisabled)
+        batch_row = QHBoxLayout()
+        batch_row.addWidget(self.batch_size_input)
+        batch_row.addWidget(self.auto_batch_check)
+        form_sched.addRow("Batch Size (per GPU):", batch_row)
 
         self.iter_per_epoch_input = QSpinBox(minimum=1, maximum=10000, value=500)
         self.iter_per_epoch_input.setToolTip(
