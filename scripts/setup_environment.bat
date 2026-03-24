@@ -1,4 +1,7 @@
 @echo off
+REM Always run from project root (one level up from this script)
+cd /d "%~dp0.."
+
 echo ============================================
 echo TuNet Environment Setup
 echo ============================================

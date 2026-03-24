@@ -5,7 +5,7 @@
 # Builds a --onedir distribution with CUDA/cuDNN support for GPU training.
 # Entry point: tunet_main.py (dispatcher that routes to sub-scripts)
 #
-# Build with:  conda run -n tunet pyinstaller tunet.spec
+# Build with:  conda run -n tunet pyinstaller scripts/tunet.spec
 # ==============================================================================
 
 import os

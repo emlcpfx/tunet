@@ -13,20 +13,20 @@ Quick setup instructions for getting TuNet running on Windows, Linux, and macOS.
 ### Option 1: Automated Setup (Recommended)
 
 **Windows:**
-Simply double-click `setup_environment.bat` and it will:
+Simply double-click `scripts\setup_environment.bat` and it will:
 1. Create a conda environment named "tunet"
 2. Install all required dependencies
 3. Show you the activation command
 
 ```batch
-setup_environment.bat
+scripts\setup_environment.bat
 ```
 
 **Linux/macOS:**
 Run the shell script:
 ```bash
-chmod +x setup_environment.sh
-./setup_environment.sh
+chmod +x scripts/setup_environment.sh
+./scripts/setup_environment.sh
 ```
 
 ### Option 2: Manual Setup
