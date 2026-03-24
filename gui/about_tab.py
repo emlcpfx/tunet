@@ -13,7 +13,7 @@ class AboutTabMixin:
 
         # --- Original project credit ---
         orig_title = QLabel("TuNet")
-        orig_title.setStyleSheet("font-size: 22pt; font-weight: bold; color: #5a9bf6;")
+        orig_title.setStyleSheet("font-size: 22pt; font-weight: bold; color: #ae69f4;")
         orig_title.setAlignment(Qt.AlignCenter)
         orig_author = QLabel("Created by tpo.comp")
         orig_author.setStyleSheet("font-size: 12pt; color: #8b919d;")
