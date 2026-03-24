@@ -77,8 +77,17 @@ class DataTabMixin:
         self.overlap_factor_input.setToolTip(
             "How much neighboring patches overlap. Higher = more training patches but slower epochs. "
             "0.25 is a good balance.")
+        self.color_space_input = QComboBox()
+        self.color_space_input.addItems(["srgb", "linear"])
+        self.color_space_input.setCurrentText("srgb")
+        self.color_space_input.setToolTip(
+            "Color space of your source/target images.\n"
+            "'srgb': Standard 8-bit images (PNG, JPEG, TIFF).\n"
+            "'linear': Scene-linear 32-bit float (EXR). Preserves HDR values.\n"
+            "Must match your source data format.")
         form_patch.addRow("Resolution:", self.resolution_input)
         form_patch.addRow("Overlap Factor:", self.overlap_factor_input)
+        form_patch.addRow("Color Space:", self.color_space_input)
         layout.addWidget(grp_patch)
 
         # --- Mask Behavior ---

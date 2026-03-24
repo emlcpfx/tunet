@@ -22,7 +22,8 @@ from torch.amp import autocast
 # --- Imports from extracted modules ---
 from models import create_model
 from config import dict_to_namespace
-from image_io import load_image_any_format, load_mask_image, denormalize, NORM_MEAN, NORM_STD
+from image_io import (load_image_any_format, load_image_linear, load_mask_image,
+                      denormalize, denormalize_linear, save_exr, NORM_MEAN, NORM_STD)
 from inference_config import InferenceConfig
 
 # --- Updated load_model_and_config ---
@@ -108,7 +109,14 @@ def load_model_and_config(checkpoint_path, device):
     model.eval()
     logging.info("Model loaded successfully and set to evaluation mode.")
 
-    return model, resolution, use_mask_input, loss_mode
+    # Extract color_space from checkpoint config
+    color_space = 'srgb'
+    if is_new_format:
+        color_space = getattr(getattr(config_source, 'data', SimpleNamespace()), 'color_space', 'srgb')
+    if color_space == 'linear':
+        logging.info("Model trained in linear (scene-linear) color space — will use log-space encoding.")
+
+    return model, resolution, use_mask_input, loss_mode, color_space
 
 # --- create_blend_mask ---
 # ... (remains the same) ...
@@ -121,19 +129,28 @@ def create_blend_mask(resolution, device):
 # ... (process_image remains the same) ...
 def process_image(model, image_path, output_path, cfg: InferenceConfig, transform, denormalize_fn, mask_path=None, src_image=None):
     logging.info(f"Processing: {os.path.basename(image_path)}")
+    is_linear = cfg.color_space == 'linear'
     start_time = time.time()
     try:
-        img = src_image if src_image is not None else load_image_any_format(image_path)
-        orig_width, orig_height = img.size
-
-        # Downscale to half resolution if requested
-        if cfg.half_res:
-            img_width = orig_width // 2
-            img_height = orig_height // 2
-            img = img.resize((img_width, img_height), Image.LANCZOS)
-            logging.info(f"Half-res mode: {orig_width}x{orig_height} -> {img_width}x{img_height}")
+        if is_linear:
+            img_np = load_image_linear(image_path) if src_image is None else src_image
+            orig_height, orig_width = img_np.shape[:2]
+            if cfg.half_res:
+                img_width, img_height = orig_width // 2, orig_height // 2
+                img_np = cv2.resize(img_np, (img_width, img_height), interpolation=cv2.INTER_LINEAR)
+                logging.info(f"Half-res mode: {orig_width}x{orig_height} -> {img_width}x{img_height}")
+            else:
+                img_width, img_height = orig_width, orig_height
         else:
-            img_width, img_height = orig_width, orig_height
+            img = src_image if src_image is not None else load_image_any_format(image_path)
+            orig_width, orig_height = img.size
+            if cfg.half_res:
+                img_width = orig_width // 2
+                img_height = orig_height // 2
+                img = img.resize((img_width, img_height), Image.LANCZOS)
+                logging.info(f"Half-res mode: {orig_width}x{orig_height} -> {img_width}x{img_height}")
+            else:
+                img_width, img_height = orig_width, orig_height
 
         if img_width < cfg.resolution or img_height < cfg.resolution:
             logging.warning(f"Image smaller than resolution {cfg.resolution}. Skipping.")
@@ -170,11 +187,21 @@ def process_image(model, image_path, output_path, cfg: InferenceConfig, transfor
     blend_mask_cpu = blend_mask.cpu()[0]
     processed_count = 0
     device_type = cfg.device.type
+    norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist())
     with torch.no_grad():
         for i in range(0, num_slices, cfg.batch_size):
             batch_coords = slice_coords[i:min(i + cfg.batch_size, num_slices)]
-            batch_src_list = [img.crop(coords) for coords in batch_coords]
-            batch_src_tensor_list = [transform(src_pil) for src_pil in batch_src_list]
+            if is_linear:
+                batch_src_tensor_list = []
+                for coords in batch_coords:
+                    x, y, x2, y2 = coords
+                    tile_np = img_np[y:y2, x:x2]
+                    tile_log = np.log1p(np.clip(tile_np, 0.0, None))
+                    tile_t = torch.from_numpy(tile_log.transpose(2, 0, 1)).float()
+                    batch_src_tensor_list.append(norm(tile_t))
+            else:
+                batch_src_list = [img.crop(coords) for coords in batch_coords]
+                batch_src_tensor_list = [transform(src_pil) for src_pil in batch_src_list]
             batch_src_tensor = torch.stack(batch_src_tensor_list).to(cfg.device, non_blocking=True)
             # Concatenate mask as 4th channel if needed
             if cfg.use_mask_input and mask_full is not None:
@@ -205,9 +232,14 @@ def process_image(model, image_path, output_path, cfg: InferenceConfig, transfor
     weight_map_cpu = torch.clamp(weight_map_cpu, min=1e-8)
     final_image_tensor = output_canvas_cpu / weight_map_cpu
     try:
-        final_pil_image = to_pil_image(torch.clamp(final_image_tensor[0], 0, 1))
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        final_pil_image.save(output_path)
+        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
+        if is_linear:
+            final_np = final_image_tensor[0].permute(1, 2, 0).numpy()
+            final_np = np.clip(final_np, 0.0, None)  # no upper clamp for HDR
+            save_exr(final_np, output_path)
+        else:
+            final_pil_image = to_pil_image(torch.clamp(final_image_tensor[0], 0, 1))
+            final_pil_image.save(output_path)
         end_time = time.time()
         logging.info(f"Saved result: {output_path} ({end_time - start_time:.2f} sec)")
     except Exception as e:
@@ -231,13 +263,25 @@ def process_image_batch(model, frame_imgs, write_paths, cfg: InferenceConfig,
     tile_frame_idx = []  # flat tile index -> frame index
     tile_slice_idx = []  # flat tile index -> slice index within frame
 
+    is_linear = cfg.color_space == 'linear'
+    norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist())
+
     for fi, img in enumerate(frame_imgs):
-        orig_w, orig_h = img.size
-        if cfg.half_res:
-            img_w, img_h = orig_w // 2, orig_h // 2
-            img = img.resize((img_w, img_h), Image.LANCZOS)
+        if is_linear:
+            # img is a numpy float32 array (H,W,3) for linear mode
+            orig_h, orig_w = img.shape[:2]
+            if cfg.half_res:
+                img_w, img_h = orig_w // 2, orig_h // 2
+                img = cv2.resize(img, (img_w, img_h), interpolation=cv2.INTER_LINEAR)
+            else:
+                img_w, img_h = orig_w, orig_h
         else:
-            img_w, img_h = orig_w, orig_h
+            orig_w, orig_h = img.size
+            if cfg.half_res:
+                img_w, img_h = orig_w // 2, orig_h // 2
+                img = img.resize((img_w, img_h), Image.LANCZOS)
+            else:
+                img_w, img_h = orig_w, orig_h
 
         if img_w < cfg.resolution or img_h < cfg.resolution:
             logging.warning(f"Frame {fi} ({img_w}x{img_h}) smaller than resolution {cfg.resolution}, skipping.")
@@ -258,7 +302,14 @@ def process_image_batch(model, frame_imgs, write_paths, cfg: InferenceConfig,
         })
 
         for si, coords in enumerate(slice_coords):
-            all_tile_tensors.append(transform(img.crop(coords)))
+            if is_linear:
+                x, y, x2, y2 = coords
+                tile_np = img[y:y2, x:x2]
+                tile_log = np.log1p(np.clip(tile_np, 0.0, None))
+                tile_t = torch.from_numpy(tile_log.transpose(2, 0, 1)).float()
+                all_tile_tensors.append(norm(tile_t))
+            else:
+                all_tile_tensors.append(transform(img.crop(coords)))
             tile_frame_idx.append(fi)
             tile_slice_idx.append(si)
 
@@ -299,11 +350,16 @@ def process_image_batch(model, frame_imgs, write_paths, cfg: InferenceConfig,
         try:
             weight_map = torch.clamp(rec['weight_map'], min=1e-8)
             final = rec['canvas'] / weight_map
-            pil = to_pil_image(torch.clamp(final[0], 0, 1))
             out_dir = os.path.dirname(write_path)
             if out_dir:
                 os.makedirs(out_dir, exist_ok=True)
-            pil.save(write_path)
+            if is_linear:
+                final_np = final[0].permute(1, 2, 0).numpy()
+                final_np = np.clip(final_np, 0.0, None)
+                save_exr(final_np, write_path)
+            else:
+                pil = to_pil_image(torch.clamp(final[0], 0, 1))
+                pil.save(write_path)
         except Exception as e:
             logging.error(f"Failed to save frame {fi} to {write_path}: {e}")
 
@@ -345,10 +401,12 @@ if __name__ == "__main__":
         args.use_amp = False
 
     try:
-        model, resolution, use_mask_input, loss_mode = load_model_and_config(args.checkpoint, device)
+        model, resolution, use_mask_input, loss_mode, color_space = load_model_and_config(args.checkpoint, device)
     except Exception as e:
         logging.error(f"Failed to load model: {e}", exc_info=True)
         exit(1)
+
+    is_linear = color_space == 'linear'
 
     if use_mask_input and not args.mask_dir:
         logging.error("This model requires mask input (4-channel) but --mask_dir was not provided.")
@@ -358,6 +416,7 @@ if __name__ == "__main__":
         exit(1)
 
     transform = T.Compose([ T.ToTensor(), T.Normalize(mean=NORM_MEAN, std=NORM_STD) ])
+    denorm_fn = denormalize_linear if is_linear else denormalize
     overlap_pixels = int(resolution * args.overlap_factor)
     stride = max(1, resolution - overlap_pixels)
     logging.info(f"Inference Parameters: Resolution={resolution}, Overlap Factor={args.overlap_factor}, Stride={stride}")
@@ -375,14 +434,14 @@ if __name__ == "__main__":
         logging.info(f"--- Processing image {i+1}/{len(input_files)} ---")
         basename = os.path.splitext(os.path.basename(img_path))[0]
         # Extract frame number from end of filename (e.g., "shot_name_0001" -> "shot_name", "0001")
+        out_ext = '.exr' if is_linear else '.png'
         match = re.match(r'^(.+?)_?(\d+)$', basename)
         if match:
             name_part = match.group(1)
             frame_num = match.group(2)
-            output_filename = f"{name_part}_tunet_{frame_num}.png"
+            output_filename = f"{name_part}_tunet_{frame_num}{out_ext}"
         else:
-            # Fallback if no frame number found
-            output_filename = f"{basename}_tunet.png"
+            output_filename = f"{basename}_tunet{out_ext}"
         output_path = os.path.join(args.output_dir, output_filename)
 
         # Find matching mask file if mask_dir provided
@@ -401,8 +460,8 @@ if __name__ == "__main__":
             resolution=resolution, stride=stride, device=device,
             batch_size=args.batch_size, use_amp=args.use_amp,
             half_res=args.half_res, use_mask_input=use_mask_input,
-            loss_mode=loss_mode)
-        process_image(model, img_path, output_path, inf_cfg, transform, denormalize,
+            loss_mode=loss_mode, color_space=color_space)
+        process_image(model, img_path, output_path, inf_cfg, transform, denorm_fn,
                       mask_path=mask_path)
 
     total_end_time = time.time()

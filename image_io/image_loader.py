@@ -20,8 +20,30 @@ NORM_MEAN = torch.tensor([0.5, 0.5, 0.5])
 NORM_STD = torch.tensor([0.5, 0.5, 0.5])
 
 
+# ---------------------------------------------------------------------------
+# Log-space encoding for linear HDR data
+# ---------------------------------------------------------------------------
+
+def linear_to_log(x):
+    """Compress HDR linear values via log1p. Works on numpy arrays or torch tensors."""
+    if isinstance(x, np.ndarray):
+        return np.log1p(x)
+    return torch.log1p(x)
+
+
+def log_to_linear(x):
+    """Recover HDR linear values via expm1. Works on numpy arrays or torch tensors."""
+    if isinstance(x, np.ndarray):
+        return np.expm1(x)
+    return torch.expm1(x)
+
+
+# ---------------------------------------------------------------------------
+# Denormalization
+# ---------------------------------------------------------------------------
+
 def denormalize(tensor):
-    """Denormalize a tensor from [-1,1] back to [0,1]."""
+    """Denormalize a tensor from [-1,1] back to [0,1] (sRGB path)."""
     if tensor is None:
         return None
     try:
@@ -30,6 +52,24 @@ def denormalize(tensor):
         return torch.clamp(tensor * std + mean, 0, 1)
     except Exception as e:
         logging.error(f"Denormalize error: {e}")
+        return tensor
+
+
+def denormalize_linear(tensor):
+    """Denormalize from normalized log-space back to scene-linear HDR values.
+
+    Pipeline: [-1,1] → un-normalize to log-space → expm1 → linear.
+    No upper clamp — HDR values above 1.0 are preserved.
+    """
+    if tensor is None:
+        return None
+    try:
+        mean = NORM_MEAN.to(tensor.device).view(1, 3, 1, 1)
+        std = NORM_STD.to(tensor.device).view(1, 3, 1, 1)
+        log_space = tensor * std + mean
+        return torch.expm1(log_space.clamp(min=0.0))
+    except Exception as e:
+        logging.error(f"Denormalize linear error: {e}")
         return tensor
 
 
@@ -99,6 +139,30 @@ def load_image_any_format(image_path):
         return Image.fromarray(img_8bit, mode='RGB')
     else:
         return Image.open(image_path).convert('RGB')
+
+
+def load_image_linear(image_path):
+    """Load an image preserving float32 linear values (H,W,3).
+
+    EXR files are kept as scene-linear float32.  Other formats are read as
+    uint8 and converted to [0,1] float32 (assumed to already be linear or
+    close enough for the user's purposes).
+    """
+    _, ext = os.path.splitext(image_path.lower())
+    if ext == '.exr':
+        img_float = load_exr_full_frame(image_path)
+        np.nan_to_num(img_float, copy=False, nan=0.0, posinf=10.0, neginf=0.0)
+        return np.clip(img_float, 0.0, None)  # allow >1.0, clamp negatives
+    else:
+        img = Image.open(image_path).convert('RGB')
+        return np.array(img, dtype=np.float32) / 255.0
+
+
+def save_exr(image_np, output_path):
+    """Save a float32 (H,W,3) RGB numpy array as an EXR file via OpenCV."""
+    bgr = cv2.cvtColor(image_np.astype(np.float32), cv2.COLOR_RGB2BGR)
+    cv2.imwrite(output_path, bgr,
+                [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_FLOAT])
 
 
 def load_mask_image(image_path):

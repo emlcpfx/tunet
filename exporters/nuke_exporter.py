@@ -208,8 +208,9 @@ def load_model_for_conversion(checkpoint_path, device='cpu'):
 
 
     # --- Instantiate the WRAPPER ---
-    logging.info("Wrapping UNet model with Normalization layer...")
-    wrapped_model = NormalizedUNet(base_model)
+    color_space = getattr(data_config, 'color_space', 'srgb')
+    logging.info(f"Wrapping UNet model with Normalization layer (color_space={color_space})...")
+    wrapped_model = NormalizedUNet(base_model, color_space=color_space)
 
     # Move the entire wrapped model (including the base model) to the target device
     logging.info(f"Moving wrapped model to device: {device}")

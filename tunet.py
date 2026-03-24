@@ -88,6 +88,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         self._cached_checkpoint = None
         self._cached_resolution = None
         self._cached_loss_mode = None
+        self._cached_color_space = 'srgb'
 
         # --- Build UI ---
         self.central_widget = QWidget()
@@ -503,6 +504,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             'output_dir': gp(self.model_folder_input),
             'resolution': int(self.resolution_input.currentText()),
             'overlap_factor': float(self.overlap_factor_input.currentText()),
+            'color_space': self.color_space_input.currentText(),
         }
         if mask_dir:
             data_config['mask_dir'] = mask_dir
@@ -607,6 +609,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         sp(self.model_folder_input, data.get('output_dir', ''))
         self.resolution_input.setCurrentText(str(data.get('resolution', 512)))
         self.overlap_factor_input.setCurrentText(str(data.get('overlap_factor', 0.25)))
+        self.color_space_input.setCurrentText(data.get('color_space', 'srgb'))
         sp(self.val_src_dir_input, data.get('val_src_dir', ''))
         sp(self.val_dst_dir_input, data.get('val_dst_dir', ''))
 
@@ -1101,6 +1104,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         self.inf_progress_bar.setValue(0)
         self.inf_progress_label.setText("")
         self._cached_model = None
+        self._cached_color_space = 'srgb'
 
     def _inf_request_stop(self):
         self.inference_stop_requested = True
@@ -1121,7 +1125,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             import torchvision.transforms as T
             from inference import load_model_and_config, process_image, denormalize, NORM_MEAN, NORM_STD, load_image_any_format
 
-            model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch = self._inf_load_model()
+            model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch, color_space = self._inf_load_model()
             input_dir = self._get_path(self.inf_input_dir)
             output_root = self._get_path(self.inf_output_root)
             checkpoint = self._get_path(self.inf_checkpoint_input)
@@ -1129,7 +1133,8 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             output_dir = self._inf_resolve_output_dir(input_dir, output_root, checkpoint, skip)
             logging.info(f"Output folder: {output_dir}")
             self._inf_process_folder(model, input_dir, output_dir, resolution, stride,
-                                     device, use_amp, transform, loss_mode, tile_batch)
+                                     device, use_amp, transform, loss_mode, tile_batch,
+                                     color_space=color_space)
             if not self.inference_stop_requested:
                 logging.info("Inference complete!")
                 QTimer.singleShot(0, lambda: QMessageBox.information(self, "Done", "Inference completed successfully!"))
@@ -1155,7 +1160,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
 
     def _inf_run_queue_thread(self):
         try:
-            model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch = self._inf_load_model()
+            model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch, color_space = self._inf_load_model()
             pending = [q for q in self.inference_queue if q['status'] == 'pending']
             total_items = len(pending)
 
@@ -1177,7 +1182,8 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                     QTimer.singleShot(0, self._inf_refresh_queue_display)
                     logging.info(f"Output folder: {output_dir}")
                     self._inf_process_folder(model, item['input_dir'], output_dir,
-                                             resolution, stride, device, use_amp, transform, loss_mode, tile_batch)
+                                             resolution, stride, device, use_amp, transform, loss_mode, tile_batch,
+                                             color_space=color_space)
                     if not self.inference_stop_requested:
                         item['status'] = 'done'
                     else:
@@ -1216,10 +1222,11 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             model = self._cached_model
             resolution = self._cached_resolution
             loss_mode = self._cached_loss_mode
+            color_space = self._cached_color_space
         else:
             logging.info(f"Using device: {device}")
             logging.info("Loading model...")
-            model, resolution, use_mask_input, loss_mode = load_model_and_config(checkpoint, device)
+            model, resolution, use_mask_input, loss_mode, color_space = load_model_and_config(checkpoint, device)
             if os.name != 'nt':
                 try:
                     model = torch.compile(model, mode='reduce-overhead')
@@ -1232,6 +1239,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             self._cached_checkpoint = checkpoint
             self._cached_resolution = resolution
             self._cached_loss_mode = loss_mode
+            self._cached_color_space = color_space
 
         transform = T.Compose([T.ToTensor(), T.Normalize(mean=NORM_MEAN, std=NORM_STD)])
         stride = max(1, self.inf_stride.value())
@@ -1252,7 +1260,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         else:
             tile_batch = 1
 
-        return model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch
+        return model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch, color_space
 
     @staticmethod
     def _inf_resolve_output_dir(input_dir, output_root, checkpoint_path, skip_existing=False):
@@ -1328,10 +1336,13 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                 copy_q.task_done()
 
     def _inf_process_folder(self, model, input_dir, output_dir, resolution, stride,
-                            device, use_amp, transform, loss_mode, tile_batch=4):
+                            device, use_amp, transform, loss_mode, tile_batch=4,
+                            color_space='srgb'):
         """Process all images in a folder (ported from inference_gui.py)."""
-        from inference import process_image, denormalize, load_image_any_format
+        from inference import process_image, denormalize, denormalize_linear, load_image_any_format, load_image_linear
         from inference_config import InferenceConfig
+        is_linear = color_space == 'linear'
+        denorm_fn = denormalize_linear if is_linear else denormalize
 
         img_extensions = ['*.png', '*.jpg', '*.jpeg', '*.bmp', '*.tif', '*.tiff', '*.webp', '*.exr']
         input_files = sorted([f for ext in img_extensions
@@ -1343,14 +1354,15 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         os.makedirs(output_dir, exist_ok=True)
         skip_existing = self.inf_skip_existing.isChecked()
 
+        out_ext = '.exr' if is_linear else '.png'
         work_items = []
         for img_path in input_files:
             basename = os.path.splitext(os.path.basename(img_path))[0]
             match = re.match(r'^(.+?)_?(\d+)$', basename)
             if match:
-                output_filename = f"{match.group(1)}_tunet_{match.group(2)}.png"
+                output_filename = f"{match.group(1)}_tunet_{match.group(2)}{out_ext}"
             else:
-                output_filename = f"{basename}_tunet.png"
+                output_filename = f"{basename}_tunet{out_ext}"
             output_path = os.path.join(output_dir, output_filename)
             work_items.append((img_path, output_path))
 
@@ -1399,11 +1411,11 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                     return
                 img_path, _ = item_pair
                 try:
-                    pil = load_image_any_format(img_path)
+                    img_data = load_image_linear(img_path) if is_linear else load_image_any_format(img_path)
                 except Exception as e:
                     logging.error(f"Prefetch failed for {os.path.basename(img_path)}: {e}")
-                    pil = None
-                prefetch_q.put((item_pair, pil))
+                    img_data = None
+                prefetch_q.put((item_pair, img_data))
             prefetch_q.put(None)
 
         prefetch_thread = threading.Thread(target=prefetch_worker, daemon=True)
@@ -1436,8 +1448,8 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                 prefetched = prefetch_q.get()
                 if prefetched is None:
                     break
-                (img_path, output_path), pil_img = prefetched
-                if pil_img is None:
+                (img_path, output_path), img_data = prefetched
+                if img_data is None:
                     logging.error(f"Skipping {os.path.basename(img_path)} (load failed)")
                     continue
                 write_path = (os.path.join(tmp_dir, os.path.basename(output_path))
@@ -1448,9 +1460,9 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                     resolution=resolution, stride=stride, device=device,
                     batch_size=tile_batch, use_amp=use_amp,
                     half_res=self.inf_half_res.isChecked(),
-                    loss_mode=loss_mode)
-                process_image(model, img_path, write_path, inf_cfg, transform, denormalize,
-                              src_image=pil_img)
+                    loss_mode=loss_mode, color_space=color_space)
+                process_image(model, img_path, write_path, inf_cfg, transform, denorm_fn,
+                              src_image=img_data)
                 elapsed = time.perf_counter() - t0
 
                 processed += 1

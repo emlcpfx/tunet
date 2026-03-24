@@ -7,6 +7,7 @@ data:
   output_dir: MUST BE PROVIDED BY USER
   resolution: 512                     # 512 or 1024
   overlap_factor: 0.25                # default 0.25, range 0.0 to 1.0
+  color_space: srgb                    # "srgb" (8-bit, default) or "linear" (32-bit float EXR, scene-linear)
   mask_dir: null                       # Optional: directory with grayscale mask images
   val_src_dir: null                    # Optional: validation source directory
   val_dst_dir: null                    # Optional: validation destination directory
