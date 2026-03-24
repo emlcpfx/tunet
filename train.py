@@ -481,6 +481,45 @@ def _setup_logging(config, rank, device, world_size):
             logging.error(f"Error setting up file logging: {log_setup_e}")
 
 
+def _auto_batch_size(model, resolution, n_input_ch, device, device_type, use_amp):
+    """Probe GPU memory and find the largest batch size that fits without OOM.
+
+    Tries batch sizes from 32 down to 1, running a dummy forward+backward pass
+    for each. Returns the largest that succeeds, or 1 as a fallback.
+    """
+    if device_type != 'cuda':
+        if is_main_process():
+            logging.info("Auto batch size: not on CUDA, defaulting to 4.")
+        return 4
+
+    model.train()
+    candidates = [32, 24, 16, 12, 8, 6, 4, 2, 1]
+    chosen = 1
+    for bs in candidates:
+        torch.cuda.empty_cache()
+        try:
+            dummy = torch.randn(bs, n_input_ch, resolution, resolution, device=device)
+            with autocast(device_type='cuda', enabled=use_amp):
+                out = model(dummy)
+                loss = out.mean()
+            loss.backward()
+            model.zero_grad(set_to_none=True)
+            del dummy, out, loss
+            torch.cuda.empty_cache()
+            chosen = bs
+            break
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            continue
+        except Exception:
+            torch.cuda.empty_cache()
+            continue
+    if is_main_process():
+        free, total = torch.cuda.mem_get_info(device)
+        logging.info(f"Auto batch size: {chosen} (GPU {total / 1e9:.1f}GB total, {free / 1e9:.1f}GB free)")
+    return chosen
+
+
 def _build_datasets(config, src_transforms, dst_transforms, shared_transforms, standard_transform,
                     use_masks, use_auto_mask, skip_empty, device_type, world_size, rank):
     """Create training and validation datasets and dataloaders.
@@ -793,6 +832,8 @@ def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion
                 loss = (config.training.l1_weight * l1
                         + config.training.l2_weight * l2_val
                         + config.training.lpips_weight * lp)
+            elif config.training.loss == 'l2':
+                loss = l2_val
             else:
                 loss = l1 + config.training.lambda_lpips * lp
         l2_out = l2_val if not use_bce_dice else torch.tensor(0.0, device=device)
@@ -881,6 +922,9 @@ def train(config):
         logging.info(f"Skip empty patches: enabled (max pixel diff threshold={config.mask.skip_empty_threshold}/255)")
 
     # --- Dataset & DataLoader ---
+    auto_batch_pending = config.training.batch_size <= 0
+    if auto_batch_pending:
+        config.training.batch_size = 1  # temporary for initial dataset build
     dataset, dataloader, dataloader_iter = None, None, None
     try:
         skip_empty = config.mask.skip_empty_patches and use_auto_mask
@@ -895,6 +939,9 @@ def train(config):
     if config.training.loss == 'bce+dice':
         use_bce_dice = True
         if is_main_process(): logging.info(f"Using BCE+Dice loss (segmentation mode). Hidden size: {eff_size}.")
+    elif config.training.loss == 'l2':
+        use_l2 = True
+        if is_main_process(): logging.info(f"Using L2 (MSE) loss. Hidden size: {eff_size}.")
     elif config.training.loss == 'weighted':
         use_weighted = True
         needs_lpips = config.training.lpips_weight > 0
@@ -962,6 +1009,20 @@ def train(config):
             config, device, device_type, world_size, rank, n_input_ch, eff_size,
             use_lpips, use_l2, use_bce_dice, False, loss_fn_lpips, model_type)
     except Exception as model_err: logging.error(f"FATAL: Model setup/resume error: {model_err}. Exiting.", exc_info=True); cleanup_ddp(); return
+
+    # --- Auto Batch Size (after model exists) ---
+    if auto_batch_pending and model is not None:
+        config.training.batch_size = _auto_batch_size(
+            model, config.data.resolution, n_input_ch, device, device_type,
+            getattr(config.training, 'use_amp', True))
+        # Rebuild dataloaders with the resolved batch size
+        try:
+            dataset, dataloader, dataloader_iter, val_dataloader, val_dataset, has_val_preview, has_val_loss = _build_datasets(
+                config, src_transforms, dst_transforms, shared_transforms, standard_transform,
+                use_masks, use_auto_mask, skip_empty, device_type, world_size, rank)
+        except Exception as e:
+            logging.error(f"FATAL: DataLoader rebuild with auto batch_size={config.training.batch_size} failed: {e}. Exiting.", exc_info=True)
+            cleanup_ddp(); return
 
     # --- Training Loop Variables ---
     max_steps = getattr(config.training, 'max_steps', 0)
@@ -1140,7 +1201,7 @@ def train(config):
                 avg_ep_l1 = ep_l1 / ep_steps if ep_steps > 0 else 0.0
                 avg_ep_lp = ep_lpips / ep_steps if use_lpips and ep_steps > 0 else 0.0
                 steps_in_ep = global_step % iter_epoch or iter_epoch
-                loss_label = 'BCE+Dice' if use_bce_dice else 'L1'
+                loss_label = 'BCE+Dice' if use_bce_dice else ('L2' if config.training.loss == 'l2' else 'L1')
                 log_msg = (f'Epoch[{current_ep_idx + 1}] Step[{global_step}] ({steps_in_ep}/{iter_epoch}), '
                            f'{loss_label}:{batch_l1:.4f}(Avg:{avg_ep_l1:.4f})')
                 if _has_weighted_loss:
@@ -1412,9 +1473,9 @@ if __name__ == "__main__":
     if not missing:
         try: # Combine checks for brevity
             if config.training.iterations_per_epoch <= 0: error_msgs.append("train.iter_epoch<=0")
-            if config.training.batch_size <= 0: error_msgs.append("train.batch_size<=0")
+            if config.training.batch_size < 0: error_msgs.append("train.batch_size<0")
             if not isinstance(config.training.lr, (int, float)) or config.training.lr <= 0: error_msgs.append("train.lr<=0")
-            if config.training.loss not in ['l1', 'l1+lpips', 'weighted', 'bce+dice']: error_msgs.append("train.loss invalid")
+            if config.training.loss not in ['l1', 'l2', 'l1+lpips', 'weighted', 'bce+dice']: error_msgs.append("train.loss invalid")
             if config.training.lambda_lpips < 0: error_msgs.append("train.lambda_lpips<0")
             if config.training.loss == 'weighted':
                 if config.training.l1_weight < 0: error_msgs.append("train.l1_weight<0")

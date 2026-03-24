@@ -37,6 +37,22 @@ class TrainingTabMixin:
                 "skip_empty_patches": True,
                 "progressive_resolution": False,
             },
+            "Paintout / Cleanup": {
+                "model_type": "msrn",
+                "model_size_dims": "64",
+                "resolution": "512",
+                "overlap_factor": "0.75",
+                "loss": "weighted",
+                "lambda_lpips": 0.0,
+                "l1_weight": 0.5,
+                "l2_weight": 0.5,
+                "lpips_weight": 0.0,
+                "lr": 3e-4,
+                "use_auto_mask": True,
+                "auto_mask_gamma": 0.5,
+                "skip_empty_patches": True,
+                "progressive_resolution": False,
+            },
             "Roto / Matte": {
                 "model_type": "unet",
                 "model_size_dims": "128",
@@ -68,6 +84,13 @@ class TrainingTabMixin:
             if abs(val - p["lambda_lpips"]) < 1e-8:
                 self.lambda_lpips_input.setCurrentIndex(i)
                 break
+        # Set weighted loss sliders if preset specifies them
+        if "l1_weight" in p:
+            self.l1_weight_input.setValue(p["l1_weight"])
+        if "l2_weight" in p:
+            self.l2_weight_input.setValue(p["l2_weight"])
+        if "lpips_weight" in p:
+            self.lpips_weight_input.setValue(p["lpips_weight"])
         self.use_auto_mask_input.setChecked(p["use_auto_mask"])
         self.auto_mask_gamma_input.setValue(p.get("auto_mask_gamma", 1.0))
         self.skip_empty_patches_input.setChecked(p["skip_empty_patches"])
@@ -82,7 +105,7 @@ class TrainingTabMixin:
         grp_preset = QGroupBox("Preset")
         form_preset = QFormLayout(grp_preset)
         self.preset_input = QComboBox()
-        self.preset_input.addItems(["Custom", "General (Image-to-Image)", "Beauty / Paint Fix", "Roto / Matte"])
+        self.preset_input.addItems(["Custom", "General (Image-to-Image)", "Beauty / Paint Fix", "Paintout / Cleanup", "Roto / Matte"])
         self.preset_input.setToolTip(
             "Quick-start presets that configure model, loss, and patch settings.\n"
             "Select a preset then adjust individual settings as needed.\n"

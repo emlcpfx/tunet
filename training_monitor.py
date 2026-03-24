@@ -4,6 +4,7 @@ TuNet Training Monitor - Real-time loss graph visualization
 Usage:
     python training_monitor.py --log_file path/to/training.log
     python training_monitor.py --output_dir path/to/output  (will find training.log there)
+    python training_monitor.py --data_dir path/to/parent    (scan for all training runs)
 
 The monitor reads the training log file and displays a live-updating loss graph.
 
@@ -20,7 +21,7 @@ import os
 import re
 import argparse
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, simpledialog
 from collections import deque
 import time
 import math
@@ -67,22 +68,32 @@ COLORS = {
     'bad': '#e86b6b',
 }
 
+# Color palette for multiple runs
+RUN_COLORS = [
+    '#e86b6b', '#4ecdc4', '#f0a050', '#a78bfa',
+    '#6bc77a', '#e5c07b', '#5a9bf6', '#e879f9',
+    '#f97583', '#79c0ff', '#56d4dd', '#d2a8ff',
+]
 
-class TrainingMonitor:
-    def __init__(self, root, log_file=None):
-        self.root = root
-        self.root.title("TuNet Training Monitor")
-        self.root.geometry("1100x750")
-        self.root.minsize(800, 500)
-        self.root.configure(bg=COLORS['bg'])
 
-        # Data storage
+class RunData:
+    """Encapsulates all data for a single training run."""
+
+    def __init__(self, name, log_file, color_index=0):
+        self.name = name
+        self.log_file = log_file
+        self.color_index = color_index
+        self.color = RUN_COLORS[color_index % len(RUN_COLORS)]
+        self.last_position = 0
+        self.last_modified = 0
         self.max_points = 50000
+
+        # Training data
         self.steps = deque(maxlen=self.max_points)
         self.l1_losses = deque(maxlen=self.max_points)
         self.lpips_losses = deque(maxlen=self.max_points)
         self.has_lpips = False
-        self.loss_label = 'Loss'  # Updated from first parsed log line
+        self.loss_label = 'Loss'
 
         # Validation data
         self.val_steps = deque(maxlen=self.max_points)
@@ -94,15 +105,60 @@ class TrainingMonitor:
         self.best_val_l1 = float('inf')
         self.best_val_l1_epoch = 0
 
-        # Timing data
-        self.epoch_start_times = {}  # epoch_num -> first_seen_time
+        # Best tracking
+        self.best_l1 = float('inf')
+        self.best_l1_epoch = 0
+        self.best_lpips = float('inf')
+        self.best_lpips_epoch = 0
+
+        # Timing
+        self.epoch_start_times = {}
         self.time_per_step = deque(maxlen=1000)
 
-        # File monitoring
-        self.log_file = tk.StringVar(value=log_file or "")
+        # Matplotlib line references (set when creating graph lines)
+        self.l1_line = None
+        self.l1_raw_line = None
+        self.lpips_line = None
+        self.lpips_raw_line = None
+        self.val_l1_line = None
+        self.val_l1_raw_line = None
+        self.best_l1_marker = None
+        self.best_lpips_marker = None
+        self.best_l1_annot = None
+
+    def clear(self):
+        self.steps.clear()
+        self.l1_losses.clear()
+        self.lpips_losses.clear()
+        self.has_lpips = False
+        self.loss_label = 'Loss'
         self.last_position = 0
-        self.last_modified = 0
-        self.is_monitoring = False
+        self.best_l1 = float('inf')
+        self.best_l1_epoch = 0
+        self.best_lpips = float('inf')
+        self.best_lpips_epoch = 0
+        self.time_per_step.clear()
+        self.val_steps.clear()
+        self.val_l1_losses.clear()
+        self.val_lpips_losses.clear()
+        self.val_psnr.clear()
+        self.val_ssim.clear()
+        self.has_val_data = False
+        self.best_val_l1 = float('inf')
+        self.best_val_l1_epoch = 0
+
+
+class TrainingMonitor:
+    def __init__(self, root, log_file=None, data_dir=None):
+        self.root = root
+        self.root.title("TuNet Training Monitor")
+        self.root.geometry("1280x750")
+        self.root.minsize(900, 500)
+        self.root.configure(bg=COLORS['bg'])
+
+        # Run management
+        self.runs = []          # List of RunData
+        self.active_run_idx = 0  # Index of selected run for stats display
 
         # UI state
         self.smoothing = tk.DoubleVar(value=0.6)
@@ -110,43 +166,68 @@ class TrainingMonitor:
         self.log_scale = False
         self.show_raw = True
         self.show_grid = True
-        self.zoom_mode = 'all'  # 'all', 'last_1', 'last_5', 'last_10', 'last_20'
+        self.zoom_mode = 'all'
         self.crosshair_visible = False
         self._pan_start_px = None
-
-        # Best loss tracking
-        self.best_l1 = float('inf')
-        self.best_l1_epoch = 0
-        self.best_lpips = float('inf')
-        self.best_lpips_epoch = 0
+        self.is_monitoring = False
 
         self.create_widgets()
 
         # Bind keyboard shortcuts
         self.root.bind('<Key>', self.on_key_press)
 
-        # Start monitoring if log file provided
+        # Load initial runs
+        if data_dir:
+            self._scan_directory(data_dir)
         if log_file and os.path.exists(log_file):
+            self._add_run_from_log(log_file)
+
+        # Auto-start if we have runs
+        if self.runs:
             self.start_monitoring()
 
     def create_widgets(self):
+        # ─── Main horizontal layout: run panel | graph + controls ───
+        main_pane = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, bg=COLORS['bg'],
+                                   sashwidth=4, sashrelief='flat')
+        main_pane.pack(fill=tk.BOTH, expand=True)
+
+        # ─── Left: Run list panel ───
+        run_panel = tk.Frame(main_pane, bg=COLORS['bg_panel'], width=200)
+
+        tk.Label(run_panel, text="Runs", bg=COLORS['bg_panel'], fg=COLORS['text_bright'],
+                 font=('Segoe UI', 10, 'bold')).pack(fill=tk.X, padx=6, pady=(6, 2))
+
+        self.run_listbox = tk.Listbox(run_panel, bg=COLORS['bg_light'], fg=COLORS['text'],
+                                       selectbackground=COLORS['btn_active'],
+                                       selectforeground=COLORS['text_bright'],
+                                       font=('Consolas', 9), relief='flat',
+                                       highlightthickness=0, activestyle='none')
+        self.run_listbox.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
+        self.run_listbox.bind('<<ListboxSelect>>', self._on_run_selected)
+        self.run_listbox.bind('<Double-Button-1>', self._rename_run)
+
+        btn_frame = tk.Frame(run_panel, bg=COLORS['bg_panel'])
+        btn_frame.pack(fill=tk.X, padx=4, pady=4)
+
+        self._make_button(btn_frame, "Add", self._add_run_dialog, small=True).pack(side=tk.LEFT, padx=1, fill=tk.X, expand=True)
+        self._make_button(btn_frame, "Scan Dir", self._scan_dir_dialog, small=True).pack(side=tk.LEFT, padx=1, fill=tk.X, expand=True)
+        self._make_button(btn_frame, "Remove", self._remove_selected_run, small=True).pack(side=tk.LEFT, padx=1, fill=tk.X, expand=True)
+
+        main_pane.add(run_panel, width=200, minsize=150)
+
+        # ─── Right: Graph and controls ───
+        right_frame = tk.Frame(main_pane, bg=COLORS['bg'])
+
         # ─── Top control bar ───
-        control_frame = tk.Frame(self.root, bg=COLORS['bg'], pady=4)
+        control_frame = tk.Frame(right_frame, bg=COLORS['bg'], pady=4)
         control_frame.pack(fill=tk.X, padx=8)
 
-        tk.Label(control_frame, text="Log:", bg=COLORS['bg'], fg=COLORS['text'],
-                 font=('Segoe UI', 9)).pack(side=tk.LEFT, padx=(4, 2))
-        log_entry = tk.Entry(control_frame, textvariable=self.log_file, width=50,
-                             bg=COLORS['bg_light'], fg=COLORS['text'], insertbackground='white',
-                             relief='flat', font=('Consolas', 9))
-        log_entry.pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
-
-        self._make_button(control_frame, "Browse", self.browse_log).pack(side=tk.LEFT, padx=2)
         self.monitor_btn = self._make_button(control_frame, "Start", self.toggle_monitoring)
         self.monitor_btn.pack(side=tk.LEFT, padx=2)
 
         # ─── Toolbar row: zoom presets + toggles + smoothing ───
-        toolbar_frame = tk.Frame(self.root, bg=COLORS['bg_panel'], pady=3)
+        toolbar_frame = tk.Frame(right_frame, bg=COLORS['bg_panel'], pady=3)
         toolbar_frame.pack(fill=tk.X, padx=8, pady=(0, 2))
 
         # Zoom presets
@@ -209,20 +290,179 @@ class TrainingMonitor:
         smooth_scale.pack(side=tk.LEFT, padx=2)
 
         # Clear button on right side
-        self._make_button(toolbar_frame, "Clear", self.clear_data, small=True).pack(
+        self._make_button(toolbar_frame, "Clear All", self.clear_all_data, small=True).pack(
             side=tk.RIGHT, padx=4)
 
         # ─── Graph area ───
         if HAS_MATPLOTLIB:
-            self.create_matplotlib_graph()
+            self.create_matplotlib_graph(right_frame)
         else:
-            self.create_fallback_display()
+            self.create_fallback_display(right_frame)
 
         # ─── Analysis panel ───
-        self.create_analysis_panel()
+        self.create_analysis_panel(right_frame)
 
         # ─── Stats panel at bottom ───
-        self.create_stats_panel()
+        self.create_stats_panel(right_frame)
+
+        main_pane.add(right_frame, minsize=400)
+
+    # ─── Run management ───
+
+    def _add_run_from_log(self, log_file, name=None):
+        """Add a run from a log file path. Returns the RunData or None if duplicate."""
+        log_file = os.path.abspath(log_file)
+        # Skip duplicates
+        for r in self.runs:
+            if os.path.abspath(r.log_file) == log_file:
+                return None
+        if name is None:
+            name = os.path.basename(os.path.dirname(log_file))
+            if not name or name == '.':
+                name = os.path.basename(log_file)
+        run = RunData(name, log_file, color_index=len(self.runs))
+        self.runs.append(run)
+        if HAS_MATPLOTLIB:
+            self._create_run_lines(run)
+        self._refresh_run_listbox()
+        return run
+
+    def _scan_directory(self, parent_dir):
+        """Scan a parent directory for subdirectories containing training.log."""
+        parent_dir = os.path.abspath(parent_dir)
+        found = 0
+        # Check the directory itself
+        log_here = os.path.join(parent_dir, 'training.log')
+        if os.path.exists(log_here):
+            if self._add_run_from_log(log_here):
+                found += 1
+        # Check subdirectories
+        try:
+            for entry in sorted(os.scandir(parent_dir), key=lambda e: e.name):
+                if entry.is_dir():
+                    log_path = os.path.join(entry.path, 'training.log')
+                    if os.path.exists(log_path):
+                        if self._add_run_from_log(log_path):
+                            found += 1
+        except PermissionError:
+            pass
+        return found
+
+    def _refresh_run_listbox(self):
+        self.run_listbox.delete(0, tk.END)
+        for i, run in enumerate(self.runs):
+            color_marker = '\u25cf'  # filled circle
+            self.run_listbox.insert(tk.END, f" {color_marker} {run.name}")
+            self.run_listbox.itemconfigure(i, fg=run.color)
+        if self.runs and self.active_run_idx < len(self.runs):
+            self.run_listbox.selection_set(self.active_run_idx)
+
+    def _on_run_selected(self, event):
+        sel = self.run_listbox.curselection()
+        if sel:
+            self.active_run_idx = sel[0]
+            self.update_stats()
+
+    def _rename_run(self, event):
+        sel = self.run_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        run = self.runs[idx]
+        new_name = simpledialog.askstring("Rename Run", "Enter new name:",
+                                          initialvalue=run.name, parent=self.root)
+        if new_name and new_name.strip():
+            run.name = new_name.strip()
+            self._refresh_run_listbox()
+            if HAS_MATPLOTLIB:
+                self._update_legend()
+                self.canvas.draw_idle()
+
+    def _add_run_dialog(self):
+        path = filedialog.askopenfilename(
+            title="Select Training Log",
+            filetypes=[("Log files", "*.log"), ("All files", "*.*")]
+        )
+        if path:
+            run = self._add_run_from_log(path)
+            if run:
+                self.read_log_file(run, full_read=True)
+                self.update_graph()
+                self.update_stats()
+                if not self.is_monitoring:
+                    self.start_monitoring()
+
+    def _scan_dir_dialog(self):
+        path = filedialog.askdirectory(title="Select Parent Directory to Scan")
+        if path:
+            found = self._scan_directory(path)
+            if found > 0:
+                for run in self.runs:
+                    self.read_log_file(run, full_read=True)
+                self.update_graph()
+                self.update_stats()
+                if not self.is_monitoring:
+                    self.start_monitoring()
+
+    def _remove_selected_run(self):
+        sel = self.run_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        run = self.runs[idx]
+        # Remove matplotlib lines
+        if HAS_MATPLOTLIB:
+            for attr in ('l1_line', 'l1_raw_line', 'lpips_line', 'lpips_raw_line',
+                          'val_l1_line', 'val_l1_raw_line', 'best_l1_marker',
+                          'best_lpips_marker'):
+                line = getattr(run, attr, None)
+                if line is not None:
+                    line.remove()
+            if run.best_l1_annot is not None:
+                run.best_l1_annot.remove()
+        self.runs.pop(idx)
+        if self.active_run_idx >= len(self.runs):
+            self.active_run_idx = max(0, len(self.runs) - 1)
+        self._refresh_run_listbox()
+        if HAS_MATPLOTLIB:
+            self._update_legend()
+            self.canvas.draw_idle()
+        self.update_stats()
+
+    # ─── Matplotlib graph lines per run ───
+
+    def _create_run_lines(self, run):
+        """Create matplotlib line objects for a run."""
+        c = run.color
+        raw_alpha = 0.2
+        # Primary axis lines
+        run.l1_raw_line, = self.ax.plot([], [], '-', color=c,
+                                         linewidth=0.5, alpha=raw_alpha, zorder=1)
+        run.l1_line, = self.ax.plot([], [], '-', color=c,
+                                     linewidth=1.8, alpha=0.95, label=run.name, zorder=3)
+        # Validation
+        val_c = c  # same color, dashed
+        run.val_l1_raw_line, = self.ax.plot([], [], '--', color=val_c,
+                                             linewidth=0.5, alpha=raw_alpha, zorder=1)
+        run.val_l1_line, = self.ax.plot([], [], '--o', color=val_c,
+                                         linewidth=1.4, alpha=0.8, markersize=3, zorder=4)
+        # LPIPS on secondary axis
+        lpips_c = c
+        run.lpips_raw_line, = self.ax2.plot([], [], '-', color=lpips_c,
+                                             linewidth=0.5, alpha=raw_alpha, zorder=1)
+        run.lpips_line, = self.ax2.plot([], [], '-', color=lpips_c,
+                                         linewidth=1.4, alpha=0.7, linestyle='dotted', zorder=3)
+        # Best markers
+        run.best_l1_marker, = self.ax.plot([], [], '*', color=c,
+                                            markersize=12, zorder=5)
+        run.best_lpips_marker, = self.ax2.plot([], [], '*', color=c,
+                                                markersize=12, zorder=5)
+        run.best_l1_annot = self.ax.annotate('', xy=(0, 0), fontsize=7,
+                                              color=c,
+                                              bbox=dict(boxstyle='round,pad=0.2',
+                                                        facecolor=COLORS['bg_light'],
+                                                        edgecolor=c, alpha=0.85),
+                                              zorder=6)
 
     def _make_button(self, parent, text, command, small=False):
         font = ('Segoe UI', 8) if small else ('Segoe UI', 9)
@@ -253,10 +493,10 @@ class TrainingMonitor:
 
     def _on_smooth_change(self, val):
         self.smooth_label.configure(text=f"{float(val):.2f}")
-        if self.steps:
+        if any(r.steps for r in self.runs):
             self.update_graph()
 
-    def create_matplotlib_graph(self):
+    def create_matplotlib_graph(self, parent):
         """Create matplotlib figure with dual Y-axes."""
         self.fig = Figure(figsize=(10, 5), dpi=100, facecolor=COLORS['bg'])
 
@@ -264,9 +504,9 @@ class TrainingMonitor:
         self.ax = self.fig.add_subplot(111)
         self.ax.set_facecolor(COLORS['bg_light'])
         self.ax.set_xlabel('Epoch', color=COLORS['text'], fontsize=10)
-        self.ax.set_ylabel('Loss', color=COLORS['l1'], fontsize=10)
+        self.ax.set_ylabel('Loss', color=COLORS['text'], fontsize=10)
         self.ax.tick_params(axis='x', colors=COLORS['text'], labelsize=9)
-        self.ax.tick_params(axis='y', colors=COLORS['l1'], labelsize=9)
+        self.ax.tick_params(axis='y', colors=COLORS['text'], labelsize=9)
         for spine in self.ax.spines.values():
             spine.set_color(COLORS['border'])
         self.ax.grid(True, color=COLORS['grid'], linestyle='-', linewidth=0.5, alpha=0.5)
@@ -278,38 +518,6 @@ class TrainingMonitor:
         for spine in self.ax2.spines.values():
             spine.set_color(COLORS['border'])
         self.ax2.set_visible(False)
-
-        # Lines: raw (faint) + smoothed (bold)
-        self.l1_raw_line, = self.ax.plot([], [], '-', color=COLORS['l1_raw'],
-                                          linewidth=0.5, alpha=0.25, zorder=1)
-        self.l1_line, = self.ax.plot([], [], '-', color=COLORS['l1'],
-                                      linewidth=1.8, alpha=0.95, label='L1 Loss', zorder=3)
-
-        self.lpips_raw_line, = self.ax2.plot([], [], '-', color=COLORS['lpips_raw'],
-                                              linewidth=0.5, alpha=0.25, zorder=1)
-        self.lpips_line, = self.ax2.plot([], [], '-', color=COLORS['lpips'],
-                                          linewidth=1.8, alpha=0.95, label='LPIPS Loss', zorder=3)
-
-        # Validation lines
-        self.val_l1_raw_line, = self.ax.plot([], [], '-', color=COLORS['val_l1_raw'],
-                                              linewidth=0.5, alpha=0.25, zorder=1)
-        self.val_l1_line, = self.ax.plot([], [], '-o', color=COLORS['val_l1'],
-                                          linewidth=1.8, alpha=0.95, markersize=4, label='Val Loss', zorder=4)
-
-        # Best loss markers (initialized empty)
-        self.best_l1_marker, = self.ax.plot([], [], '*', color=COLORS['best_marker'],
-                                             markersize=14, zorder=5, label='Best L1')
-        self.best_lpips_marker, = self.ax2.plot([], [], '*', color=COLORS['best_marker'],
-                                                 markersize=14, zorder=5)
-
-        # Best loss annotation
-        self.best_l1_annot = self.ax.annotate('', xy=(0, 0), fontsize=8,
-                                               color=COLORS['best_marker'],
-                                               bbox=dict(boxstyle='round,pad=0.3',
-                                                         facecolor=COLORS['bg_light'],
-                                                         edgecolor=COLORS['best_marker'],
-                                                         alpha=0.9),
-                                               zorder=6)
 
         # Crosshair elements
         self.crosshair_v = self.ax.axvline(x=0, color=COLORS['crosshair'],
@@ -327,13 +535,13 @@ class TrainingMonitor:
         self._update_legend()
 
         # Embed in tkinter
-        graph_frame = tk.Frame(self.root, bg=COLORS['bg'])
+        graph_frame = tk.Frame(parent, bg=COLORS['bg'])
         graph_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 0))
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
         self.canvas.draw()
 
-        # Navigation toolbar - use lighter bg so dark icons are visible
+        # Navigation toolbar
         toolbar_bg = '#b0b0b0'
         toolbar_container = tk.Frame(graph_frame, bg=toolbar_bg)
         toolbar_container.pack(fill=tk.X, side=tk.BOTTOM)
@@ -348,7 +556,6 @@ class TrainingMonitor:
                     child.configure(bg=toolbar_bg)
                 except tk.TclError:
                     pass
-        # Style the coordinate label text
         for attr in ('_message_label', 'message'):
             label = getattr(self.nav_toolbar, attr, None)
             if label is not None:
@@ -363,33 +570,31 @@ class TrainingMonitor:
         self.fig.tight_layout()
         self.fig.subplots_adjust(right=0.88)
 
-        # Connect mouse events for crosshair
+        # Connect mouse events
         self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
         self.canvas.mpl_connect('axes_leave_event', self.on_mouse_leave)
-        # Scroll zoom
         self.canvas.mpl_connect('scroll_event', self.on_scroll)
-        # Middle mouse button pan
         self._pan_start_px = None
         self.canvas.mpl_connect('button_press_event', self.on_button_press)
         self.canvas.mpl_connect('button_release_event', self.on_button_release)
 
-    def create_stats_panel(self):
+    def create_stats_panel(self, parent):
         """Create bottom stats panel with key metrics."""
-        stats_outer = tk.Frame(self.root, bg=COLORS['border'], pady=1)
+        stats_outer = tk.Frame(parent, bg=COLORS['border'], pady=1)
         stats_outer.pack(fill=tk.X, padx=8, pady=(2, 6))
 
         stats_frame = tk.Frame(stats_outer, bg=COLORS['bg_panel'], pady=4)
         stats_frame.pack(fill=tk.X, padx=1)
 
-        # Row of stat boxes
         self.stat_labels = {}
 
         stats_config = [
+            ('run_name', 'Run', '--'),
             ('epoch', 'Epoch', '--'),
-            ('l1_cur', 'L1 Current', '--'),
-            ('l1_best', 'L1 Best', '--'),
+            ('l1_cur', 'Loss Current', '--'),
+            ('l1_best', 'Loss Best', '--'),
             ('l1_best_ep', 'Best @ Epoch', '--'),
-            ('val_l1_cur', 'Val L1', '--'),
+            ('val_l1_cur', 'Val Loss', '--'),
             ('val_l1_best', 'Val Best', '--'),
             ('lpips_cur', 'LPIPS Current', '--'),
             ('lpips_best', 'LPIPS Best', '--'),
@@ -410,15 +615,14 @@ class TrainingMonitor:
             val_label.pack()
             self.stat_labels[key] = val_label
 
-    def create_analysis_panel(self):
+    def create_analysis_panel(self, parent):
         """Create training analysis panel with trend indicators."""
-        analysis_outer = tk.Frame(self.root, bg=COLORS['border'], pady=1)
+        analysis_outer = tk.Frame(parent, bg=COLORS['border'], pady=1)
         analysis_outer.pack(fill=tk.X, padx=8, pady=(2, 0))
 
         analysis_frame = tk.Frame(analysis_outer, bg=COLORS['bg_panel'], pady=4)
         analysis_frame.pack(fill=tk.X, padx=1)
 
-        # Label
         tk.Label(analysis_frame, text="Analysis:", bg=COLORS['bg_panel'],
                  fg=COLORS['text_dim'], font=('Segoe UI', 8)).pack(side=tk.LEFT, padx=(8, 12))
 
@@ -443,25 +647,22 @@ class TrainingMonitor:
             self.analysis_labels[key] = val_label
 
     def analyze_training(self):
-        """Analyze training progress and update the analysis panel."""
+        """Analyze training progress for the active run."""
         if not hasattr(self, 'analysis_labels'):
             return
-
-        steps = list(self.steps)
-        losses = list(self.l1_losses)
-
-        if not steps:
+        run = self.runs[self.active_run_idx] if self.active_run_idx < len(self.runs) else None
+        if not run or not run.steps:
             return
 
+        steps = list(run.steps)
+        losses = list(run.l1_losses)
         current_epoch = steps[-1]
 
-        # Need at least 5 epochs of data for meaningful analysis
         if current_epoch < 5:
             for key in self.analysis_labels:
                 self.analysis_labels[key].configure(text="Collecting...", fg=COLORS['text_dim'])
             return
 
-        # Get data from the last 20 epochs (or all if less)
         window_epochs = min(20, current_epoch * 0.5)
         cutoff = current_epoch - window_epochs
         window_steps = []
@@ -476,7 +677,6 @@ class TrainingMonitor:
                 self.analysis_labels[key].configure(text="Collecting...", fg=COLORS['text_dim'])
             return
 
-        # Apply heavy smoothing to window data for analysis
         smoothed = []
         alpha = 0.95
         last = window_losses[0]
@@ -484,7 +684,6 @@ class TrainingMonitor:
             last = alpha * last + (1 - alpha) * v
             smoothed.append(last)
 
-        # Linear regression on smoothed data
         n = len(smoothed)
         x_vals = window_steps
         y_vals = smoothed
@@ -493,38 +692,23 @@ class TrainingMonitor:
         ss_xy = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_vals, y_vals))
         ss_xx = sum((x - x_mean) ** 2 for x in x_vals)
 
-        if ss_xx > 0:
-            slope = ss_xy / ss_xx
-        else:
-            slope = 0
+        slope = ss_xy / ss_xx if ss_xx > 0 else 0
 
-        # Normalize slope relative to current loss magnitude
         current_smooth = smoothed[-1]
-        if current_smooth > 0:
-            relative_slope = slope / current_smooth
-        else:
-            relative_slope = 0
+        relative_slope = slope / current_smooth if current_smooth > 0 else 0
 
-        # Trend label
         if relative_slope < -0.005:
-            self.analysis_labels['trend'].configure(
-                text="Improving", fg=COLORS['good'])
+            self.analysis_labels['trend'].configure(text="Improving", fg=COLORS['good'])
         elif relative_slope > 0.005:
-            self.analysis_labels['trend'].configure(
-                text="Diverging", fg=COLORS['bad'])
+            self.analysis_labels['trend'].configure(text="Diverging", fg=COLORS['bad'])
         else:
-            self.analysis_labels['trend'].configure(
-                text="Flat", fg=COLORS['warn'])
+            self.analysis_labels['trend'].configure(text="Flat", fg=COLORS['warn'])
 
-        # Recent improvement: compare first half vs second half of window
         mid = len(smoothed) // 2
         first_half_avg = sum(smoothed[:mid]) / mid if mid > 0 else 0
         second_half_avg = sum(smoothed[mid:]) / (len(smoothed) - mid) if (len(smoothed) - mid) > 0 else 0
 
-        if first_half_avg > 0:
-            pct_change = ((second_half_avg - first_half_avg) / first_half_avg) * 100
-        else:
-            pct_change = 0
+        pct_change = ((second_half_avg - first_half_avg) / first_half_avg) * 100 if first_half_avg > 0 else 0
 
         if pct_change < -1:
             change_color = COLORS['good']
@@ -532,11 +716,9 @@ class TrainingMonitor:
             change_color = COLORS['bad']
         else:
             change_color = COLORS['warn']
-        self.analysis_labels['improvement'].configure(
-            text=f"{pct_change:+.1f}%", fg=change_color)
+        self.analysis_labels['improvement'].configure(text=f"{pct_change:+.1f}%", fg=change_color)
 
-        # Plateau check: epochs since best loss
-        epochs_since_best = current_epoch - self.best_l1_epoch
+        epochs_since_best = current_epoch - run.best_l1_epoch
         if epochs_since_best < 10:
             self.analysis_labels['plateau'].configure(
                 text=f"Best {epochs_since_best:.0f}ep ago", fg=COLORS['good'])
@@ -547,29 +729,22 @@ class TrainingMonitor:
             self.analysis_labels['plateau'].configure(
                 text=f"Best {epochs_since_best:.0f}ep ago", fg=COLORS['bad'])
 
-        # Overall recommendation
         if relative_slope < -0.005 and epochs_since_best < 20:
-            self.analysis_labels['recommendation'].configure(
-                text="Training well", fg=COLORS['good'])
+            self.analysis_labels['recommendation'].configure(text="Training well", fg=COLORS['good'])
         elif relative_slope > 0.01:
-            self.analysis_labels['recommendation'].configure(
-                text="Diverging - check LR", fg=COLORS['bad'])
+            self.analysis_labels['recommendation'].configure(text="Diverging - check LR", fg=COLORS['bad'])
         elif epochs_since_best > 50:
-            self.analysis_labels['recommendation'].configure(
-                text="Consider stopping", fg=COLORS['bad'])
+            self.analysis_labels['recommendation'].configure(text="Consider stopping", fg=COLORS['bad'])
         elif epochs_since_best > 30 or abs(relative_slope) < 0.001:
-            self.analysis_labels['recommendation'].configure(
-                text="Plateau - may stop", fg=COLORS['warn'])
+            self.analysis_labels['recommendation'].configure(text="Plateau - may stop", fg=COLORS['warn'])
         elif relative_slope < -0.001:
-            self.analysis_labels['recommendation'].configure(
-                text="Slow progress", fg=COLORS['warn'])
+            self.analysis_labels['recommendation'].configure(text="Slow progress", fg=COLORS['warn'])
         else:
-            self.analysis_labels['recommendation'].configure(
-                text="Stable", fg=COLORS['text'])
+            self.analysis_labels['recommendation'].configure(text="Stable", fg=COLORS['text'])
 
-    def create_fallback_display(self):
+    def create_fallback_display(self, parent):
         """Create text-based display if matplotlib not available."""
-        fallback_frame = tk.Frame(self.root, bg=COLORS['bg'])
+        fallback_frame = tk.Frame(parent, bg=COLORS['bg'])
         fallback_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         tk.Label(fallback_frame, text="matplotlib not installed - showing text output",
@@ -607,7 +782,7 @@ class TrainingMonitor:
     def set_zoom(self, mode):
         self.zoom_mode = mode
         self._highlight_zoom_button()
-        if self.steps:
+        if any(r.steps for r in self.runs):
             self.update_graph()
 
     def toggle_log_scale(self):
@@ -616,18 +791,20 @@ class TrainingMonitor:
         if HAS_MATPLOTLIB:
             scale = 'log' if self.log_scale else 'linear'
             self.ax.set_yscale(scale)
-            if self.has_lpips:
+            any_lpips = any(r.has_lpips for r in self.runs)
+            if any_lpips:
                 self.ax2.set_yscale(scale)
-            if self.steps:
+            if any(r.steps for r in self.runs):
                 self.update_graph()
 
     def toggle_raw(self):
         self.show_raw = not self.show_raw
         self._update_toggle_btn(self.raw_btn, self.show_raw)
         if HAS_MATPLOTLIB:
-            self.l1_raw_line.set_visible(self.show_raw)
-            self.lpips_raw_line.set_visible(self.show_raw and self.has_lpips)
-            self.val_l1_raw_line.set_visible(self.show_raw and self.has_val_data)
+            for run in self.runs:
+                run.l1_raw_line.set_visible(self.show_raw)
+                run.lpips_raw_line.set_visible(self.show_raw and run.has_lpips)
+                run.val_l1_raw_line.set_visible(self.show_raw and run.has_val_data)
             self.canvas.draw_idle()
 
     def toggle_grid(self):
@@ -641,28 +818,25 @@ class TrainingMonitor:
     def cycle_smoothing(self):
         presets = [0.0, 0.5, 0.9, 0.95, 0.99]
         current = self.smoothing.get()
-        # Find next preset
         for p in presets:
             if p > current + 0.005:
                 self.smoothing.set(p)
                 self.smooth_label.configure(text=f"{p:.2f}")
-                if self.steps:
+                if any(r.steps for r in self.runs):
                     self.update_graph()
                 return
-        # Wrap around
         self.smoothing.set(0.0)
         self.smooth_label.configure(text="0.00")
-        if self.steps:
+        if any(r.steps for r in self.runs):
             self.update_graph()
 
     # ─── Mouse interaction ───
 
     def on_mouse_move(self, event):
-        if not HAS_MATPLOTLIB or not event.inaxes or not self.steps:
+        if not HAS_MATPLOTLIB or not event.inaxes:
             self.on_mouse_leave(event)
             return
 
-        # Handle MMB drag panning
         if getattr(self, '_pan_start_px', None) is not None:
             self.on_mmb_drag(event)
             return
@@ -671,35 +845,35 @@ class TrainingMonitor:
         if x is None or y is None:
             return
 
-        # Find nearest data point
-        steps_list = list(self.steps)
-        l1_list = list(self.l1_losses)
+        # Find nearest data point across the active run
+        run = self.runs[self.active_run_idx] if self.active_run_idx < len(self.runs) else None
+        if not run or not run.steps:
+            return
+
+        steps_list = list(run.steps)
+        l1_list = list(run.l1_losses)
         idx = self._find_nearest_idx(steps_list, x)
         if idx is None:
             return
 
         ep = steps_list[idx]
         l1_val = l1_list[idx]
-        lpips_val = self.lpips_losses[idx] if self.has_lpips and idx < len(self.lpips_losses) else None
+        lpips_val = run.lpips_losses[idx] if run.has_lpips and idx < len(run.lpips_losses) else None
 
-        # Update crosshair
         self.crosshair_v.set_xdata([ep])
         self.crosshair_h.set_ydata([l1_val])
         self.crosshair_v.set_visible(True)
         self.crosshair_h.set_visible(True)
 
-        # Build tooltip text
-        text = f"Ep {ep:.2f}  L1: {l1_val:.5f}"
+        text = f"Ep {ep:.2f}  {run.loss_label}: {l1_val:.5f}"
         if lpips_val is not None:
             text += f"  LPIPS: {lpips_val:.5f}"
 
-        # Position tooltip
         xlim = self.ax.get_xlim()
         ylim = self.ax.get_ylim()
         x_range = xlim[1] - xlim[0]
         y_range = ylim[1] - ylim[0]
 
-        # Offset tooltip from crosshair - flip side if near edge
         tx = ep + x_range * 0.02
         ty = l1_val + y_range * 0.05
         ha = 'left'
@@ -723,33 +897,27 @@ class TrainingMonitor:
         self.canvas.draw_idle()
 
     def on_scroll(self, event):
-        """Scroll to zoom in/out centered on cursor position. Zooms both axes."""
-        if not event.inaxes or not self.steps:
+        if not event.inaxes or not any(r.steps for r in self.runs):
             return
 
         scale_factor = 0.8 if event.button == 'up' else 1.25
 
-        # Get cursor position in primary axis coords (works even if hovering ax2)
-        # Use pixel coords to convert to ax data coords reliably
         px, py = event.x, event.y
         xdata, _ = self.ax.transData.inverted().transform((px, py))
 
         xlim = self.ax.get_xlim()
         ylim = self.ax.get_ylim()
 
-        # Zoom X (shared between axes)
         new_width = (xlim[1] - xlim[0]) * scale_factor
         rel_x = (xdata - xlim[0]) / (xlim[1] - xlim[0])
         self.ax.set_xlim(xdata - new_width * rel_x, xdata + new_width * (1 - rel_x))
 
-        # Zoom primary Y axis
         if not self.log_scale:
             _, ydata_ax = self.ax.transData.inverted().transform((px, py))
             new_height = (ylim[1] - ylim[0]) * scale_factor
             rel_y = (ydata_ax - ylim[0]) / (ylim[1] - ylim[0])
             self.ax.set_ylim(ydata_ax - new_height * rel_y, ydata_ax + new_height * (1 - rel_y))
 
-        # Zoom secondary Y axis (LPIPS) proportionally
         if self.ax2.get_visible() and not self.log_scale:
             y2lim = self.ax2.get_ylim()
             _, ydata_ax2 = self.ax2.transData.inverted().transform((px, py))
@@ -757,47 +925,39 @@ class TrainingMonitor:
             rel_y2 = (ydata_ax2 - y2lim[0]) / (y2lim[1] - y2lim[0])
             self.ax2.set_ylim(ydata_ax2 - new_h2 * rel_y2, ydata_ax2 + new_h2 * (1 - rel_y2))
 
-        # Switch to custom zoom mode
         self.zoom_mode = 'custom'
         self._highlight_zoom_button()
         self.canvas.draw_idle()
 
     def on_button_press(self, event):
-        """Start MMB pan. Store pixel coords so both axes pan together."""
-        if event.button == 2 and event.inaxes and self.steps:
+        if event.button == 2 and event.inaxes and any(r.steps for r in self.runs):
             self._pan_start_px = (event.x, event.y)
             self._pan_start_xlim = self.ax.get_xlim()
             self._pan_start_ylim = self.ax.get_ylim()
             self._pan_start_y2lim = self.ax2.get_ylim() if self.ax2.get_visible() else None
 
     def on_button_release(self, event):
-        """End MMB pan."""
         if event.button == 2:
             self._pan_start_px = None
 
     def on_mmb_drag(self, event):
-        """Handle MMB drag for panning. Uses pixel delta so both axes move together."""
         if self._pan_start_px is None or event.x is None or event.y is None:
             return
-        # Pixel deltas
         dpx = self._pan_start_px[0] - event.x
         dpy = self._pan_start_px[1] - event.y
 
-        # Convert pixel delta to data coords for primary axis
         inv = self.ax.transData.inverted()
         origin = inv.transform((0, 0))
         delta = inv.transform((dpx, dpy))
         dx = delta[0] - origin[0]
-        dy = -(delta[1] - origin[1])  # Y pixel axis is inverted
+        dy = -(delta[1] - origin[1])
 
-        # Pan primary axis
         x0, x1 = self._pan_start_xlim
         self.ax.set_xlim(x0 + dx, x1 + dx)
         if not self.log_scale:
             y0, y1 = self._pan_start_ylim
             self.ax.set_ylim(y0 + dy, y1 + dy)
 
-        # Pan secondary axis (LPIPS) proportionally
         if self._pan_start_y2lim is not None and not self.log_scale:
             inv2 = self.ax2.transData.inverted()
             origin2 = inv2.transform((0, 0))
@@ -813,7 +973,6 @@ class TrainingMonitor:
     def _find_nearest_idx(self, steps, target):
         if not steps:
             return None
-        # Binary search for nearest
         lo, hi = 0, len(steps) - 1
         while lo < hi:
             mid = (lo + hi) // 2
@@ -821,26 +980,11 @@ class TrainingMonitor:
                 lo = mid + 1
             else:
                 hi = mid
-        # Check lo and lo-1
         if lo > 0 and abs(steps[lo - 1] - target) < abs(steps[lo] - target):
             return lo - 1
         return lo
 
     # ─── File monitoring ───
-
-    def browse_log(self):
-        initial_dir = os.path.dirname(self.log_file.get()) if self.log_file.get() else os.getcwd()
-        path = filedialog.askopenfilename(
-            title="Select Training Log",
-            initialdir=initial_dir,
-            filetypes=[("Log files", "*.log"), ("Text files", "*.txt"), ("All files", "*.*")]
-        )
-        if path:
-            self.log_file.set(path)
-            self.clear_data()
-            if self.is_monitoring:
-                self.stop_monitoring()
-            self.start_monitoring()
 
     def toggle_monitoring(self):
         if self.is_monitoring:
@@ -849,16 +993,16 @@ class TrainingMonitor:
             self.start_monitoring()
 
     def start_monitoring(self):
-        log_path = self.log_file.get()
-        if not log_path or not os.path.exists(log_path):
+        if not self.runs:
             return
-
         self.is_monitoring = True
         self.monitor_btn.configure(text="Stop", bg=COLORS['btn_active'])
         self.monitor_btn._is_active = True
-
         # Read existing content first
-        self.read_log_file(full_read=True)
+        for run in self.runs:
+            self.read_log_file(run, full_read=True)
+        self.update_graph()
+        self.update_stats()
         self.update_loop()
 
     def stop_monitoring(self):
@@ -866,38 +1010,38 @@ class TrainingMonitor:
         self.monitor_btn.configure(text="Start", bg=COLORS['btn_normal'])
         self.monitor_btn._is_active = False
 
-    def read_log_file(self, full_read=False):
-        log_path = self.log_file.get()
+    def read_log_file(self, run, full_read=False):
+        log_path = run.log_file
         if not log_path or not os.path.exists(log_path):
-            return
+            return False
 
         try:
             current_modified = os.path.getmtime(log_path)
-            if not full_read and current_modified == self.last_modified:
-                return
-            self.last_modified = current_modified
+            if not full_read and current_modified == run.last_modified:
+                return False
+            run.last_modified = current_modified
 
             with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
                 if full_read:
-                    self.last_position = 0
-                    self.clear_data()
+                    run.last_position = 0
+                    run.clear()
 
-                f.seek(self.last_position)
+                f.seek(run.last_position)
                 new_content = f.read()
-                self.last_position = f.tell()
+                run.last_position = f.tell()
 
             if new_content:
-                self.parse_log_content(new_content)
+                return self.parse_log_content(run, new_content)
 
-        except Exception as e:
+        except Exception:
             pass
+        return False
 
-    def parse_log_content(self, content):
-        # Matches both L1 and BCE+Dice loss labels from train.py log format
-        pattern = r'Epoch\[(\d+)\]\s*Step\[(\d+)\].*?\b(L1|BCE\+Dice):([\d.]+)'
+    def parse_log_content(self, run, content):
+        pattern = r'Epoch\[(\d+)\]\s*Step\[(\d+)\].*?\b(L1|L2|BCE\+Dice):([\d.]+)'
         lpips_pattern = r'LPIPS:([\d.]+)'
         time_pattern = r'T/Step:([\d.]+)s'
-        val_pattern = r'Val Epoch\[(\d+)\]\s*Step\[(\d+)\].*?Val_(L1|BCE\+Dice):([\d.]+)'
+        val_pattern = r'Val Epoch\[(\d+)\]\s*Step\[(\d+)\].*?Val_(L1|L2|BCE\+Dice):([\d.]+)'
         val_lpips_pattern = r'Val_LPIPS:([\d.]+)'
         val_psnr_pattern = r'PSNR:([\d.]+)dB'
         val_ssim_pattern = r'SSIM:([\d.]+)'
@@ -910,25 +1054,19 @@ class TrainingMonitor:
             if match:
                 epoch = int(match.group(1))
                 step = int(match.group(2))
-                detected_label = match.group(3)   # 'L1' or 'BCE+Dice'
+                detected_label = match.group(3)
                 l1_loss = float(match.group(4))
 
-                # Update displayed loss label on first data point
-                if not self.steps and detected_label != self.loss_label:
-                    self.loss_label = detected_label
-                    if HAS_MATPLOTLIB:
-                        self.ax.set_ylabel(f'{detected_label} Loss',
-                                           color=COLORS['l1'], fontsize=10)
+                if not run.steps and detected_label != run.loss_label:
+                    run.loss_label = detected_label
 
                 lpips_match = re.search(lpips_pattern, line)
                 lpips_loss = float(lpips_match.group(1)) if lpips_match else None
 
-                # Parse step time
                 time_match = re.search(time_pattern, line)
                 if time_match:
-                    self.time_per_step.append(float(time_match.group(1)))
+                    run.time_per_step.append(float(time_match.group(1)))
 
-                # X-axis: fractional epoch
                 iter_match = re.search(r'\((\d+)/(\d+)\)', line)
                 if iter_match:
                     step_in_epoch = int(iter_match.group(1))
@@ -937,53 +1075,48 @@ class TrainingMonitor:
                 else:
                     x_value = epoch
 
-                self.steps.append(x_value)
-                self.l1_losses.append(l1_loss)
+                run.steps.append(x_value)
+                run.l1_losses.append(l1_loss)
 
-                # Track best
-                if l1_loss < self.best_l1:
-                    self.best_l1 = l1_loss
-                    self.best_l1_epoch = x_value
+                if l1_loss < run.best_l1:
+                    run.best_l1 = l1_loss
+                    run.best_l1_epoch = x_value
 
                 if lpips_loss is not None:
-                    self.lpips_losses.append(lpips_loss)
-                    self.has_lpips = True
-                    if lpips_loss < self.best_lpips:
-                        self.best_lpips = lpips_loss
-                        self.best_lpips_epoch = x_value
-                elif self.has_lpips:
-                    self.lpips_losses.append(self.lpips_losses[-1] if self.lpips_losses else 0)
+                    run.lpips_losses.append(lpips_loss)
+                    run.has_lpips = True
+                    if lpips_loss < run.best_lpips:
+                        run.best_lpips = lpips_loss
+                        run.best_lpips_epoch = x_value
+                elif run.has_lpips:
+                    run.lpips_losses.append(run.lpips_losses[-1] if run.lpips_losses else 0)
 
                 new_data = True
-                continue  # Don't also try val pattern on same line
+                continue
 
-            # Check for validation line
             val_match = re.search(val_pattern, line)
             if val_match:
                 val_epoch = int(val_match.group(1))
-                val_step = int(val_match.group(2))
                 val_l1_loss = float(val_match.group(4))
-                val_x_value = val_epoch  # Val is logged at epoch boundaries
-                self.val_steps.append(val_x_value)
-                self.val_l1_losses.append(val_l1_loss)
-                self.has_val_data = True
-                if val_l1_loss < self.best_val_l1:
-                    self.best_val_l1 = val_l1_loss
-                    self.best_val_l1_epoch = val_x_value
+                val_x_value = val_epoch
+                run.val_steps.append(val_x_value)
+                run.val_l1_losses.append(val_l1_loss)
+                run.has_val_data = True
+                if val_l1_loss < run.best_val_l1:
+                    run.best_val_l1 = val_l1_loss
+                    run.best_val_l1_epoch = val_x_value
                 val_lp_match = re.search(val_lpips_pattern, line)
                 if val_lp_match:
-                    self.val_lpips_losses.append(float(val_lp_match.group(1)))
+                    run.val_lpips_losses.append(float(val_lp_match.group(1)))
                 psnr_match = re.search(val_psnr_pattern, line)
                 if psnr_match:
-                    self.val_psnr.append(float(psnr_match.group(1)))
+                    run.val_psnr.append(float(psnr_match.group(1)))
                 ssim_match = re.search(val_ssim_pattern, line)
                 if ssim_match:
-                    self.val_ssim.append(float(ssim_match.group(1)))
+                    run.val_ssim.append(float(ssim_match.group(1)))
                 new_data = True
 
-        if new_data:
-            self.update_graph()
-            self.update_stats()
+        return new_data
 
     # ─── Smoothing ───
 
@@ -1004,105 +1137,126 @@ class TrainingMonitor:
     # ─── Graph update ───
 
     def _update_legend(self):
-        lines = [self.l1_line]
-        labels = [f'{self.loss_label} Loss']
-        if self.has_lpips:
-            lines.append(self.lpips_line)
-            labels.append('LPIPS Loss')
-        if self.has_val_data:
-            lines.append(self.val_l1_line)
-            labels.append('Val Loss')
-        lines.append(self.best_l1_marker)
-        labels.append('Best')
+        lines = []
+        labels = []
+        for run in self.runs:
+            if run.l1_line is not None:
+                lines.append(run.l1_line)
+                labels.append(run.name)
 
-        self.ax.legend(lines, labels, loc='upper right',
-                       facecolor=COLORS['bg_light'], edgecolor=COLORS['border'],
-                       labelcolor=COLORS['text'], fontsize=9)
+        if lines:
+            self.ax.legend(lines, labels, loc='upper right',
+                           facecolor=COLORS['bg_light'], edgecolor=COLORS['border'],
+                           labelcolor=COLORS['text'], fontsize=8)
+        elif hasattr(self.ax, 'get_legend') and self.ax.get_legend():
+            self.ax.get_legend().remove()
 
     def update_graph(self):
         if not HAS_MATPLOTLIB:
             self.update_text_display()
             return
 
-        if not self.steps:
+        if not any(r.steps for r in self.runs):
             return
 
-        steps = list(self.steps)
-        l1_raw = list(self.l1_losses)
-        l1_smooth = self.apply_smoothing(self.l1_losses)
+        # Compute global view range across all runs
+        all_steps = []
+        for run in self.runs:
+            if run.steps:
+                all_steps.extend([run.steps[0], run.steps[-1]])
+        if not all_steps:
+            return
 
-        # Determine view range
-        x_min, x_max = self._get_view_range(steps)
-        view_mask = [x_min <= s <= x_max for s in steps]
+        global_min = min(all_steps)
+        global_max = max(all_steps)
+        x_min, x_max = self._get_view_range(global_min, global_max)
 
-        # Filter to view range for axis scaling
-        view_steps = [s for s, m in zip(steps, view_mask) if m]
-        view_l1_smooth = [v for v, m in zip(l1_smooth, view_mask) if m]
-        view_l1_raw = [v for v, m in zip(l1_raw, view_mask) if m]
+        any_lpips = False
+        all_y_vals = []
 
-        # Update L1 lines
-        self.l1_raw_line.set_data(steps, l1_raw)
-        self.l1_raw_line.set_visible(self.show_raw)
-        self.l1_line.set_data(steps, l1_smooth)
+        for run in self.runs:
+            if not run.steps:
+                # Hide lines for empty runs
+                if run.l1_line:
+                    run.l1_line.set_data([], [])
+                    run.l1_raw_line.set_data([], [])
+                continue
 
-        # Update LPIPS
-        if self.has_lpips and self.lpips_losses:
-            lpips_raw = list(self.lpips_losses)
-            lpips_smooth = self.apply_smoothing(self.lpips_losses)
-            self.lpips_raw_line.set_data(steps, lpips_raw)
-            self.lpips_raw_line.set_visible(self.show_raw)
-            self.lpips_line.set_data(steps, lpips_smooth)
-            self.lpips_line.set_visible(True)
-            self.ax2.set_visible(True)
+            steps = list(run.steps)
+            l1_raw = list(run.l1_losses)
+            l1_smooth = self.apply_smoothing(run.l1_losses)
 
-            # Scale secondary axis to view range
-            view_lpips_smooth = [v for v, m in zip(lpips_smooth, view_mask) if m]
-            if view_lpips_smooth:
-                lp_min, lp_max = min(view_lpips_smooth), max(view_lpips_smooth)
-                margin = (lp_max - lp_min) * 0.1 or 0.01
-                if not self.log_scale:
-                    self.ax2.set_ylim(max(0, lp_min - margin), lp_max + margin)
-        else:
-            self.lpips_line.set_visible(False)
-            self.lpips_raw_line.set_visible(False)
-            self.ax2.set_visible(False)
+            view_mask = [x_min <= s <= x_max for s in steps]
+            view_l1_smooth = [v for v, m in zip(l1_smooth, view_mask) if m]
+            view_l1_raw = [v for v, m in zip(l1_raw, view_mask) if m]
 
-        # Update validation lines
-        if self.has_val_data and self.val_steps:
-            val_steps = list(self.val_steps)
-            val_l1_raw = list(self.val_l1_losses)
-            val_l1_smooth = self.apply_smoothing(self.val_l1_losses)
-            self.val_l1_raw_line.set_data(val_steps, val_l1_raw)
-            self.val_l1_raw_line.set_visible(self.show_raw)
-            self.val_l1_line.set_data(val_steps, val_l1_smooth)
-            self.val_l1_line.set_visible(True)
-        else:
-            self.val_l1_line.set_visible(False)
-            self.val_l1_raw_line.set_visible(False)
+            # Update L1 lines
+            run.l1_raw_line.set_data(steps, l1_raw)
+            run.l1_raw_line.set_visible(self.show_raw)
+            run.l1_line.set_data(steps, l1_smooth)
 
-        # Update best loss marker
-        if self.best_l1 < float('inf'):
-            self.best_l1_marker.set_data([self.best_l1_epoch], [self.best_l1])
-            self.best_l1_annot.set_text(f" Best: {self.best_l1:.5f}")
-            self.best_l1_annot.xy = (self.best_l1_epoch, self.best_l1)
-            self.best_l1_annot.set_visible(x_min <= self.best_l1_epoch <= x_max)
-        if self.has_lpips and self.best_lpips < float('inf'):
-            self.best_lpips_marker.set_data([self.best_lpips_epoch], [self.best_lpips])
+            # Collect Y values for axis scaling
+            if view_l1_smooth:
+                all_y_vals.extend(view_l1_smooth)
+            if self.show_raw and view_l1_raw:
+                all_y_vals.extend(view_l1_raw)
+
+            # LPIPS
+            if run.has_lpips and run.lpips_losses:
+                any_lpips = True
+                lpips_raw = list(run.lpips_losses)
+                lpips_smooth = self.apply_smoothing(run.lpips_losses)
+                run.lpips_raw_line.set_data(steps, lpips_raw)
+                run.lpips_raw_line.set_visible(self.show_raw)
+                run.lpips_line.set_data(steps, lpips_smooth)
+                run.lpips_line.set_visible(True)
+            else:
+                run.lpips_line.set_visible(False)
+                run.lpips_raw_line.set_visible(False)
+
+            # Validation lines
+            if run.has_val_data and run.val_steps:
+                val_steps = list(run.val_steps)
+                val_l1_raw = list(run.val_l1_losses)
+                val_l1_smooth = self.apply_smoothing(run.val_l1_losses)
+                run.val_l1_raw_line.set_data(val_steps, val_l1_raw)
+                run.val_l1_raw_line.set_visible(self.show_raw)
+                run.val_l1_line.set_data(val_steps, val_l1_smooth)
+                run.val_l1_line.set_visible(True)
+                # Include in Y range
+                val_in_view = [v for s, v in zip(val_steps, val_l1_raw) if x_min <= s <= x_max]
+                if val_in_view:
+                    all_y_vals.extend(val_in_view)
+            else:
+                run.val_l1_line.set_visible(False)
+                run.val_l1_raw_line.set_visible(False)
+
+            # Best marker — only show for active run to avoid clutter
+            is_active = (self.runs.index(run) == self.active_run_idx)
+            if is_active and run.best_l1 < float('inf'):
+                run.best_l1_marker.set_data([run.best_l1_epoch], [run.best_l1])
+                run.best_l1_annot.set_text(f" Best: {run.best_l1:.5f}")
+                run.best_l1_annot.xy = (run.best_l1_epoch, run.best_l1)
+                run.best_l1_annot.set_visible(x_min <= run.best_l1_epoch <= x_max)
+            else:
+                run.best_l1_marker.set_data([], [])
+                run.best_l1_annot.set_visible(False)
+
+            if run.has_lpips and run.best_lpips < float('inf'):
+                run.best_lpips_marker.set_data([run.best_lpips_epoch], [run.best_lpips])
+            else:
+                run.best_lpips_marker.set_data([], [])
+
+        # Show/hide LPIPS axis
+        self.ax2.set_visible(any_lpips)
 
         # Set axis limits
         if self.zoom_mode != 'custom':
             self.ax.set_xlim(x_min - (x_max - x_min) * 0.01,
                              x_max + (x_max - x_min) * 0.01)
 
-            if view_l1_smooth and not self.log_scale:
-                y_vals = view_l1_smooth
-                if self.show_raw:
-                    y_vals = y_vals + view_l1_raw
-                # Include val data in Y-axis range
-                if self.has_val_data and self.val_steps:
-                    val_in_view = [v for s, v in zip(self.val_steps, self.val_l1_losses) if x_min <= s <= x_max]
-                    if val_in_view: y_vals = y_vals + val_in_view
-                y_min, y_max = min(y_vals), max(y_vals)
+            if all_y_vals and not self.log_scale:
+                y_min, y_max = min(all_y_vals), max(all_y_vals)
                 margin = (y_max - y_min) * 0.1 or 0.01
                 self.ax.set_ylim(max(0, y_min - margin), y_max + margin)
             elif self.log_scale:
@@ -1112,76 +1266,91 @@ class TrainingMonitor:
         self._update_legend()
         self.canvas.draw_idle()
 
-    def _get_view_range(self, steps):
-        if not steps:
-            return 0, 1
-
-        total_max = steps[-1]
-        total_min = steps[0]
-
+    def _get_view_range(self, total_min, total_max):
         if self.zoom_mode == 'all':
             return total_min, total_max
         elif self.zoom_mode == 'custom':
             xlim = self.ax.get_xlim()
             return xlim[0], xlim[1]
 
-        # Last N epochs
         epoch_counts = {'last_1': 1, 'last_5': 5, 'last_10': 10, 'last_20': 20}
         n_epochs = epoch_counts.get(self.zoom_mode, 10)
         return max(total_min, total_max - n_epochs), total_max
 
     def update_stats(self):
-        if not self.steps:
+        run = self.runs[self.active_run_idx] if self.active_run_idx < len(self.runs) else None
+        if not run or not run.steps:
+            # Reset all
+            for key in self.stat_labels:
+                self.stat_labels[key].configure(text='--')
+            self.stat_labels['points'].configure(text='0')
             return
 
-        ep = self.steps[-1]
-        l1 = self.l1_losses[-1]
+        self.stat_labels['run_name'].configure(text=run.name[:15], fg=run.color)
+
+        ep = run.steps[-1]
+        l1 = run.l1_losses[-1]
 
         self.stat_labels['epoch'].configure(text=f"{ep:.2f}")
         self.stat_labels['l1_cur'].configure(text=f"{l1:.5f}")
-        self.stat_labels['points'].configure(text=f"{len(self.steps):,}")
+        self.stat_labels['points'].configure(text=f"{len(run.steps):,}")
 
-        if self.best_l1 < float('inf'):
-            self.stat_labels['l1_best'].configure(text=f"{self.best_l1:.5f}")
-            self.stat_labels['l1_best_ep'].configure(text=f"{self.best_l1_epoch:.1f}")
+        if run.best_l1 < float('inf'):
+            self.stat_labels['l1_best'].configure(text=f"{run.best_l1:.5f}")
+            self.stat_labels['l1_best_ep'].configure(text=f"{run.best_l1_epoch:.1f}")
 
-        if self.has_val_data and self.val_l1_losses:
-            self.stat_labels['val_l1_cur'].configure(text=f"{self.val_l1_losses[-1]:.5f}")
-            if self.best_val_l1 < float('inf'):
-                self.stat_labels['val_l1_best'].configure(text=f"{self.best_val_l1:.5f}")
+        if run.has_val_data and run.val_l1_losses:
+            self.stat_labels['val_l1_cur'].configure(text=f"{run.val_l1_losses[-1]:.5f}")
+            if run.best_val_l1 < float('inf'):
+                self.stat_labels['val_l1_best'].configure(text=f"{run.best_val_l1:.5f}")
+        else:
+            self.stat_labels['val_l1_cur'].configure(text='--')
+            self.stat_labels['val_l1_best'].configure(text='--')
 
-        if self.has_lpips and self.lpips_losses:
-            self.stat_labels['lpips_cur'].configure(text=f"{self.lpips_losses[-1]:.5f}")
-            if self.best_lpips < float('inf'):
-                self.stat_labels['lpips_best'].configure(text=f"{self.best_lpips:.5f}")
+        if run.has_lpips and run.lpips_losses:
+            self.stat_labels['lpips_cur'].configure(text=f"{run.lpips_losses[-1]:.5f}")
+            if run.best_lpips < float('inf'):
+                self.stat_labels['lpips_best'].configure(text=f"{run.best_lpips:.5f}")
+        else:
+            self.stat_labels['lpips_cur'].configure(text='--')
+            self.stat_labels['lpips_best'].configure(text='--')
 
-        if self.val_psnr:
-            self.stat_labels['psnr'].configure(text=f"{self.val_psnr[-1]:.2f}")
-        if self.val_ssim:
-            self.stat_labels['ssim'].configure(text=f"{self.val_ssim[-1]:.4f}")
+        if run.val_psnr:
+            self.stat_labels['psnr'].configure(text=f"{run.val_psnr[-1]:.2f}")
+        else:
+            self.stat_labels['psnr'].configure(text='--')
+        if run.val_ssim:
+            self.stat_labels['ssim'].configure(text=f"{run.val_ssim[-1]:.4f}")
+        else:
+            self.stat_labels['ssim'].configure(text='--')
 
-        if self.time_per_step:
-            avg_time = sum(self.time_per_step) / len(self.time_per_step)
+        if run.time_per_step:
+            avg_time = sum(run.time_per_step) / len(run.time_per_step)
             self.stat_labels['rate'].configure(text=f"{avg_time:.3f}s")
+        else:
+            self.stat_labels['rate'].configure(text='--')
 
         self.analyze_training()
 
     def update_text_display(self):
         if not hasattr(self, 'text_display'):
             return
+        run = self.runs[self.active_run_idx] if self.active_run_idx < len(self.runs) else None
+        if not run or not run.steps:
+            return
 
         self.text_display.configure(state=tk.NORMAL)
         self.text_display.delete(1.0, tk.END)
 
-        n = min(50, len(self.steps))
-        self.text_display.insert(tk.END, f"Last {n} data points:\n\n")
-        self.text_display.insert(tk.END, f"{'Epoch':<10} {'L1 Loss':<14} {'LPIPS':<14}\n")
+        n = min(50, len(run.steps))
+        self.text_display.insert(tk.END, f"Run: {run.name} — Last {n} data points:\n\n")
+        self.text_display.insert(tk.END, f"{'Epoch':<10} {'Loss':<14} {'LPIPS':<14}\n")
         self.text_display.insert(tk.END, "-" * 40 + "\n")
 
         for i in range(-n, 0):
-            epoch = self.steps[i]
-            l1 = self.l1_losses[i]
-            lpips = self.lpips_losses[i] if self.has_lpips and len(self.lpips_losses) > abs(i) else None
+            epoch = run.steps[i]
+            l1 = run.l1_losses[i]
+            lpips = run.lpips_losses[i] if run.has_lpips and len(run.lpips_losses) > abs(i) else None
             line = f"{epoch:<10.2f} {l1:<14.6f}"
             if lpips is not None:
                 line += f" {lpips:<14.6f}"
@@ -1189,46 +1358,28 @@ class TrainingMonitor:
 
         self.text_display.configure(state=tk.DISABLED)
 
-    def clear_data(self):
-        self.steps.clear()
-        self.l1_losses.clear()
-        self.lpips_losses.clear()
-        self.has_lpips = False
-        self.loss_label = 'Loss'
-        self.last_position = 0
-        self.best_l1 = float('inf')
-        self.best_l1_epoch = 0
-        self.best_lpips = float('inf')
-        self.best_lpips_epoch = 0
-        self.time_per_step.clear()
-        self.val_steps.clear()
-        self.val_l1_losses.clear()
-        self.val_lpips_losses.clear()
-        self.val_psnr.clear()
-        self.val_ssim.clear()
-        self.has_val_data = False
-        self.best_val_l1 = float('inf')
-        self.best_val_l1_epoch = 0
+    def clear_all_data(self):
+        for run in self.runs:
+            run.clear()
+            if HAS_MATPLOTLIB:
+                run.l1_line.set_data([], [])
+                run.l1_raw_line.set_data([], [])
+                run.lpips_line.set_data([], [])
+                run.lpips_raw_line.set_data([], [])
+                run.val_l1_line.set_data([], [])
+                run.val_l1_raw_line.set_data([], [])
+                run.best_l1_marker.set_data([], [])
+                run.best_lpips_marker.set_data([], [])
+                run.best_l1_annot.set_visible(False)
 
         if HAS_MATPLOTLIB:
-            self.l1_line.set_data([], [])
-            self.l1_raw_line.set_data([], [])
-            self.lpips_line.set_data([], [])
-            self.lpips_raw_line.set_data([], [])
-            self.val_l1_line.set_data([], [])
-            self.val_l1_raw_line.set_data([], [])
-            self.best_l1_marker.set_data([], [])
-            self.best_lpips_marker.set_data([], [])
-            self.best_l1_annot.set_visible(False)
             self.canvas.draw_idle()
 
-        # Reset stat labels
         if hasattr(self, 'stat_labels'):
             for key in self.stat_labels:
                 self.stat_labels[key].configure(text='--')
             self.stat_labels['points'].configure(text='0')
 
-        # Reset analysis labels
         if hasattr(self, 'analysis_labels'):
             for key in self.analysis_labels:
                 self.analysis_labels[key].configure(text='--', fg=COLORS['text'])
@@ -1236,7 +1387,13 @@ class TrainingMonitor:
     def update_loop(self):
         if not self.is_monitoring:
             return
-        self.read_log_file()
+        any_new = False
+        for run in self.runs:
+            if self.read_log_file(run):
+                any_new = True
+        if any_new:
+            self.update_graph()
+            self.update_stats()
         self.root.after(self.update_interval, self.update_loop)
 
 
@@ -1244,13 +1401,19 @@ def main():
     parser = argparse.ArgumentParser(description='TuNet Training Monitor')
     parser.add_argument('--log_file', type=str, help='Path to training.log file')
     parser.add_argument('--output_dir', type=str, help='Path to output directory containing training.log')
+    parser.add_argument('--data_dir', type=str, help='Parent directory to scan for multiple training runs')
     args = parser.parse_args()
 
     log_file = None
+    data_dir = None
+
     if args.log_file:
         log_file = args.log_file
     elif args.output_dir:
         log_file = os.path.join(args.output_dir, 'training.log')
+
+    if args.data_dir:
+        data_dir = args.data_dir
 
     if not HAS_MATPLOTLIB:
         print("\n" + "=" * 60)
@@ -1271,7 +1434,7 @@ def main():
     style.configure('TEntry', fieldbackground=COLORS['bg_light'], foreground=COLORS['text'])
     style.configure('TScale', background=COLORS['bg'], troughcolor=COLORS['bg_light'])
 
-    app = TrainingMonitor(root, log_file)
+    app = TrainingMonitor(root, log_file, data_dir)
     root.mainloop()
 
 
