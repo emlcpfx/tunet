@@ -1,4 +1,7 @@
 #!/bin/bash
+# Always run from project root (one level up from this script)
+cd "$(dirname "$0")/.."
+
 echo "============================================"
 echo "TuNet Environment Setup (Linux/macOS)"
 echo "============================================"

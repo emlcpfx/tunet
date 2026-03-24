@@ -5,8 +5,8 @@
 #   1. A manifest.json with file hashes and version info
 #   2. Compressed archive parts (split to stay under GitHub's 2 GB limit)
 #
-# Usage:  conda run -n tunet python package_release.py [--version X.Y.Z]
-# Output: release/ directory with manifest.json + .zip parts
+# Usage:  conda run -n tunet python scripts/package_release.py [--version X.Y.Z]
+# Output: scripts/release/ directory with manifest.json + .zip parts
 # ==============================================================================
 
 import os
@@ -19,8 +19,9 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 
-DIST_DIR = Path(__file__).parent / "dist" / "TuNet"
-RELEASE_DIR = Path(__file__).parent / "release"
+PROJECT_ROOT = Path(__file__).parent.parent
+DIST_DIR = PROJECT_ROOT / "dist" / "TuNet"
+RELEASE_DIR = PROJECT_ROOT / "scripts" / "release"
 MAX_PART_SIZE = 1_900_000_000  # ~1.9 GB per part (under GitHub's 2 GB limit)
 
 

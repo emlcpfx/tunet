@@ -46,3 +46,5 @@ _archive/
 # Settings
 inference_gui_settings.json
 Spark/frontend/.env
+
+yml/

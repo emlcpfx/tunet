@@ -2,10 +2,13 @@
 REM ==============================================================================
 REM TuNet PyInstaller Build Script
 REM
-REM Usage:
-REM   build_exe.bat          - Build full distribution (with CUDA, ~5.2 GB)
-REM   build_exe.bat package  - Package dist for GitHub Release upload
+REM Usage (run from project root or scripts/ directory):
+REM   scripts\build_exe.bat          - Build full distribution (with CUDA, ~5.2 GB)
+REM   scripts\build_exe.bat package  - Package dist for GitHub Release upload
 REM ==============================================================================
+
+REM Always run from project root (one level up from this script)
+cd /d "%~dp0.."
 
 echo ============================================
 echo  TuNet PyInstaller Build
@@ -36,7 +39,7 @@ if "%BUILD_TYPE%"=="package" goto :package
 if "%BUILD_TYPE%"=="build" goto :build
 
 echo Unknown option: %BUILD_TYPE%
-echo Usage: build_exe.bat [build^|package]
+echo Usage: scripts\build_exe.bat [build^|package]
 pause
 exit /b 1
 
@@ -50,7 +53,7 @@ if exist "dist\TuNet" rmdir /s /q "dist\TuNet"
 
 set OPENCV_IO_ENABLE_OPENEXR=1
 
-pyinstaller tunet.spec --noconfirm
+pyinstaller scripts\tunet.spec --noconfirm
 
 if errorlevel 1 (
     echo.
@@ -65,7 +68,7 @@ echo  Build Complete!
 echo ============================================
 echo  Output: dist\TuNet\TuNet.exe
 echo.
-echo  Next: run 'build_exe.bat package' to create
+echo  Next: run 'scripts\build_exe.bat package' to create
 echo  GitHub Release archives.
 echo ============================================
 goto :done
@@ -75,13 +78,13 @@ echo Creating release packages for GitHub upload...
 echo.
 
 if not exist "dist\TuNet\TuNet.exe" (
-    echo ERROR: No distribution found. Run 'build_exe.bat' first.
+    echo ERROR: No distribution found. Run 'scripts\build_exe.bat' first.
     pause
     exit /b 1
 )
 
 set /p VERSION="Enter version (e.g. 0.1.0): "
-python package_release.py --version %VERSION%
+python scripts\package_release.py --version %VERSION%
 
 if errorlevel 1 (
     echo.
