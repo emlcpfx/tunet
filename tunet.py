@@ -127,6 +127,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
 
         # --- Signals ---
         self.tabs.currentChanged.connect(self._on_tab_changed)
+        self.verify_btn.clicked.connect(self._verify_inputs)
 
         # --- File watcher for previews ---
         self.file_watcher = QFileSystemWatcher()
@@ -527,7 +528,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             'training': {
                 'finetune_from': gp(self.finetune_from_input) or None,
                 'iterations_per_epoch': self.iter_per_epoch_input.value(),
-                'batch_size': self.batch_size_input.value(),
+                'batch_size': 0 if self.auto_batch_check.isChecked() else self.batch_size_input.value(),
                 'max_steps': self.max_steps_input.value(),
                 'use_amp': self.use_amp_input.isChecked(),
                 'loss': self.loss_input.currentText(),
@@ -622,7 +623,9 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         training = config.get('training', {})
         sp(self.finetune_from_input, training.get('finetune_from', '') or '')
         self.iter_per_epoch_input.setValue(training.get('iterations_per_epoch', 500))
-        self.batch_size_input.setValue(training.get('batch_size', 4))
+        saved_batch = training.get('batch_size', 4)
+        self.auto_batch_check.setChecked(saved_batch == 0)
+        self.batch_size_input.setValue(saved_batch if saved_batch > 0 else 4)
         self.max_steps_input.setValue(training.get('max_steps', 0))
         self.use_amp_input.setChecked(training.get('use_amp', True))
         self.loss_input.setCurrentText(training.get('loss', 'l1'))
@@ -896,6 +899,67 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         self.preview_timer.start()
         self.process_monitor.start()
         return True
+
+    def _verify_inputs(self):
+        """Run pre-flight dataset verification and show results."""
+        src_dir = self._get_path(self.src_dir_input)
+        dst_dir = self._get_path(self.dst_dir_input)
+        if not src_dir or not os.path.isdir(src_dir):
+            QMessageBox.warning(self, "Verify Inputs", "Source directory is not set or does not exist.")
+            return
+        if not dst_dir or not os.path.isdir(dst_dir):
+            QMessageBox.warning(self, "Verify Inputs", "Target directory is not set or does not exist.")
+            return
+
+        mask_dir = self._get_path(self.mask_dir_input) or None
+        if mask_dir and not os.path.isdir(mask_dir):
+            mask_dir = None
+        resolution = int(self.resolution_input.currentText())
+        color_space = self.color_space_input.currentText()
+
+        # Show a progress dialog (verification can take a while on large datasets)
+        progress = QProgressDialog("Scanning dataset...", "Cancel", 0, 0, self)
+        progress.setWindowTitle("Verify Inputs")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+
+        try:
+            from utils.verify_inputs import verify_dataset
+            result = verify_dataset(src_dir, dst_dir, mask_dir, resolution, color_space)
+        except Exception as e:
+            progress.close()
+            QMessageBox.critical(self, "Verify Inputs", f"Verification failed:\n{e}")
+            return
+        progress.close()
+
+        # Build message
+        total = result['total_src']
+        valid = result['valid_pairs']
+        issues = result['issues']
+        summary = result['summary']
+
+        if not issues:
+            QMessageBox.information(
+                self, "Verify Inputs",
+                f"All {total} image pairs passed verification.\n"
+                f"Resolution: {resolution}px | Color space: {color_space}")
+            return
+
+        lines = [f"Scanned {total} source images: {valid} valid, {len(issues)} with issues.\n"]
+        for reason, count in sorted(summary.items(), key=lambda x: -x[1]):
+            lines.append(f"  {reason}: {count}")
+        lines.append("")
+
+        # Show first 20 individual issues
+        lines.append("Details (first 20):")
+        for filename, reason in issues[:20]:
+            lines.append(f"  {filename}: {reason}")
+        if len(issues) > 20:
+            lines.append(f"  ... and {len(issues) - 20} more")
+
+        QMessageBox.warning(self, "Verify Inputs", "\n".join(lines))
 
     def _start_training(self):
         full_config = self.gather_config_from_ui()
@@ -1699,6 +1763,10 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                 command.extend(['--log_file', str(log_file)])
             else:
                 command.extend(['--output_dir', model_folder])
+            # Also pass parent dir so the monitor can discover sibling runs
+            parent_dir = Path(model_folder).parent
+            if parent_dir.is_dir():
+                command.extend(['--data_dir', str(parent_dir)])
         try:
             subprocess.Popen(command)
             self.console_output.append("Launched Training Monitor\n")

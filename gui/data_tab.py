@@ -2,7 +2,7 @@ import platform
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox, QScrollArea,
-    QLabel, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox,
+    QLabel, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QPushButton,
 )
 
 
@@ -304,6 +304,15 @@ class DataTabMixin:
             lambda checked: [w.setEnabled(checked) for w in self._color_sub_widgets])
 
         layout.addWidget(grp_aug)
+
+        # --- Verify Inputs ---
+        self.verify_btn = QPushButton("Verify Inputs")
+        self.verify_btn.setToolTip(
+            "Scan source and target directories for issues before training.\n"
+            "Checks for missing destinations, dimension mismatches, corrupt files,\n"
+            "and images that are too small for the configured resolution.")
+        layout.addWidget(self.verify_btn)
+
         layout.addStretch()
 
         # Wrap in scroll area for small screens
