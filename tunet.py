@@ -39,6 +39,7 @@ from PySide6.QtGui import QPixmap, QTextCursor
 
 from gui import (
     IndentDumper, ProcessStreamReader, FileCopyWorker, ZoomPanScrollArea, QTextEditLogHandler,
+    NoScrollEventFilter,
     DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixin, InferenceTabMixin, AboutTabMixin,
 )
 
@@ -124,6 +125,13 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
 
         # Remember the inference tab index for sidebar switching
         self._inference_tab_index = 3
+
+        # --- Prevent scroll-wheel from changing unfocused widgets ---
+        self._no_scroll_filter = NoScrollEventFilter(self)
+        from PySide6.QtWidgets import QComboBox, QSpinBox, QDoubleSpinBox, QAbstractSlider
+        for w in self.findChildren((QComboBox, QSpinBox, QDoubleSpinBox, QAbstractSlider)):
+            w.setFocusPolicy(Qt.StrongFocus)
+            w.installEventFilter(self._no_scroll_filter)
 
         # --- Signals ---
         self.tabs.currentChanged.connect(self._on_tab_changed)

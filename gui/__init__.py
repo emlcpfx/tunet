@@ -1,4 +1,4 @@
-from .widgets import IndentDumper, ProcessStreamReader, FileCopyWorker, ZoomPanScrollArea, QTextEditLogHandler, CollapsibleGroupBox
+from .widgets import IndentDumper, ProcessStreamReader, FileCopyWorker, ZoomPanScrollArea, QTextEditLogHandler, CollapsibleGroupBox, NoScrollEventFilter
 from .data_tab import DataTabMixin
 from .training_tab import TrainingTabMixin
 from .previews_tab import PreviewsTabMixin
