@@ -4,9 +4,25 @@ import yaml
 
 from PySide6.QtWidgets import (
     QScrollArea, QVBoxLayout, QWidget, QLabel, QPushButton,
+    QComboBox, QSpinBox, QDoubleSpinBox, QAbstractSlider,
 )
-from PySide6.QtCore import Qt, QObject, Signal, QTimer, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QObject, QEvent, Signal, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QTextCursor
+
+
+_SCROLL_GUARD_WIDGETS = (QComboBox, QSpinBox, QDoubleSpinBox, QAbstractSlider)
+
+
+class NoScrollEventFilter(QObject):
+    """Blocks wheel events on input widgets unless they already have focus."""
+
+    def eventFilter(self, obj, event):
+        if (event.type() == QEvent.Wheel
+                and isinstance(obj, _SCROLL_GUARD_WIDGETS)
+                and not obj.hasFocus()):
+            event.ignore()
+            return True
+        return False
 
 
 class IndentDumper(yaml.SafeDumper):
