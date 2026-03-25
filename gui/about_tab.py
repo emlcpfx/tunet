@@ -13,10 +13,10 @@ class AboutTabMixin:
 
         # --- Original project credit ---
         orig_title = QLabel("TuNet")
-        orig_title.setStyleSheet("font-size: 22pt; font-weight: bold; color: #ae69f4;")
+        orig_title.setStyleSheet("font-size: 22pt; font-weight: bold; color: #7E3AF2;")
         orig_title.setAlignment(Qt.AlignCenter)
         orig_author = QLabel("Created by tpo.comp")
-        orig_author.setStyleSheet("font-size: 12pt; color: #8b919d;")
+        orig_author.setStyleSheet("font-size: 12pt; color: #6b7280;")
         orig_author.setAlignment(Qt.AlignCenter)
         orig_desc = QLabel(
             "A direct, pixel-level mapping from source to destination images\n"
@@ -34,10 +34,10 @@ class AboutTabMixin:
 
         # --- Fork credit ---
         fork_title = QLabel("VFX Tools Fork")
-        fork_title.setStyleSheet("font-size: 14pt; font-weight: bold; color: #6bc77a;")
+        fork_title.setStyleSheet("font-size: 14pt; font-weight: bold; color: #16A34A;")
         fork_title.setAlignment(Qt.AlignCenter)
         fork_author = QLabel("Maintained by emlcpfx")
-        fork_author.setStyleSheet("font-size: 11pt; color: #8b919d;")
+        fork_author.setStyleSheet("font-size: 11pt; color: #6b7280;")
         fork_author.setAlignment(Qt.AlignCenter)
         fork_changes = QLabel(
             "Changes since fork:\n"

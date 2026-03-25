@@ -99,12 +99,17 @@ class TrainingTabMixin:
         self.progressive_res_check.setChecked(p.get("progressive_resolution", False))
 
     def _create_training_tab(self):
-        """Tab 2: Training -- model, optimization, schedule, logging."""
+        """Training tab — project folder, model, optimization, schedule, logging."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
         # =================================================================
-        # PRESET — always visible, top of tab
+        # PROJECT FOLDER + DATA — at the very top
+        # =================================================================
+        self._create_data_widgets(layout)
+
+        # =================================================================
+        # PRESET — always visible
         # =================================================================
         grp_preset = QGroupBox("Preset")
         form_preset = QFormLayout(grp_preset)
@@ -126,15 +131,16 @@ class TrainingTabMixin:
         form_preset.addRow("Training Preset:", self.preset_input)
         layout.addWidget(grp_preset)
 
+        # Hidden: model folder is auto-set by project folder on Data tab
+        self.model_folder_input = self._create_path_selector("Model Folder", is_output=True)
+        self.model_folder_input.setVisible(False)
+        layout.addWidget(self.model_folder_input)
+
         # =================================================================
         # MODEL — always visible, essential
         # =================================================================
         grp_model = QGroupBox("Model")
         form_model = QFormLayout(grp_model)
-        self.model_folder_input = self._create_path_selector("Model Folder", is_output=True)
-        self.model_folder_input.setToolTip(
-            "Folder where checkpoints, logs, and preview images are saved.\n"
-            "Each training run should have its own folder.")
         self.model_type_input = QComboBox()
         self.model_type_input.addItems(["unet", "msrn"])
         self.model_type_input.setCurrentText("unet")
@@ -152,9 +158,16 @@ class TrainingTabMixin:
             "  128 — Balanced (recommended)\n"
             "  256+ — High capacity for complex transformations\n\n"
             "Larger = more GPU memory. Double the size ≈ 4× the VRAM.")
-        form_model.addRow("Output Folder:", self.model_folder_input)
+        self.finetune_from_input = self._create_path_selector(
+            "Fine-tune From", is_file=True, file_filter="PyTorch Checkpoints (*.pth)")
+        self.finetune_from_input.setToolTip(
+            "Optional: pick an existing .pth to start from instead of training from scratch.\n"
+            "Only model weights are loaded — optimizer resets.\n"
+            "Leave empty to train from scratch.")
+
         form_model.addRow("Model Type:", self.model_type_input)
         form_model.addRow("Model Capacity:", self.model_size_dims_input)
+        form_model.addRow("Fine-tune From:", self.finetune_from_input)
         layout.addWidget(grp_model)
 
         # =================================================================
@@ -573,26 +586,6 @@ class TrainingTabMixin:
 
         grp_aug.setContentLayout(form_aug)
         layout.addWidget(grp_aug)
-
-        # =================================================================
-        # FINE-TUNE — collapsible, optional
-        # =================================================================
-        grp_finetune = CollapsibleGroupBox(
-            "Fine-tune",
-            description="Resume from an existing model to adapt it to new data. "
-                        "Leave empty to train from scratch.",
-            collapsed=True)
-        form_finetune = QFormLayout()
-        self.finetune_from_input = self._create_path_selector(
-            "Fine-tune From", is_file=True, file_filter="PyTorch Checkpoints (*.pth)")
-        self.finetune_from_input.setToolTip(
-            "Pick an existing .pth model to fine-tune on new data.\n"
-            "Only model weights are loaded — optimizer and step counter start fresh.\n\n"
-            "Point Source/Target to your new dataset, pick the checkpoint here, and hit Train.\n"
-            "Leave empty to train from scratch (auto-resumes if output folder has a checkpoint).")
-        form_finetune.addRow("Starting Checkpoint:", self.finetune_from_input)
-        grp_finetune.setContentLayout(form_finetune)
-        layout.addWidget(grp_finetune)
 
         # =================================================================
         # SCHEDULE — collapsible, has sensible defaults

@@ -1,18 +1,33 @@
+import os
 import platform
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QFormLayout, QGroupBox, QScrollArea,
-    QLabel, QSpinBox, QPushButton,
+    QFormLayout, QGroupBox, QLabel, QSpinBox, QPushButton, QLineEdit,
 )
 
 
-class DataTabMixin:
-    """Mixin that creates the Data tab (Tab 0) — folder paths only."""
+# Subfolder names to search for (in priority order)
+_SRC_NAMES = ("src", "source", "input")
+_DST_NAMES = ("dst", "dest", "destination", "target", "output")
+_VAL_SRC_NAMES = ("val_src", "val_source", "val_input", "val/src", "validation/src")
+_VAL_DST_NAMES = ("val_dst", "val_dest", "val_target", "val/dst", "validation/dst")
+_MASK_NAMES = ("mask", "masks", "matte", "mattes")
 
-    def _create_data_tab(self):
-        """Tab 1: Data -- source, target, validation, and mask directories."""
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
+
+def _find_subfolder(root, candidates):
+    """Return the first existing subfolder matching a candidate name, or ''."""
+    for name in candidates:
+        path = os.path.join(root, name)
+        if os.path.isdir(path):
+            return path
+    return ""
+
+
+class DataTabMixin:
+    """Mixin that builds the project-folder widgets (added to Training tab, not its own tab)."""
+
+    def _create_data_widgets(self, layout):
+        """Add project folder picker and hidden path widgets to the given layout."""
 
         # --- Distributed Training (Linux only) ---
         if platform.system() == 'Linux':
@@ -26,67 +41,104 @@ class DataTabMixin:
             self.nproc_input = None
 
         # =================================================================
-        # SOURCE & TARGET DATA
+        # PROJECT FOLDER
         # =================================================================
-        grp_data = QGroupBox("Source & Target Data")
-        form_data = QFormLayout(grp_data)
-        desc = QLabel("Point these to your training image folders. Source = input (before), Target = output (after).")
+        grp_project = QGroupBox("Project Folder")
+        form_project = QFormLayout(grp_project)
+        desc = QLabel(
+            "Pick a folder that contains src/ and dst/ subfolders. "
+            "Optional: val_src/, val_dst/, mask/. Output saves to model/.")
         desc.setWordWrap(True)
         desc.setProperty("cssClass", "section-desc")
-        form_data.addRow(desc)
+        form_project.addRow(desc)
 
-        self.src_dir_input = self._create_path_selector("Source Directory")
-        self.src_dir_input.setToolTip(
-            "Folder with source/input images the model learns to transform FROM.\n"
-            "These are the 'before' images — the model sees these at inference time.")
-        self.dst_dir_input = self._create_path_selector("Destination Directory")
-        self.dst_dir_input.setToolTip(
-            "Folder with target/output images the model learns to produce.\n"
-            "These are the 'after' images. Must have matching filenames to Source.")
-        self.mask_dir_input = self._create_path_selector("Mask Directory")
-        self.mask_dir_input.setToolTip(
-            "Optional. Grayscale mask images (white = important regions).\n"
-            "Not needed if Auto Mask is enabled in the Training tab.")
-        self.auto_mask_hint = QLabel("")
-        self.auto_mask_hint.setStyleSheet("color: #8b919d; font-style: italic;")
-        form_data.addRow("Source Directory:", self.src_dir_input)
-        form_data.addRow("Target Directory:", self.dst_dir_input)
-        form_data.addRow("Mask Directory:", self.mask_dir_input)
-        form_data.addRow("", self.auto_mask_hint)
-        layout.addWidget(grp_data)
+        self.project_folder_input = self._create_path_selector("Project Folder")
+        self.project_folder_input.setToolTip(
+            "Root folder for this training project.\n\n"
+            "Expected structure:\n"
+            "  my_project/\n"
+            "    src/          \u2190 source images (required)\n"
+            "    dst/          \u2190 target images (required)\n"
+            "    val_src/      \u2190 validation source (optional)\n"
+            "    val_dst/      \u2190 validation target (optional)\n"
+            "    mask/         \u2190 mask images (optional)\n"
+            "    model/        \u2190 checkpoints saved here (auto-created)\n\n"
+            "Also accepts: source/, target/, input/, output/, dest/, etc.")
+        form_project.addRow("Project Folder:", self.project_folder_input)
 
-        # =================================================================
-        # VALIDATION DATA
-        # =================================================================
-        grp_val = QGroupBox("Validation Data (optional)")
-        form_val = QFormLayout(grp_val)
-        desc_val = QLabel("Separate held-out images to monitor how well the model generalizes.")
-        desc_val.setWordWrap(True)
-        desc_val.setProperty("cssClass", "section-desc")
-        form_val.addRow(desc_val)
+        self._data_status_label = QLabel("")
+        self._data_status_label.setWordWrap(True)
+        form_project.addRow("", self._data_status_label)
 
-        self.val_src_dir_input = self._create_path_selector("Val Source Directory")
-        self.val_src_dir_input.setToolTip(
-            "Separate source images used only for validation (never trained on).\n"
-            "Helps you spot overfitting — if training loss drops but validation loss doesn't.")
-        self.val_dst_dir_input = self._create_path_selector("Val Destination Directory")
-        self.val_dst_dir_input.setToolTip(
-            "Matching target images for the validation source folder.")
-        form_val.addRow("Val Source:", self.val_src_dir_input)
-        form_val.addRow("Val Target:", self.val_dst_dir_input)
-        layout.addWidget(grp_val)
-
-        # --- Verify Inputs ---
         self.verify_btn = QPushButton("Verify Inputs")
         self.verify_btn.setToolTip(
             "Scan source and target directories for problems before training.\n"
             "Checks for: missing targets, dimension mismatches, corrupt files,\n"
             "and images too small for the configured patch resolution.")
-        layout.addWidget(self.verify_btn)
+        form_project.addRow("", self.verify_btn)
 
-        layout.addStretch()
+        layout.addWidget(grp_project)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(tab)
-        self.tabs.addTab(scroll, "Data")
+        # Hook up auto-detection
+        project_line_edit = self.project_folder_input.findChild(QLineEdit)
+        if project_line_edit:
+            project_line_edit.textChanged.connect(self._on_project_folder_changed)
+
+        # =================================================================
+        # Hidden path widgets — still used by gather_config / YAML
+        # =================================================================
+        self.src_dir_input = self._create_path_selector("Source Directory")
+        self.src_dir_input.setVisible(False)
+        self.dst_dir_input = self._create_path_selector("Destination Directory")
+        self.dst_dir_input.setVisible(False)
+        self.mask_dir_input = self._create_path_selector("Mask Directory")
+        self.mask_dir_input.setVisible(False)
+        self.val_src_dir_input = self._create_path_selector("Val Source Directory")
+        self.val_src_dir_input.setVisible(False)
+        self.val_dst_dir_input = self._create_path_selector("Val Destination Directory")
+        self.val_dst_dir_input.setVisible(False)
+        self.auto_mask_hint = QLabel("")
+        self.auto_mask_hint.setVisible(False)
+        for w in (self.src_dir_input, self.dst_dir_input, self.mask_dir_input,
+                  self.val_src_dir_input, self.val_dst_dir_input, self.auto_mask_hint):
+            layout.addWidget(w)
+
+    def _on_project_folder_changed(self, root):
+        """Auto-detect subfolders and populate hidden path widgets + status."""
+        if not root or not os.path.isdir(root):
+            self._data_status_label.setText("")
+            return
+
+        src = _find_subfolder(root, _SRC_NAMES)
+        dst = _find_subfolder(root, _DST_NAMES)
+        val_src = _find_subfolder(root, _VAL_SRC_NAMES)
+        val_dst = _find_subfolder(root, _VAL_DST_NAMES)
+        mask = _find_subfolder(root, _MASK_NAMES)
+
+        model_dir = os.path.join(root, "model")
+
+        self._set_path(self.src_dir_input, src)
+        self._set_path(self.dst_dir_input, dst)
+        self._set_path(self.val_src_dir_input, val_src)
+        self._set_path(self.val_dst_dir_input, val_dst)
+        self._set_path(self.mask_dir_input, mask)
+        self._set_path(self.model_folder_input, model_dir)
+
+        lines = []
+        if src:
+            lines.append(f"<span style='color:#16A34A'>\u2713</span> src: {os.path.basename(src)}/")
+        else:
+            lines.append("<span style='color:#EF4444'>\u2717 Missing src/ folder</span>")
+        if dst:
+            lines.append(f"<span style='color:#16A34A'>\u2713</span> dst: {os.path.basename(dst)}/")
+        else:
+            lines.append("<span style='color:#EF4444'>\u2717 Missing dst/ folder</span>")
+        if val_src:
+            lines.append(f"<span style='color:#16A34A'>\u2713</span> val_src: {os.path.basename(val_src)}/")
+        if val_dst:
+            lines.append(f"<span style='color:#16A34A'>\u2713</span> val_dst: {os.path.basename(val_dst)}/")
+        if mask:
+            lines.append(f"<span style='color:#16A34A'>\u2713</span> mask: {os.path.basename(mask)}/")
+        lines.append(f"<span style='color:#6b7280'>\u2192 Output: model/</span>")
+
+        self._data_status_label.setText("<br>".join(lines))
