@@ -1258,6 +1258,18 @@ def train(config):
                     if config.auto_export.nuke:
                         export_nuke(model, config, config.data.output_dir, completed_ep, export_res,
                                     loss_mode=config.training.loss, ckpt_prefix=ckpt_prefix)
+                    # Pin matching checkpoint alongside exports so pruning can't delete it
+                    try:
+                        source_ckpt = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth')
+                        pin_dir = os.path.join(config.data.output_dir, 'exports')
+                        os.makedirs(pin_dir, exist_ok=True)
+                        pin_path = os.path.join(pin_dir, f'{ckpt_prefix}_epoch_{completed_ep:04d}.pth')
+                        if os.path.exists(source_ckpt):
+                            import shutil
+                            shutil.copy2(source_ckpt, pin_path)
+                            logging.info(f"Pinned checkpoint for export: {os.path.basename(pin_path)}")
+                    except Exception as e:
+                        logging.warning(f"Failed to pin checkpoint for export epoch {completed_ep}: {e}")
 
             # --- Validation ---
             run_val_loss_now = False

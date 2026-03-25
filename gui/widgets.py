@@ -127,7 +127,7 @@ class CollapsibleGroupBox(QWidget):
         self._expanded = not collapsed
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 6, 0, 0)
+        outer.setContentsMargins(0, 10, 0, 0)
         outer.setSpacing(0)
 
         # --- Clickable header row ---
@@ -141,8 +141,8 @@ class CollapsibleGroupBox(QWidget):
         self._body = QWidget()
         self._body.setProperty("cssClass", "collapse-body")
         body_layout = QVBoxLayout(self._body)
-        body_layout.setContentsMargins(10, 6, 10, 10)
-        body_layout.setSpacing(4)
+        body_layout.setContentsMargins(20, 12, 20, 16)
+        body_layout.setSpacing(6)
 
         self._desc_label = None
         if description:

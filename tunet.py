@@ -101,6 +101,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
         self.console_output.setFontFamily("monospace")
+        self.console_output.setPlaceholderText("Console — training output will appear here")
 
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(self.tabs)
@@ -115,15 +116,14 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         self.main_layout.addLayout(self._create_sidebar())
 
         # --- Create tabs ---
-        self._create_data_tab()          # Tab 0
-        self._create_training_tab()      # Tab 1
-        self._create_previews_tab()      # Tab 2
-        self._create_export_tab()        # Tab 3
-        self._create_inference_tab()     # Tab 4
-        self._create_about_tab()         # Tab 5
+        self._create_training_tab()      # Tab 0 (includes project folder)
+        self._create_previews_tab()      # Tab 1
+        self._create_export_tab()        # Tab 2
+        self._create_inference_tab()     # Tab 3
+        self._create_about_tab()         # Tab 4
 
         # Remember the inference tab index for sidebar switching
-        self._inference_tab_index = 4
+        self._inference_tab_index = 3
 
         # --- Signals ---
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -656,6 +656,10 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         self.color_space_input.setCurrentText(data.get('color_space', 'srgb'))
         sp(self.val_src_dir_input, data.get('val_src_dir', ''))
         sp(self.val_dst_dir_input, data.get('val_dst_dir', ''))
+        # Infer project folder from src_dir parent
+        src_dir = data.get('src_dir', '')
+        if src_dir and os.path.isdir(src_dir):
+            sp(self.project_folder_input, str(Path(src_dir).parent))
 
         # Model
         model = config.get('model', {})
@@ -1847,114 +1851,114 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
 # Entry point
 # =============================================================================
 
-def apply_dark_theme(app):
-    """Apply a cohesive dark theme stylesheet to the application."""
-    # -- Palette (Spark-inspired purple accent) --
-    BG         = "#1b1d23"
-    BG_ALT     = "#22252c"
-    SURFACE    = "#282b33"
-    SURFACE_HI = "#31353f"
-    BORDER     = "#3a3f4b"
-    BORDER_LT  = "#4a5060"
-    TEXT       = "#c8ccd4"
-    TEXT_DIM   = "#8b919d"
-    TEXT_BRT   = "#e2e5eb"
-    ACCENT     = "#ae69f4"
-    ACCENT_HI  = "#c084fc"
-    ACCENT_DIM = "#5b3a8a"
-    GREEN      = "#6bc77a"
-    GREEN_DIM  = "#2a553a"
-    RED        = "#e86b6b"
-    RED_DIM    = "#5a2a2a"
-    PURPLE_SOFT = "#c9a4f7"
+def apply_spark_theme(app):
+    """Apply a Spark Cloud Studio-inspired light theme."""
+    # -- Palette (directly from spark-tunet.css) --
+    BG         = "#F9FAFB"   # gray-100: page background
+    WHITE      = "#ffffff"   # cards, inputs
+    BORDER     = "#e5e7eb"   # gray-200: card/input borders
+    BORDER_DK  = "#D1D5DB"   # gray-300: dividers
+    TEXT       = "#111827"   # gray-900: primary text
+    TEXT_SEC   = "#374151"   # gray-700: secondary text
+    TEXT_DIM   = "#6b7280"   # gray-500: muted/placeholder
+    TEXT_FAINT = "#9ca3af"   # gray-400: disabled
+    ACCENT     = "#ae69f4"   # spark-purple
+    ACCENT_HVR = "#7E3AF2"   # spark-purple-dark (hover)
+    ACCENT_ACT = "#6C2BD9"   # spark-purple-deep (pressed)
+    ACCENT_LT  = "#F7F4FC"   # spark-purple-light
+    ACCENT_HI  = "#c084fc"   # gradient end
+    GREEN      = "#16A34A"
+    GREEN_BG   = "#f0fdf4"
+    RED        = "#EF4444"
+    RED_BG     = "#fef2f2"
 
     app.setStyleSheet(f"""
         /* -- Global -- */
         QWidget {{
             background-color: {BG};
             color: {TEXT};
-            font-family: "Segoe UI", "SF Pro Text", "Helvetica Neue", sans-serif;
+            font-family: "Plus Jakarta Sans", "Segoe UI", "SF Pro Text", sans-serif;
             font-size: 10pt;
-            selection-background-color: {ACCENT_DIM};
-            selection-color: {TEXT_BRT};
+            selection-background-color: {ACCENT_LT};
+            selection-color: {ACCENT_HVR};
         }}
 
-        /* -- Main Window -- */
         QMainWindow {{
             background-color: {BG};
         }}
 
-        /* -- Tab Widget -- */
+        /* -- Tab Widget (Spark flat tabs with bottom-border accent) -- */
         QTabWidget::pane {{
-            border: 1px solid {BORDER};
-            border-radius: 4px;
-            background-color: {BG_ALT};
+            border: none;
+            background-color: {BG};
             top: -1px;
         }}
+        QTabBar {{
+            background-color: {WHITE};
+            border-bottom: 1px solid {BORDER};
+        }}
         QTabBar::tab {{
-            background-color: {SURFACE};
+            background-color: transparent;
             color: {TEXT_DIM};
-            border: 1px solid {BORDER};
-            border-bottom: none;
-            padding: 7px 18px;
-            margin-right: 2px;
-            border-top-left-radius: 4px;
-            border-top-right-radius: 4px;
+            border: none;
+            border-bottom: 2px solid transparent;
+            padding: 12px 24px;
+            margin-right: 0;
             font-weight: 500;
+            font-size: 10pt;
         }}
         QTabBar::tab:selected {{
-            background-color: {BG_ALT};
             color: {ACCENT};
             border-bottom: 2px solid {ACCENT};
+            font-weight: 600;
         }}
         QTabBar::tab:hover:!selected {{
-            background-color: {SURFACE_HI};
-            color: {TEXT};
+            color: {TEXT_SEC};
         }}
 
-        /* -- Group Box -- */
+        /* -- Group Box (Spark card: 20px 24px padding, 12px radius) -- */
         QGroupBox {{
-            background-color: {SURFACE};
+            background-color: {WHITE};
             border: 1px solid {BORDER};
-            border-radius: 6px;
-            margin-top: 14px;
-            padding: 14px 10px 10px 10px;
+            border-radius: 12px;
+            margin-top: 20px;
+            padding: 24px 24px 20px 24px;
             font-weight: 600;
             font-size: 10pt;
         }}
         QGroupBox::title {{
             subcontrol-origin: margin;
             subcontrol-position: top left;
-            left: 12px;
-            padding: 2px 8px;
-            background-color: {SURFACE};
+            left: 16px;
+            padding: 3px 12px;
+            background-color: {WHITE};
             border: 1px solid {BORDER};
-            border-radius: 3px;
+            border-radius: 6px;
             color: {ACCENT};
         }}
 
         /* -- Collapsible Section Header -- */
         QPushButton[cssClass="collapse-header"] {{
-            background-color: {SURFACE};
+            background-color: {WHITE};
             color: {ACCENT};
             border: 1px solid {BORDER};
-            border-radius: 6px 6px 6px 6px;
-            padding: 7px 12px;
+            border-radius: 12px;
+            padding: 12px 20px;
             font-weight: 600;
             font-size: 10pt;
             text-align: left;
         }}
         QPushButton[cssClass="collapse-header"]:hover {{
-            background-color: {SURFACE_HI};
-            border-color: {ACCENT_DIM};
+            background-color: {ACCENT_LT};
+            border-color: {ACCENT};
         }}
 
         /* -- Collapsible Section Body -- */
         QWidget[cssClass="collapse-body"] {{
-            background-color: {SURFACE};
+            background-color: {WHITE};
             border: 1px solid {BORDER};
             border-top: none;
-            border-radius: 0 0 6px 6px;
+            border-radius: 0 0 12px 12px;
         }}
 
         /* Section description labels */
@@ -1962,132 +1966,132 @@ def apply_dark_theme(app):
             color: {TEXT_DIM};
             font-size: 9pt;
             font-style: italic;
-            padding: 2px 4px 6px 4px;
+            padding: 4px 6px 10px 6px;
             background-color: transparent;
         }}
 
-        /* -- Buttons -- */
+        /* -- Buttons (Spark-style: 10px 20px) -- */
         QPushButton {{
-            background-color: {SURFACE_HI};
-            color: {TEXT};
-            border: 1px solid {BORDER_LT};
-            border-radius: 4px;
-            padding: 6px 16px;
+            background-color: {WHITE};
+            color: {TEXT_SEC};
+            border: 1px solid {BORDER};
+            border-radius: 8px;
+            padding: 10px 20px;
             font-weight: 500;
-            min-height: 18px;
+            min-height: 22px;
         }}
         QPushButton:hover {{
-            background-color: {BORDER_LT};
-            border-color: {ACCENT_DIM};
+            background-color: {BG};
+            border-color: {ACCENT};
+            color: {TEXT};
         }}
         QPushButton:pressed {{
-            background-color: {ACCENT_DIM};
+            background-color: {ACCENT_LT};
         }}
         QPushButton:disabled {{
-            background-color: {SURFACE};
-            color: {TEXT_DIM};
+            background-color: {BG};
+            color: {TEXT_FAINT};
             border-color: {BORDER};
         }}
         QPushButton:checked {{
-            background-color: {ACCENT_DIM};
-            color: {TEXT_BRT};
+            background-color: {ACCENT_LT};
+            color: {ACCENT};
             border-color: {ACCENT};
         }}
 
-        /* Special button classes via object names */
+        /* Primary (purple filled) */
         QPushButton[cssClass="start"] {{
-            background-color: {GREEN_DIM};
-            color: {GREEN};
-            border-color: {GREEN_DIM};
+            background-color: {GREEN};
+            color: {WHITE};
+            border: none;
             font-weight: 600;
         }}
         QPushButton[cssClass="start"]:hover {{
-            background-color: #346b42;
-            border-color: {GREEN};
+            background-color: #15803D;
         }}
         QPushButton[cssClass="stop"] {{
-            background-color: {RED_DIM};
-            color: {RED};
-            border-color: {RED_DIM};
+            background-color: {RED};
+            color: {WHITE};
+            border: none;
             font-weight: 600;
         }}
         QPushButton[cssClass="stop"]:hover {{
-            background-color: #6b3535;
-            border-color: {RED};
+            background-color: #dc2626;
         }}
         QPushButton[cssClass="sidebar-toggle"] {{
-            background-color: {SURFACE};
+            background-color: {WHITE};
             color: {TEXT_DIM};
             border: 1px solid {BORDER};
-            border-radius: 3px;
+            border-radius: 6px;
             padding: 0;
             font-size: 10pt;
             min-height: 40px;
         }}
         QPushButton[cssClass="sidebar-toggle"]:hover {{
-            background-color: {SURFACE_HI};
+            background-color: {ACCENT_LT};
             color: {ACCENT};
-            border-color: {ACCENT_DIM};
+            border-color: {ACCENT};
         }}
         QPushButton[cssClass="sidebar-toggle"]:checked {{
-            background-color: {SURFACE};
+            background-color: {WHITE};
             color: {TEXT_DIM};
             border-color: {BORDER};
         }}
-
         QPushButton[cssClass="accent"] {{
-            background-color: #352550;
-            color: {PURPLE_SOFT};
-            border-color: #352550;
+            background-color: {ACCENT};
+            color: {WHITE};
+            border: none;
         }}
         QPushButton[cssClass="accent"]:hover {{
-            background-color: #45356a;
-            border-color: {PURPLE_SOFT};
+            background-color: {ACCENT_HVR};
         }}
 
-        /* -- Inputs -- */
+        /* -- Inputs (Spark form inputs: 10px 14px) -- */
         QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
-            background-color: {BG};
+            background-color: {WHITE};
             color: {TEXT};
             border: 1px solid {BORDER};
-            border-radius: 3px;
-            padding: 4px 8px;
-            min-height: 18px;
+            border-radius: 8px;
+            padding: 10px 14px;
+            min-height: 24px;
         }}
-        QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
+        QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus,
+        QComboBox:on {{
             border-color: {ACCENT};
         }}
         QComboBox::drop-down {{
             border: none;
-            width: 20px;
+            width: 24px;
         }}
         QComboBox::down-arrow {{
             image: none;
             border-left: 4px solid transparent;
             border-right: 4px solid transparent;
-            border-top: 5px solid {TEXT_DIM};
-            margin-right: 6px;
+            border-top: 5px solid {TEXT_FAINT};
+            margin-right: 8px;
         }}
         QComboBox QAbstractItemView {{
-            background-color: {SURFACE};
+            background-color: {WHITE};
             color: {TEXT};
-            border: 1px solid {BORDER_LT};
-            selection-background-color: {ACCENT_DIM};
-            selection-color: {TEXT_BRT};
+            border: 1px solid {BORDER};
+            border-radius: 8px;
+            padding: 4px;
+            selection-background-color: {ACCENT_LT};
+            selection-color: {ACCENT_HVR};
             outline: none;
         }}
 
         /* -- Checkbox -- */
         QCheckBox {{
-            spacing: 6px;
+            spacing: 8px;
             color: {TEXT};
         }}
         QCheckBox::indicator {{
-            width: 16px;
-            height: 16px;
-            border: 1px solid {BORDER_LT};
-            border-radius: 3px;
-            background-color: {BG};
+            width: 18px;
+            height: 18px;
+            border: 1px solid {BORDER_DK};
+            border-radius: 4px;
+            background-color: {WHITE};
         }}
         QCheckBox::indicator:checked {{
             background-color: {ACCENT};
@@ -2097,60 +2101,60 @@ def apply_dark_theme(app):
             border-color: {ACCENT};
         }}
         QCheckBox:disabled {{
-            color: {TEXT_DIM};
+            color: {TEXT_FAINT};
         }}
 
         /* -- Scroll Area -- */
         QScrollArea {{
             border: none;
-            background-color: {BG_ALT};
+            background-color: {BG};
         }}
         QScrollBar:vertical {{
-            background-color: {BG};
-            width: 10px;
+            background-color: transparent;
+            width: 8px;
             margin: 0;
             border: none;
         }}
         QScrollBar::handle:vertical {{
-            background-color: {BORDER};
+            background-color: {BORDER_DK};
             min-height: 30px;
-            border-radius: 5px;
+            border-radius: 4px;
             margin: 2px;
         }}
         QScrollBar::handle:vertical:hover {{
-            background-color: {BORDER_LT};
+            background-color: {TEXT_FAINT};
         }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
             height: 0;
         }}
         QScrollBar:horizontal {{
-            background-color: {BG};
-            height: 10px;
+            background-color: transparent;
+            height: 8px;
             margin: 0;
             border: none;
         }}
         QScrollBar::handle:horizontal {{
-            background-color: {BORDER};
+            background-color: {BORDER_DK};
             min-width: 30px;
-            border-radius: 5px;
+            border-radius: 4px;
             margin: 2px;
         }}
         QScrollBar::handle:horizontal:hover {{
-            background-color: {BORDER_LT};
+            background-color: {TEXT_FAINT};
         }}
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
             width: 0;
         }}
 
-        /* -- Text Edit (console) -- */
+        /* -- Text Edit (console — dark inset like Spark) -- */
         QTextEdit {{
-            background-color: #14161a;
-            color: #a9b7c6;
+            background-color: #1F2937;
+            color: #d1d5db;
             border: 1px solid {BORDER};
-            border-radius: 4px;
-            font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
+            border-radius: 12px;
+            font-family: "Fira Mono", "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
             font-size: 9pt;
-            padding: 4px;
+            padding: 10px;
         }}
 
         /* -- Splitter -- */
@@ -2162,19 +2166,20 @@ def apply_dark_theme(app):
             background-color: {ACCENT};
         }}
 
-        /* -- Progress Bar -- */
+        /* -- Progress Bar (Spark purple gradient) -- */
         QProgressBar {{
-            background-color: {BG};
-            border: 1px solid {BORDER};
-            border-radius: 4px;
+            background-color: {BORDER};
+            border: none;
+            border-radius: 6px;
             text-align: center;
             color: {TEXT};
-            height: 20px;
+            height: 8px;
             font-size: 9pt;
         }}
         QProgressBar::chunk {{
-            background-color: {ACCENT};
-            border-radius: 3px;
+            background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 {ACCENT}, stop:1 {ACCENT_HI});
+            border-radius: 6px;
         }}
 
         /* -- Labels -- */
@@ -2191,35 +2196,37 @@ def apply_dark_theme(app):
         }}
         QSlider::handle:horizontal {{
             background-color: {ACCENT};
-            width: 14px;
-            height: 14px;
-            margin: -5px 0;
-            border-radius: 7px;
+            width: 16px;
+            height: 16px;
+            margin: -6px 0;
+            border-radius: 8px;
         }}
         QSlider::handle:horizontal:hover {{
-            background-color: {ACCENT_HI};
+            background-color: {ACCENT_HVR};
         }}
 
         /* -- List Widget (queues) -- */
         QListWidget {{
-            background-color: {BG};
+            background-color: {WHITE};
             color: {TEXT};
             border: 1px solid {BORDER};
-            border-radius: 4px;
-            font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
+            border-radius: 8px;
+            font-family: "Fira Mono", "Cascadia Code", "Consolas", monospace;
             font-size: 9pt;
             outline: none;
+            padding: 4px;
         }}
         QListWidget::item {{
-            padding: 3px 6px;
-            border-bottom: 1px solid {SURFACE};
+            padding: 4px 8px;
+            border-bottom: 1px solid {BG};
+            border-radius: 4px;
         }}
         QListWidget::item:selected {{
-            background-color: {ACCENT_DIM};
-            color: {TEXT_BRT};
+            background-color: {ACCENT_LT};
+            color: {ACCENT_HVR};
         }}
         QListWidget::item:hover {{
-            background-color: {SURFACE_HI};
+            background-color: {BG};
         }}
 
         /* -- Frame separator -- */
@@ -2229,24 +2236,24 @@ def apply_dark_theme(app):
 
         /* -- Tool Tips -- */
         QToolTip {{
-            background-color: {SURFACE};
+            background-color: {WHITE};
             color: {TEXT};
-            border: 1px solid {BORDER_LT};
-            padding: 6px;
-            border-radius: 4px;
+            border: 1px solid {BORDER};
+            padding: 8px 12px;
+            border-radius: 8px;
             font-size: 9pt;
         }}
 
-        /* -- Form Layout label alignment -- */
+        /* -- Form Layout -- */
         QFormLayout {{
-            margin: 4px;
+            margin: 6px;
         }}
     """)
 
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    apply_dark_theme(app)
+    apply_spark_theme(app)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
