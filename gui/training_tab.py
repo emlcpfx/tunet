@@ -348,13 +348,81 @@ class TrainingTabMixin:
         layout.addWidget(grp_patch)
 
         # =================================================================
-        # MASK BEHAVIOR — collapsible, advanced
+        # SCHEDULE — expanded, right after patch extraction
+        # =================================================================
+        grp_sched = CollapsibleGroupBox(
+            "Schedule",
+            description="Control batch size, epoch length, and training duration. "
+                        "Defaults work well for most tasks.",
+            collapsed=False)
+        form_sched = QFormLayout()
+
+        self.batch_size_input = QSpinBox(minimum=1, maximum=256, value=4)
+        self.batch_size_input.setToolTip(
+            "Patches per training step.\n"
+            "Larger = more stable gradients but more VRAM.\n"
+            "Reduce to 2 if you get out-of-memory errors.")
+        self.auto_batch_check = QCheckBox("Auto")
+        self.auto_batch_check.setToolTip(
+            "Automatically find the largest batch size that fits in GPU memory.\n"
+            "Probes VRAM at training start.")
+        self.auto_batch_check.toggled.connect(self.batch_size_input.setDisabled)
+        batch_row = QHBoxLayout()
+        batch_row.addWidget(self.batch_size_input)
+        batch_row.addWidget(self.auto_batch_check)
+        form_sched.addRow("Batch Size (per GPU):", batch_row)
+
+        self.iter_per_epoch_input = QSpinBox(minimum=1, maximum=10000, value=500)
+        self.iter_per_epoch_input.setToolTip(
+            "Steps before saving a checkpoint and running validation.\n"
+            "Lower = more frequent saves, useful for monitoring progress.")
+        form_sched.addRow("Iterations per Epoch:", self.iter_per_epoch_input)
+
+        self.max_steps_input = QSpinBox(minimum=0, maximum=10000000, value=0)
+        self.max_steps_input.setSpecialValueText("Unlimited")
+        self.max_steps_input.setToolTip(
+            "Total steps before auto-stopping.\n"
+            "0 = train until manually stopped.\n"
+            "Set a limit for queue items or overnight runs.")
+        form_sched.addRow("Max Steps:", self.max_steps_input)
+
+        self.progressive_res_check = QCheckBox("Progressive Multi-Resolution")
+        self.progressive_res_check.setToolTip(
+            "Start at low resolution, then scale up to full:\n"
+            "  Epoch 1 \u2192 1/4 resolution (learns shapes fast)\n"
+            "  Epoch 2 \u2192 1/2 resolution (medium detail)\n"
+            "  Epoch 3+ \u2192 Full resolution (fine detail)\n\n"
+            "Speeds up early training ~2\u00d7.\n"
+            "Best for: large datasets, high resolutions (512+).\n"
+            "Skip when: small resolution (256), short runs, fine-tuning.")
+        form_sched.addRow(self.progressive_res_check)
+
+        self.num_workers_input = QComboBox()
+        self.num_workers_presets = [
+            ("Auto (Recommended)", -1),
+            ("0 \u2014 Disabled (debug)", 0),
+            ("2 \u2014 Light", 2),
+            ("4 \u2014 Moderate", 4),
+            ("8 \u2014 Heavy (many CPU cores)", 8),
+        ]
+        for label, _ in self.num_workers_presets:
+            self.num_workers_input.addItem(label)
+        self.num_workers_input.setCurrentIndex(0)
+        self.num_workers_input.setToolTip(
+            "CPU threads loading data in parallel.\n"
+            "'Auto' picks based on your hardware \u2014 recommended for most users.")
+        form_sched.addRow("DataLoader Workers:", self.num_workers_input)
+        grp_sched.setContentLayout(form_sched)
+        layout.addWidget(grp_sched)
+
+        # =================================================================
+        # MASK BEHAVIOR — expanded, auto-generate on by default
         # =================================================================
         grp_mask = CollapsibleGroupBox(
             "Mask Behavior",
             description="Focus training on important image regions using masks. "
                         "Auto Mask generates them from source/target differences.",
-            collapsed=True)
+            collapsed=False)
         form_mask = QFormLayout()
 
         self.use_mask_loss_input = QCheckBox("Weight loss by mask (white = important)")
@@ -376,6 +444,7 @@ class TrainingTabMixin:
             "The model can then learn to treat masked/unmasked areas differently.\n\n"
             "Warning: Changes architecture — cannot toggle mid-training.")
         self.use_auto_mask_input = QCheckBox("Auto-generate masks from |src − dst| difference")
+        self.use_auto_mask_input.setChecked(True)
         self.use_auto_mask_input.setToolTip(
             "Automatically create masks by comparing source and target.\n"
             "Areas that differ become white (important), identical areas become black.\n\n"
@@ -385,11 +454,11 @@ class TrainingTabMixin:
                 "(Mask directory not needed with Auto Mask)" if checked else ""))
 
         self.skip_empty_patches_input = QCheckBox("Skip empty patches")
+        self.skip_empty_patches_input.setChecked(True)
         self.skip_empty_patches_input.setToolTip(
             "Skip training patches where source and target are identical.\n"
             "Speeds up training when only parts of the image have changes.\n\n"
             "Requires Auto Mask to be enabled.")
-        self.skip_empty_patches_input.setEnabled(False)
         self.use_auto_mask_input.toggled.connect(self.skip_empty_patches_input.setEnabled)
 
         self.skip_empty_threshold_input = QDoubleSpinBox()
@@ -586,74 +655,6 @@ class TrainingTabMixin:
 
         grp_aug.setContentLayout(form_aug)
         layout.addWidget(grp_aug)
-
-        # =================================================================
-        # SCHEDULE — collapsible, has sensible defaults
-        # =================================================================
-        grp_sched = CollapsibleGroupBox(
-            "Schedule",
-            description="Control batch size, epoch length, and training duration. "
-                        "Defaults work well for most tasks.",
-            collapsed=False)
-        form_sched = QFormLayout()
-
-        self.batch_size_input = QSpinBox(minimum=1, maximum=256, value=4)
-        self.batch_size_input.setToolTip(
-            "Patches per training step.\n"
-            "Larger = more stable gradients but more VRAM.\n"
-            "Reduce to 2 if you get out-of-memory errors.")
-        self.auto_batch_check = QCheckBox("Auto")
-        self.auto_batch_check.setToolTip(
-            "Automatically find the largest batch size that fits in GPU memory.\n"
-            "Probes VRAM at training start.")
-        self.auto_batch_check.toggled.connect(self.batch_size_input.setDisabled)
-        batch_row = QHBoxLayout()
-        batch_row.addWidget(self.batch_size_input)
-        batch_row.addWidget(self.auto_batch_check)
-        form_sched.addRow("Batch Size (per GPU):", batch_row)
-
-        self.iter_per_epoch_input = QSpinBox(minimum=1, maximum=10000, value=500)
-        self.iter_per_epoch_input.setToolTip(
-            "Steps before saving a checkpoint and running validation.\n"
-            "Lower = more frequent saves, useful for monitoring progress.")
-        form_sched.addRow("Iterations per Epoch:", self.iter_per_epoch_input)
-
-        self.max_steps_input = QSpinBox(minimum=0, maximum=10000000, value=0)
-        self.max_steps_input.setSpecialValueText("Unlimited")
-        self.max_steps_input.setToolTip(
-            "Total steps before auto-stopping.\n"
-            "0 = train until manually stopped.\n"
-            "Set a limit for queue items or overnight runs.")
-        form_sched.addRow("Max Steps:", self.max_steps_input)
-
-        self.progressive_res_check = QCheckBox("Progressive Multi-Resolution")
-        self.progressive_res_check.setToolTip(
-            "Start at low resolution, then scale up to full:\n"
-            "  Epoch 1 → 1/4 resolution (learns shapes fast)\n"
-            "  Epoch 2 → 1/2 resolution (medium detail)\n"
-            "  Epoch 3+ → Full resolution (fine detail)\n\n"
-            "Speeds up early training ~2×.\n"
-            "Best for: large datasets, high resolutions (512+).\n"
-            "Skip when: small resolution (256), short runs, fine-tuning.")
-        form_sched.addRow(self.progressive_res_check)
-
-        self.num_workers_input = QComboBox()
-        self.num_workers_presets = [
-            ("Auto (Recommended)", -1),
-            ("0 \u2014 Disabled (debug)", 0),
-            ("2 \u2014 Light", 2),
-            ("4 \u2014 Moderate", 4),
-            ("8 \u2014 Heavy (many CPU cores)", 8),
-        ]
-        for label, _ in self.num_workers_presets:
-            self.num_workers_input.addItem(label)
-        self.num_workers_input.setCurrentIndex(0)
-        self.num_workers_input.setToolTip(
-            "CPU threads loading data in parallel.\n"
-            "'Auto' picks based on your hardware — recommended for most users.")
-        form_sched.addRow("DataLoader Workers:", self.num_workers_input)
-        grp_sched.setContentLayout(form_sched)
-        layout.addWidget(grp_sched)
 
         # =================================================================
         # LOGGING & CHECKPOINTS — collapsible
