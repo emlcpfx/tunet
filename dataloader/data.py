@@ -5,7 +5,8 @@ from PIL import Image, UnidentifiedImageError # Import specific error
 import logging
 import importlib # To dynamically import augmentation classes
 import time # For debug timing
-from types import SimpleNamespace 
+from types import SimpleNamespace
+from utils.pair_matching import find_dst_file
 
 import torch
 from torch.utils.data import Dataset
@@ -64,30 +65,9 @@ class BaseImagePairSlicingDataset(Dataset):
         logging.info(f"Processing {len(src_files)} potential source images...")
         for src_path in src_files: # Now iterates over the filtered list
             basename = os.path.basename(src_path)
-            # Try common extensions for the destination, be more robust
-            dst_path = None
-            base_name_no_ext, src_ext = os.path.splitext(basename)
-            # Build a list of potential destination file names
-            potential_dst_names = [
-                 basename, # Exact match first
-                 base_name_no_ext + '.png',
-                 base_name_no_ext + '.jpg',
-                 base_name_no_ext + '.jpeg',
-                 base_name_no_ext + '.webp',
-                 base_name_no_ext + '.tiff',
-                 base_name_no_ext + src_ext # Also try original extension if different
-            ]
-            # Remove duplicates from potential names and create full paths
-            potential_dst_paths = [os.path.join(dst_dir, name) for name in list(dict.fromkeys(potential_dst_names))]
+            dst_path = find_dst_file(src_path, dst_dir)
 
-            found_dst = False
-            for p in potential_dst_paths:
-                 if os.path.exists(p):
-                     dst_path = p
-                     found_dst = True
-                     break # Found a matching destination file
-
-            if not found_dst:
+            if dst_path is None:
                 self.skipped_count += 1
                 self.skipped_paths.append((src_path, "Dst Missing"))
                 logging.debug(f"Skipping {basename}: Destination file not found.")

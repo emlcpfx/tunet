@@ -897,8 +897,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             return False
         model_folder = Path(full_config['data']['output_dir'])
         if not model_folder.is_dir():
-            QMessageBox.warning(self, "Error", f"Model Folder does not exist:\n{model_folder}")
-            return False
+            model_folder.mkdir(parents=True, exist_ok=True)
 
         self._setup_preview_watcher(str(model_folder))
 
@@ -965,21 +964,36 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         color_space = self.color_space_input.currentText()
 
         # Show a progress dialog (verification can take a while on large datasets)
-        progress = QProgressDialog("Scanning dataset...", "Cancel", 0, 0, self)
+        progress = QProgressDialog("Scanning dataset...", "Cancel", 0, 100, self)
         progress.setWindowTitle("Verify Inputs")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
+        # Prevent auto-close/cancel when value reaches maximum
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
         progress.show()
         QApplication.processEvents()
 
+        def progress_callback(cur, tot):
+            progress.setMaximum(tot)
+            progress.setValue(cur)
+            QApplication.processEvents()
+
         try:
             from utils.verify_inputs import verify_dataset
-            result = verify_dataset(src_dir, dst_dir, mask_dir, resolution, color_space)
+            result = verify_dataset(
+                src_dir, dst_dir, mask_dir, resolution, color_space,
+                progress_callback=progress_callback,
+                cancel_check=lambda: progress.wasCanceled(),
+            )
         except Exception as e:
             progress.close()
             QMessageBox.critical(self, "Verify Inputs", f"Verification failed:\n{e}")
             return
         progress.close()
+
+        if progress.wasCanceled():
+            return
 
         # Build message
         total = result['total_src']
