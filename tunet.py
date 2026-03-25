@@ -238,7 +238,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         # --- Toggle button (thin vertical strip, always visible) ---
         self.sidebar_toggle = QPushButton("◀")
         self.sidebar_toggle.setCheckable(True)
-        self.sidebar_toggle.setChecked(True)
+        self.sidebar_toggle.setChecked(False)
         self.sidebar_toggle.setProperty("cssClass", "sidebar-toggle")
         self.sidebar_toggle.setFixedWidth(22)
         self.sidebar_toggle.setToolTip("Show / hide the queue panel")
@@ -2019,8 +2019,8 @@ def apply_spark_theme(app):
             background-color: #dc2626;
         }}
         QPushButton[cssClass="sidebar-toggle"] {{
-            background-color: {WHITE};
-            color: {TEXT_DIM};
+            background-color: {ACCENT_LT};
+            color: {ACCENT};
             border: 1px solid {BORDER};
             border-radius: 6px;
             padding: 0;
@@ -2028,13 +2028,13 @@ def apply_spark_theme(app):
             min-height: 40px;
         }}
         QPushButton[cssClass="sidebar-toggle"]:hover {{
-            background-color: {ACCENT_LT};
-            color: {ACCENT};
+            background-color: {ACCENT};
+            color: {WHITE};
             border-color: {ACCENT};
         }}
         QPushButton[cssClass="sidebar-toggle"]:checked {{
-            background-color: {WHITE};
-            color: {TEXT_DIM};
+            background-color: {ACCENT_LT};
+            color: {ACCENT};
             border-color: {BORDER};
         }}
         QPushButton[cssClass="accent"] {{
