@@ -39,6 +39,7 @@ from albumentations.pytorch import ToTensorV2
 # --- Extracted module imports ---
 from distributed import setup_ddp, cleanup_ddp, get_rank, get_world_size, is_main_process, CURRENT_OS
 from models import create_model, UNet, MSRNet
+from utils.pair_matching import find_dst_file
 from image_io import (load_image_any_format, load_image_linear, load_mask_image,
                       load_exr_full_frame, NORM_MEAN, NORM_STD, denormalize,
                       denormalize_linear, linear_to_log, log_to_linear)
@@ -139,8 +140,9 @@ class AugmentedImagePairSlicingDataset(Dataset):
         if is_main_process(): logging.debug(f"Found {len(src_files)} potential source files.")
 
         for i, src_path in enumerate(src_files):
-            base_name = os.path.basename(src_path); dst_path = os.path.join(self.dst_dir, base_name)
-            if not os.path.exists(dst_path): self.skipped_count += 1; self.skipped_file_reasons.append((src_path, "Dst missing")); continue
+            base_name = os.path.basename(src_path)
+            dst_path = find_dst_file(src_path, self.dst_dir)
+            if dst_path is None: self.skipped_count += 1; self.skipped_file_reasons.append((src_path, "Dst missing")); continue
             mask_path = None
             if self.mask_dir:
                 stem = os.path.splitext(base_name)[0]

@@ -7,8 +7,8 @@ from PySide6.QtWidgets import (
 
 
 # Subfolder names to search for (in priority order)
-_SRC_NAMES = ("src", "source", "input")
-_DST_NAMES = ("dst", "dest", "destination", "target", "output")
+_SRC_NAMES = ("src", "source", "in", "input")
+_DST_NAMES = ("dst", "dest", "destination", "out", "output", "target")
 _VAL_SRC_NAMES = ("val_src", "val_source", "val_input", "val/src", "validation/src")
 _VAL_DST_NAMES = ("val_dst", "val_dest", "val_target", "val/dst", "validation/dst")
 _MASK_NAMES = ("mask", "masks", "matte", "mattes")
@@ -46,7 +46,8 @@ class DataTabMixin:
         grp_project = QGroupBox("Project Folder")
         form_project = QFormLayout(grp_project)
         desc = QLabel(
-            "Pick a folder that contains src/ and dst/ subfolders. "
+            "Pick a folder that contains source and destination subfolders "
+            "(src/, source/, in/, input/ and dst/, dest/, out/, output/, etc). "
             "Optional: val_src/, val_dst/, mask/. Output saves to model/.")
         desc.setWordWrap(True)
         desc.setProperty("cssClass", "section-desc")

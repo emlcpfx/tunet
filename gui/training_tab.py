@@ -167,8 +167,15 @@ class TrainingTabMixin:
 
         form_model.addRow("Model Type:", self.model_type_input)
         form_model.addRow("Model Capacity:", self.model_size_dims_input)
-        form_model.addRow("Fine-tune From:", self.finetune_from_input)
         layout.addWidget(grp_model)
+
+        # =================================================================
+        # FINE-TUNE — prominent standalone section
+        # =================================================================
+        grp_finetune = QGroupBox("Fine-tune")
+        form_finetune = QFormLayout(grp_finetune)
+        form_finetune.addRow("Resume From:", self.finetune_from_input)
+        layout.addWidget(grp_finetune)
 
         # =================================================================
         # OPTIMIZATION — always visible, core settings

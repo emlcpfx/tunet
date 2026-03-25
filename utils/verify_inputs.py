@@ -13,8 +13,13 @@ from collections import defaultdict
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 
 
-def verify_dataset(src_dir, dst_dir, mask_dir=None, resolution=512, color_space='srgb'):
+def verify_dataset(src_dir, dst_dir, mask_dir=None, resolution=512, color_space='srgb',
+                    progress_callback=None, cancel_check=None):
     """Verify a training dataset and return a structured report.
+
+    Args:
+        progress_callback: optional callable(current, total) for progress updates
+        cancel_check: optional callable() returning True if cancelled
 
     Returns dict with keys:
         total_src: int - total source files found
@@ -24,6 +29,7 @@ def verify_dataset(src_dir, dst_dir, mask_dir=None, resolution=512, color_space=
     """
     from PIL import Image, UnidentifiedImageError
     from image_io import load_image_linear
+    from utils.pair_matching import find_dst_file
 
     issues = []
     valid_pairs = 0
@@ -44,12 +50,16 @@ def verify_dataset(src_dir, dst_dir, mask_dir=None, resolution=512, color_space=
     dst_dir_abs = os.path.abspath(dst_dir)
     mask_dir_abs = os.path.abspath(mask_dir) if mask_dir else None
 
-    for src_path in src_files:
+    for i, src_path in enumerate(src_files):
+        if cancel_check and cancel_check():
+            break
+        if progress_callback:
+            progress_callback(i, len(src_files))
         base_name = os.path.basename(src_path)
-        dst_path = os.path.join(dst_dir_abs, base_name)
+        dst_path = find_dst_file(src_path, dst_dir_abs)
 
         # Check destination exists
-        if not os.path.exists(dst_path):
+        if dst_path is None:
             issues.append((base_name, 'Destination missing'))
             continue
 
