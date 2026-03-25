@@ -2116,13 +2116,13 @@ def apply_spark_theme(app):
             border: none;
         }}
         QScrollBar::handle:vertical {{
-            background-color: {BORDER_DK};
+            background-color: {ACCENT};
             min-height: 30px;
             border-radius: 4px;
             margin: 2px;
         }}
         QScrollBar::handle:vertical:hover {{
-            background-color: {TEXT_FAINT};
+            background-color: {ACCENT_HVR};
         }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
             height: 0;
@@ -2134,13 +2134,13 @@ def apply_spark_theme(app):
             border: none;
         }}
         QScrollBar::handle:horizontal {{
-            background-color: {BORDER_DK};
+            background-color: {ACCENT};
             min-width: 30px;
             border-radius: 4px;
             margin: 2px;
         }}
         QScrollBar::handle:horizontal:hover {{
-            background-color: {TEXT_FAINT};
+            background-color: {ACCENT_HVR};
         }}
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
             width: 0;
