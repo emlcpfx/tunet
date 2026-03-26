@@ -450,7 +450,7 @@ class TrainingMonitor:
         lpips_c = c
         run.lpips_raw_line, = self.ax2.plot([], [], '-', color=lpips_c,
                                              linewidth=0.5, alpha=raw_alpha, zorder=1)
-        run.lpips_line, = self.ax2.plot([], [], '-', color=lpips_c,
+        run.lpips_line, = self.ax2.plot([], [], color=lpips_c,
                                          linewidth=1.4, alpha=0.7, linestyle='dotted', zorder=3)
         # Best markers
         run.best_l1_marker, = self.ax.plot([], [], '*', color=c,

@@ -497,9 +497,14 @@ def _auto_batch_size(model, resolution, n_input_ch, device, device_type, use_amp
     model.train()
     candidates = [32, 24, 16, 12, 8, 6, 4, 2, 1]
     chosen = 1
+    if is_main_process():
+        free, total = torch.cuda.mem_get_info(device)
+        logging.info(f"Auto batch size: probing (GPU {total / 1e9:.1f}GB total, {free / 1e9:.1f}GB free, res={resolution})")
     for bs in candidates:
         torch.cuda.empty_cache()
         try:
+            if is_main_process():
+                logging.info(f"Auto batch size: trying batch_size={bs}...")
             dummy = torch.randn(bs, n_input_ch, resolution, resolution, device=device)
             with autocast(device_type='cuda', enabled=use_amp):
                 out = model(dummy)
@@ -509,11 +514,17 @@ def _auto_batch_size(model, resolution, n_input_ch, device, device_type, use_amp
             del dummy, out, loss
             torch.cuda.empty_cache()
             chosen = bs
+            if is_main_process():
+                logging.info(f"Auto batch size: batch_size={bs} OK")
             break
         except torch.cuda.OutOfMemoryError:
+            if is_main_process():
+                logging.info(f"Auto batch size: batch_size={bs} OOM, trying smaller...")
             torch.cuda.empty_cache()
             continue
-        except Exception:
+        except Exception as e:
+            if is_main_process():
+                logging.warning(f"Auto batch size: batch_size={bs} failed ({type(e).__name__}: {e})")
             torch.cuda.empty_cache()
             continue
     if is_main_process():

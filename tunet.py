@@ -129,9 +129,10 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         # --- Prevent scroll-wheel from changing unfocused widgets ---
         self._no_scroll_filter = NoScrollEventFilter(self)
         from PySide6.QtWidgets import QComboBox, QSpinBox, QDoubleSpinBox, QAbstractSlider
-        for w in self.findChildren((QComboBox, QSpinBox, QDoubleSpinBox, QAbstractSlider)):
-            w.setFocusPolicy(Qt.StrongFocus)
-            w.installEventFilter(self._no_scroll_filter)
+        for widget_type in (QComboBox, QSpinBox, QDoubleSpinBox, QAbstractSlider):
+            for w in self.findChildren(widget_type):
+                w.setFocusPolicy(Qt.StrongFocus)
+                w.installEventFilter(self._no_scroll_filter)
 
         # --- Signals ---
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -244,7 +245,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
 
         # --- Toggle button (thin vertical strip, always visible) ---
-        self.sidebar_toggle = QPushButton("◀")
+        self.sidebar_toggle = QPushButton("▶")
         self.sidebar_toggle.setCheckable(True)
         self.sidebar_toggle.setChecked(False)
         self.sidebar_toggle.setProperty("cssClass", "sidebar-toggle")
@@ -317,7 +318,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
 
     def _on_sidebar_toggled(self, expanded):
         self.sidebar_panel.setVisible(expanded)
-        self.sidebar_toggle.setText("◀" if expanded else "▶")
+        self.sidebar_toggle.setText("▶" if expanded else "◀")
 
     # =========================================================================
     # Bottom control panel
@@ -1089,6 +1090,14 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
     def _append_text(self, text):
         self.console_output.moveCursor(QTextCursor.End)
         self.console_output.insertPlainText(text)
+        # Show resolved auto batch size in the UI
+        if 'Auto batch size:' in text and self.auto_batch_check.isChecked():
+            import re
+            m = re.search(r'Auto batch size:\s*(\d+)', text)
+            if m:
+                self.batch_size_input.blockSignals(True)
+                self.batch_size_input.setValue(int(m.group(1)))
+                self.batch_size_input.blockSignals(False)
 
     # =========================================================================
     # Training queue
