@@ -746,6 +746,32 @@ def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_
             start_epoch, start_step = 0, 0
             optimizer = optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=1e-5)
             scaler = GradScaler(enabled=use_amp_eff)
+            # Fall through to finetune_from if available
+            finetune_path = getattr(config.training, 'finetune_from', None)
+            if finetune_path:
+                if is_main_process():
+                    logging.info("=" * 60)
+                    logging.info("FINE-TUNING MODE (checkpoint load failed, falling back to finetune_from)")
+                    logging.info(f"  Loading model weights from: {finetune_path}")
+                    logging.info(f"  Optimizer & step counter start fresh (step 0).")
+                    logging.info("=" * 60)
+                try:
+                    ft_ckpt = torch.load(finetune_path, map_location='cpu')
+                    if 'model_state_dict' not in ft_ckpt:
+                        raise KeyError("Checkpoint missing 'model_state_dict'. Is this a valid tunet checkpoint?")
+                    ft_state = ft_ckpt['model_state_dict']
+                    if any(k.startswith('module.') for k in ft_state):
+                        ft_state = {k.replace('module.', '', 1): v for k, v in ft_state.items()}
+                    if world_size > 1 and not any(k.startswith('module.') for k in ft_state):
+                        ft_state = {'module.' + k: v for k, v in ft_state.items()}
+                    model.load_state_dict(ft_state)
+                    if is_main_process():
+                        logging.info("Fine-tune weights loaded successfully. Starting training from step 0.")
+                    del ft_ckpt
+                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                except Exception as ft_e:
+                    logging.error(f"Failed to load fine-tune checkpoint: {ft_e}", exc_info=True)
+                    logging.warning("Falling back to training from scratch.")
     else:
         # No checkpoint — check if fine-tuning from an existing model
         finetune_path = getattr(config.training, 'finetune_from', None)
