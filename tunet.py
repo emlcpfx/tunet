@@ -198,6 +198,102 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         if file_path:
             line_edit.setText(file_path)
 
+    def _check_finetune_compat(self):
+        """Load the selected finetune .pth and compare its arch against current UI settings."""
+        import torch
+        from types import SimpleNamespace
+
+        path = self._get_path(self.finetune_from_input).strip()
+        if not path:
+            QMessageBox.warning(self, "No File", "Select a .pth file in 'Resume From' first.")
+            return
+        if not os.path.isfile(path):
+            QMessageBox.warning(self, "Not Found", f"File not found:\n{path}")
+            return
+
+        try:
+            ckpt = torch.load(path, map_location='cpu', weights_only=False)
+        except Exception as e:
+            QMessageBox.critical(self, "Load Error", f"Could not load checkpoint:\n{e}")
+            return
+
+        # --- Read checkpoint metadata ---
+        ckpt_cfg = ckpt.get('config', {})
+        if isinstance(ckpt_cfg, dict):
+            model_cfg = ckpt_cfg.get('model', {})
+            training_cfg = ckpt_cfg.get('training', {})
+        else:
+            # SimpleNamespace
+            model_cfg_ns = getattr(ckpt_cfg, 'model', SimpleNamespace())
+            training_cfg_ns = getattr(ckpt_cfg, 'training', SimpleNamespace())
+            model_cfg = vars(model_cfg_ns) if hasattr(model_cfg_ns, '__dict__') else {}
+            training_cfg = vars(training_cfg_ns) if hasattr(training_cfg_ns, '__dict__') else {}
+
+        def_h, bump_h = 64, 96
+        ckpt_base = model_cfg.get('model_size_dims', def_h)
+        ckpt_loss = training_cfg.get('loss', 'l1')
+        ckpt_model_type = ckpt.get('model_type',
+                                   model_cfg.get('model_type', 'unet'))
+        ckpt_n_ch = ckpt.get('n_input_channels', 3)
+
+        # Apply same bump logic as train.py
+        needs_bump = ((ckpt_loss == 'l1+lpips' and ckpt_base == def_h)
+                      or (ckpt_loss == 'weighted' and ckpt_base == def_h
+                          and training_cfg.get('lpips_weight', 0) > 0))
+        ckpt_eff = bump_h if needs_bump else ckpt_base
+
+        # --- Read current UI settings ---
+        ui_size = int(self.model_size_dims_input.currentText())
+        ui_type = self.model_type_input.currentText()
+        ui_loss = self.loss_input.currentText()
+        ui_n_ch = 4 if self.use_mask_input_input.isChecked() else 3
+
+        # Apply bump to UI side too
+        ui_needs_bump = ((ui_loss == 'l1+lpips' and ui_size == def_h)
+                         or (ui_loss == 'weighted' and ui_size == def_h
+                             and self.lpips_weight_input.value() > 0))
+        ui_eff = bump_h if ui_needs_bump else ui_size
+
+        lines = [f"Checkpoint:  {os.path.basename(path)}", ""]
+        ok = True
+
+        def row(label, ckpt_val, ui_val, match):
+            mark = "OK" if match else "MISMATCH"
+            return f"  [{mark}]  {label}: checkpoint={ckpt_val}  /  current={ui_val}"
+
+        size_match = (ckpt_eff == ui_eff)
+        type_match = (ckpt_model_type == ui_type)
+        ch_match = (ckpt_n_ch == ui_n_ch)
+
+        lines.append(row("Model Type",    ckpt_model_type, ui_type,    type_match))
+        lines.append(row("Hidden Size",   ckpt_eff,        ui_eff,     size_match))
+        lines.append(row("Input Channels",ckpt_n_ch,       ui_n_ch,    ch_match))
+
+        ok = size_match and type_match and ch_match
+
+        lines.append("")
+        if ok:
+            lines.append("Compatible — weights will load cleanly.")
+            icon = QMessageBox.Icon.Information
+            title = "Compatible"
+        else:
+            lines.append("Incompatible — fix the mismatched settings before training.")
+            if not type_match:
+                lines.append(f"  Set Model Type to: {ckpt_model_type}")
+            if not size_match:
+                lines.append(f"  Set Model Capacity to: {ckpt_base}"
+                              + (f"  (effective {ckpt_eff} with bump)" if needs_bump else ""))
+            if not ch_match:
+                lines.append(f"  {'Enable' if ckpt_n_ch == 4 else 'Disable'} 'Feed mask as 4th input channel'")
+            icon = QMessageBox.Icon.Warning
+            title = "Incompatible"
+
+        msg = QMessageBox(self)
+        msg.setIcon(icon)
+        msg.setWindowTitle(title)
+        msg.setText("\n".join(lines))
+        msg.exec()
+
     def _create_range_layout(self, min_widget, max_widget):
         layout = QHBoxLayout()
         layout.addWidget(min_widget)
