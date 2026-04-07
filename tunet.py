@@ -2397,8 +2397,7 @@ def _make_app_icon():
     p.drawPath(path)
 
     # Purple "T"
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QBrush(purple))
+    p.setPen(QPen(purple))
     font = QFont("Arial", 1, QFont.Weight.Bold)
     font.setPixelSize(int(size * 0.72))
     p.setFont(font)
