@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QStackedWidget, QFrame, QSlider,
 )
 from PySide6.QtCore import Qt, QObject, Signal, Slot, QFileSystemWatcher, QTimer, QThread
-from PySide6.QtGui import QPixmap, QTextCursor
+from PySide6.QtGui import QPixmap, QTextCursor, QIcon, QPainter, QColor, QFont, QPen, QBrush, QPainterPath
 
 from gui import (
     IndentDumper, ProcessStreamReader, FileCopyWorker, ZoomPanScrollArea, QTextEditLogHandler,
@@ -2378,9 +2378,40 @@ def apply_spark_theme(app):
     """)
 
 
+def _make_app_icon():
+    size = 256
+    px = QPixmap(size, size)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    purple = QColor("#7B3FE4")
+    stroke = 10
+    radius = 48
+
+    # White rounded-rect fill
+    p.setPen(QPen(purple, stroke))
+    p.setBrush(QBrush(QColor("white")))
+    path = QPainterPath()
+    path.addRoundedRect(stroke / 2, stroke / 2, size - stroke, size - stroke, radius, radius)
+    p.drawPath(path)
+
+    # Purple "T"
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(purple))
+    font = QFont("Arial", 1, QFont.Weight.Bold)
+    font.setPixelSize(int(size * 0.72))
+    p.setFont(font)
+    p.drawText(px.rect(), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "T")
+
+    p.end()
+    return QIcon(px)
+
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     apply_spark_theme(app)
+    app.setWindowIcon(_make_app_icon())
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
