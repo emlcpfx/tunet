@@ -175,6 +175,13 @@ class TrainingTabMixin:
         grp_finetune = QGroupBox("Fine-tune")
         form_finetune = QFormLayout(grp_finetune)
         form_finetune.addRow("Resume From:", self.finetune_from_input)
+        self.check_finetune_btn = QPushButton("Check Compatibility")
+        self.check_finetune_btn.setToolTip(
+            "Inspect the selected .pth and compare its architecture against\n"
+            "the current Model Type and Model Capacity settings.\n\n"
+            "Catches size mismatches before training starts.")
+        self.check_finetune_btn.clicked.connect(self._check_finetune_compat)
+        form_finetune.addRow(self.check_finetune_btn)
         layout.addWidget(grp_finetune)
 
         # =================================================================
