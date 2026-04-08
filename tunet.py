@@ -254,9 +254,13 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         patch_data = []  # list of (max_diff, PIL thumb)
         scan_errors = []
 
+        color_space = self.color_space_input.currentText()
+        is_linear = color_space == 'linear'
+
         def _scan():
             from PIL import Image as _Image
             from utils.pair_matching import find_dst_file
+            from image_io import load_image_any_format, load_image_linear, linear_to_log
             src_files = sorted(_glob(os.path.join(src_dir, '*.*')))
             no_dst = 0
             for src_path in src_files:
@@ -265,16 +269,30 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                     no_dst += 1
                     continue
                 try:
-                    src_img = _Image.open(src_path).convert('RGB')
-                    dst_img = _Image.open(dst_path).convert('RGB')
-                    w, h = src_img.size
-                    if w != dst_img.size[0] or h != dst_img.size[1]:
+                    if is_linear:
+                        src_np = load_image_linear(src_path).astype(np.float32)
+                        dst_np = load_image_linear(dst_path).astype(np.float32)
+                        h, w = src_np.shape[:2]
+                        dh, dw = dst_np.shape[:2]
+                        # diff in log space to match training
+                        diff = np.abs(linear_to_log(src_np) - linear_to_log(dst_np)).mean(axis=2) * 255.0
+                        # thumbnail from tonemapped src
+                        src_display = (src_np / (1.0 + src_np) * 255).clip(0, 255).astype(np.uint8)
+                    else:
+                        src_pil = load_image_any_format(src_path)
+                        dst_pil = load_image_any_format(dst_path)
+                        w, h = src_pil.size
+                        dw, dh = dst_pil.size
+                        src_np = np.array(src_pil).astype(np.float32)
+                        dst_np = np.array(dst_pil).astype(np.float32)
+                        diff = np.abs(src_np - dst_np).mean(axis=2)
+                        src_display = src_np.clip(0, 255).astype(np.uint8)
+                        src_pil.close(); dst_pil.close()
+
+                    if (w, h) != (dw, dh):
                         continue
                     if w < resolution or h < resolution:
                         continue
-                    src_np = np.array(src_img).astype(np.float32)
-                    dst_np = np.array(dst_img).astype(np.float32)
-                    diff = np.abs(src_np - dst_np).mean(axis=2)
 
                     y_coords = list(range(0, max(0, h - resolution) + 1, stride))
                     x_coords = list(range(0, max(0, w - resolution) + 1, stride))
@@ -287,8 +305,8 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                         for x in sorted(set(x_coords)):
                             patch_diff = diff[y:y+resolution, x:x+resolution]
                             max_diff = float(patch_diff.max())
-                            thumb = src_img.crop((x, y, x+resolution, y+resolution))
-                            thumb = thumb.resize((THUMB, THUMB), _Image.BILINEAR)
+                            patch_rgb = src_display[y:y+resolution, x:x+resolution]
+                            thumb = _Image.fromarray(patch_rgb).resize((THUMB, THUMB), _Image.BILINEAR)
                             patch_data.append((max_diff, thumb))
                 except Exception as e:
                     scan_errors.append(f"{os.path.basename(src_path)}: {e}")
