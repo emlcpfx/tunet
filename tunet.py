@@ -251,15 +251,18 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
 
         # --- Scan patches in background thread ---
         THUMB = 80  # thumbnail size px
-        patch_data = []  # list of (max_diff, thumb_QImage)
+        patch_data = []  # list of (max_diff, PIL thumb)
+        scan_errors = []
 
         def _scan():
             from PIL import Image as _Image
             from utils.pair_matching import find_dst_file
             src_files = sorted(_glob(os.path.join(src_dir, '*.*')))
+            no_dst = 0
             for src_path in src_files:
                 dst_path = find_dst_file(src_path, dst_dir)
                 if dst_path is None:
+                    no_dst += 1
                     continue
                 try:
                     src_img = _Image.open(src_path).convert('RGB')
@@ -271,7 +274,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                         continue
                     src_np = np.array(src_img).astype(np.float32)
                     dst_np = np.array(dst_img).astype(np.float32)
-                    diff = np.abs(src_np - dst_np).mean(axis=2)  # (H,W)
+                    diff = np.abs(src_np - dst_np).mean(axis=2)
 
                     y_coords = list(range(0, max(0, h - resolution) + 1, stride))
                     x_coords = list(range(0, max(0, w - resolution) + 1, stride))
@@ -287,23 +290,24 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                             thumb = src_img.crop((x, y, x+resolution, y+resolution))
                             thumb = thumb.resize((THUMB, THUMB), _Image.BILINEAR)
                             patch_data.append((max_diff, thumb))
-                except Exception:
+                except Exception as e:
+                    scan_errors.append(f"{os.path.basename(src_path)}: {e}")
                     continue
+            if no_dst == len(src_files) and len(src_files) > 0:
+                scan_errors.append(f"No destination matches found for any of {len(src_files)} source files. Check src/dst directories.")
 
-        progress = QProgressDialog("Scanning patches…", None, 0, 0, win)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.show()
-        QApplication.processEvents()
-
+        # Non-modal status label instead of blocking progress dialog
+        stats_label.setText("Scanning…")
         scan_thread = threading.Thread(target=_scan, daemon=True)
         scan_thread.start()
 
         def _wait_for_scan():
             if scan_thread.is_alive():
-                QTimer.singleShot(100, _wait_for_scan)
+                QTimer.singleShot(150, _wait_for_scan)
                 return
-            progress.close()
+            if scan_errors and not patch_data:
+                stats_label.setText(f"<span style='color:#EF4444'>Scan failed: {scan_errors[0]}</span>")
+                return
             _render_grid(thresh_spin.value())
 
         def _render_grid(threshold):
