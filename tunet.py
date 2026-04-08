@@ -202,6 +202,8 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         """Scan dataset patches and show a live grid of kept (green) vs skipped (red) patches."""
         import numpy as np
         from glob import glob as _glob
+        from PIL import Image as _Image, ImageDraw
+        from PySide6.QtGui import QImage
 
         src_dir = self._get_path(self.src_dir_input).strip()
         dst_dir = self._get_path(self.dst_dir_input).strip()
@@ -215,11 +217,13 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         resolution = int(self._combo_value(self.resolution_input))
         overlap_factor = float(self._combo_value(self.overlap_factor_input))
         stride = max(1, resolution - int(resolution * overlap_factor))
+        color_space = self.color_space_input.currentText()
+        is_linear = color_space == 'linear'
 
         # --- Build the window ---
         win = QWidget(self, Qt.WindowType.Window)
         win.setWindowTitle("Skip Filter Preview")
-        win.resize(1100, 750)
+        win.resize(1200, 800)
         win_layout = QVBoxLayout(win)
 
         # Controls row
@@ -230,10 +234,26 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         thresh_spin.setSingleStep(0.5)
         thresh_spin.setDecimals(1)
         thresh_spin.setValue(self.skip_empty_threshold_input.value())
+
+        size_label = QLabel("Size:")
+        size_slider = QSlider(Qt.Orientation.Horizontal)
+        size_slider.setRange(40, 200)
+        size_slider.setValue(80)
+        size_slider.setFixedWidth(120)
+        size_slider.setTickInterval(20)
+
+        sort_check = QCheckBox("Sort skipped first")
+
         stats_label = QLabel("Scanning…")
         stats_label.setStyleSheet("font-weight: bold;")
+
         ctrl_row.addWidget(thresh_label)
         ctrl_row.addWidget(thresh_spin)
+        ctrl_row.addSpacing(16)
+        ctrl_row.addWidget(size_label)
+        ctrl_row.addWidget(size_slider)
+        ctrl_row.addSpacing(16)
+        ctrl_row.addWidget(sort_check)
         ctrl_row.addStretch()
         ctrl_row.addWidget(stats_label)
         win_layout.addLayout(ctrl_row)
@@ -249,16 +269,12 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
 
         win.show()
 
-        # --- Scan patches in background thread ---
-        THUMB = 80  # thumbnail size px
-        patch_data = []  # list of (max_diff, PIL thumb)
+        # patch_data stores full-res (SCAN_SIZE) thumbnails; render scales to current slider value
+        SCAN_SIZE = 128
+        patch_data = []  # list of (max_diff, PIL Image at SCAN_SIZE)
         scan_errors = []
 
-        color_space = self.color_space_input.currentText()
-        is_linear = color_space == 'linear'
-
         def _scan():
-            from PIL import Image as _Image
             from utils.pair_matching import find_dst_file
             from image_io import load_image_any_format, load_image_linear, linear_to_log
             src_files = sorted(_glob(os.path.join(src_dir, '*.*')))
@@ -274,9 +290,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                         dst_np = load_image_linear(dst_path).astype(np.float32)
                         h, w = src_np.shape[:2]
                         dh, dw = dst_np.shape[:2]
-                        # diff in log space to match training
                         diff = np.abs(linear_to_log(src_np) - linear_to_log(dst_np)).mean(axis=2) * 255.0
-                        # thumbnail from tonemapped src
                         src_display = (src_np / (1.0 + src_np) * 255).clip(0, 255).astype(np.uint8)
                     else:
                         src_pil = load_image_any_format(src_path)
@@ -289,9 +303,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                         src_display = src_np.clip(0, 255).astype(np.uint8)
                         src_pil.close(); dst_pil.close()
 
-                    if (w, h) != (dw, dh):
-                        continue
-                    if w < resolution or h < resolution:
+                    if (w, h) != (dw, dh) or w < resolution or h < resolution:
                         continue
 
                     y_coords = list(range(0, max(0, h - resolution) + 1, stride))
@@ -306,15 +318,13 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                             patch_diff = diff[y:y+resolution, x:x+resolution]
                             max_diff = float(patch_diff.max())
                             patch_rgb = src_display[y:y+resolution, x:x+resolution]
-                            thumb = _Image.fromarray(patch_rgb).resize((THUMB, THUMB), _Image.BILINEAR)
+                            thumb = _Image.fromarray(patch_rgb).resize((SCAN_SIZE, SCAN_SIZE), _Image.BILINEAR)
                             patch_data.append((max_diff, thumb))
                 except Exception as e:
                     scan_errors.append(f"{os.path.basename(src_path)}: {e}")
-                    continue
             if no_dst == len(src_files) and len(src_files) > 0:
-                scan_errors.append(f"No destination matches found for any of {len(src_files)} source files. Check src/dst directories.")
+                scan_errors.append(f"No destination matches found for any of {len(src_files)} source files.")
 
-        # Non-modal status label instead of blocking progress dialog
         stats_label.setText("Scanning…")
         scan_thread = threading.Thread(target=_scan, daemon=True)
         scan_thread.start()
@@ -326,9 +336,13 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             if scan_errors and not patch_data:
                 stats_label.setText(f"<span style='color:#EF4444'>Scan failed: {scan_errors[0]}</span>")
                 return
-            _render_grid(thresh_spin.value())
+            _render_grid()
 
-        def _render_grid(threshold):
+        def _render_grid():
+            threshold = thresh_spin.value()
+            thumb_size = size_slider.value()
+            do_sort = sort_check.isChecked()
+
             # Clear existing grid
             while grid_layout.count():
                 item = grid_layout.takeAt(0)
@@ -343,11 +357,20 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                 f"<span style='color:#EF4444'>Skipped: {skipped}</span>   "
                 f"({100*skipped/max(1,len(patch_data)):.0f}% filtered)")
 
-            COLS = max(1, (win.width() - 40) // (THUMB + 4))
+            items = list(patch_data)
+            if do_sort:
+                # skipped (red) first, then kept (green), each group by ascending diff
+                items.sort(key=lambda x: (x[0] >= threshold, x[0]))
+            else:
+                # preserve original order but stable-sort red/green within original
+                pass
+
+            COLS = max(1, (win.width() - 40) // (thumb_size + 4))
             row_widget = None
             row_layout = None
             col = 0
-            for max_diff, thumb in patch_data:
+            border = max(2, thumb_size // 30)
+            for max_diff, thumb in items:
                 if col % COLS == 0:
                     row_widget = QWidget()
                     row_layout = QHBoxLayout(row_widget)
@@ -355,17 +378,15 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                     row_layout.setContentsMargins(0, 0, 0, 0)
                     grid_layout.addWidget(row_widget)
 
-                # Convert PIL thumb to QPixmap with colored border
-                from PIL import ImageDraw
-                bordered = thumb.copy()
+                scaled = thumb.resize((thumb_size, thumb_size), _Image.BILINEAR)
+                bordered = scaled.copy()
                 draw = ImageDraw.Draw(bordered)
                 color = (34, 197, 94) if max_diff >= threshold else (239, 68, 68)
-                for i in range(3):
-                    draw.rectangle([i, i, THUMB-1-i, THUMB-1-i], outline=color)
+                for i in range(border):
+                    draw.rectangle([i, i, thumb_size-1-i, thumb_size-1-i], outline=color)
 
                 img_data = bordered.tobytes("raw", "RGB")
-                from PySide6.QtGui import QImage
-                qimg = QImage(img_data, THUMB, THUMB, THUMB * 3, QImage.Format.Format_RGB888)
+                qimg = QImage(img_data, thumb_size, thumb_size, thumb_size * 3, QImage.Format.Format_RGB888)
                 lbl = QLabel()
                 lbl.setPixmap(QPixmap.fromImage(qimg))
                 lbl.setToolTip(f"max diff: {max_diff:.1f}")
@@ -376,8 +397,9 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                 row_layout.addStretch()
             grid_layout.addStretch()
 
-        thresh_spin.valueChanged.connect(lambda v: _render_grid(v) if patch_data else None)
-        thresh_spin.valueChanged.connect(lambda v: self.skip_empty_threshold_input.setValue(v))
+        thresh_spin.valueChanged.connect(lambda v: (_render_grid(), self.skip_empty_threshold_input.setValue(v)) if patch_data else None)
+        size_slider.valueChanged.connect(lambda _: _render_grid() if patch_data else None)
+        sort_check.stateChanged.connect(lambda _: _render_grid() if patch_data else None)
 
         QTimer.singleShot(50, _wait_for_scan)
 
