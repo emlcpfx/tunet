@@ -557,7 +557,7 @@ def _build_datasets(config, src_transforms, dst_transforms, shared_transforms, s
         raise ValueError(f"Dataset size ({len(dataset)}) < World size ({world_size}).")
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
     pin = True if device_type == 'cuda' else False
-    persist = True if config.dataloader.num_workers > 0 else False
+    persist = config.dataloader.num_workers > 0 and len(dataset) >= 1000
     prefetch = config.dataloader.prefetch_factor if config.dataloader.num_workers > 0 else None
     if CURRENT_OS == 'Windows' and config.dataloader.num_workers > 0 and is_main_process():
         logging.warning("Using num_workers > 0 on Windows. If issues occur, try num_workers=0.")
@@ -1428,6 +1428,14 @@ def train(config):
 
 # --- Main Execution (`if __name__ == "__main__":`) ---
 if __name__ == "__main__":
+    # On Linux, torch DataLoader workers default to 'fork', which breaks after CUDA is
+    # initialized (corrupted CUDA context in child → hang). Force 'spawn' before anything
+    # else touches CUDA so workers start clean.
+    if platform.system() == 'Linux':
+        import torch.multiprocessing as mp
+        if mp.get_start_method(allow_none=True) != 'spawn':
+            mp.set_start_method('spawn', force=True)
+
     parser = argparse.ArgumentParser(description='Train UNet via YAML config using DDP (Cross-Platform)')
     parser.add_argument('--config', type=str, required=True, help='Path to the USER YAML configuration file')
     parser.add_argument('--training.batch_size', type=int, dest='training_batch_size', default=None, help='Override training batch_size')
