@@ -198,6 +198,167 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         if file_path:
             line_edit.setText(file_path)
 
+    def _show_skip_filter_preview(self):
+        """Scan dataset patches and show a live grid of kept (green) vs skipped (red) patches."""
+        import numpy as np
+        from glob import glob as _glob
+
+        src_dir = self._get_path(self.src_dir_input).strip()
+        dst_dir = self._get_path(self.dst_dir_input).strip()
+        if not src_dir or not os.path.isdir(src_dir):
+            QMessageBox.warning(self, "Skip Filter Preview", "Source directory not set.")
+            return
+        if not dst_dir or not os.path.isdir(dst_dir):
+            QMessageBox.warning(self, "Skip Filter Preview", "Target directory not set.")
+            return
+
+        resolution = int(self._combo_value(self.resolution_input))
+        overlap_factor = float(self._combo_value(self.overlap_factor_input))
+        stride = max(1, resolution - int(resolution * overlap_factor))
+
+        # --- Build the window ---
+        win = QWidget(self, Qt.WindowType.Window)
+        win.setWindowTitle("Skip Filter Preview")
+        win.resize(1100, 750)
+        win_layout = QVBoxLayout(win)
+
+        # Controls row
+        ctrl_row = QHBoxLayout()
+        thresh_label = QLabel("Threshold:")
+        thresh_spin = QDoubleSpinBox()
+        thresh_spin.setRange(0.1, 50.0)
+        thresh_spin.setSingleStep(0.5)
+        thresh_spin.setDecimals(1)
+        thresh_spin.setValue(self.skip_empty_threshold_input.value())
+        stats_label = QLabel("Scanning…")
+        stats_label.setStyleSheet("font-weight: bold;")
+        ctrl_row.addWidget(thresh_label)
+        ctrl_row.addWidget(thresh_spin)
+        ctrl_row.addStretch()
+        ctrl_row.addWidget(stats_label)
+        win_layout.addLayout(ctrl_row)
+
+        # Scroll area for the grid
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        grid_container = QWidget()
+        grid_layout = QVBoxLayout(grid_container)
+        grid_layout.setSpacing(2)
+        scroll.setWidget(grid_container)
+        win_layout.addWidget(scroll)
+
+        win.show()
+
+        # --- Scan patches in background thread ---
+        THUMB = 80  # thumbnail size px
+        patch_data = []  # list of (max_diff, thumb_QImage)
+
+        def _scan():
+            from PIL import Image as _Image
+            from utils.pair_matching import find_dst_file
+            src_files = sorted(_glob(os.path.join(src_dir, '*.*')))
+            for src_path in src_files:
+                dst_path = find_dst_file(src_path, dst_dir)
+                if dst_path is None:
+                    continue
+                try:
+                    src_img = _Image.open(src_path).convert('RGB')
+                    dst_img = _Image.open(dst_path).convert('RGB')
+                    w, h = src_img.size
+                    if w != dst_img.size[0] or h != dst_img.size[1]:
+                        continue
+                    if w < resolution or h < resolution:
+                        continue
+                    src_np = np.array(src_img).astype(np.float32)
+                    dst_np = np.array(dst_img).astype(np.float32)
+                    diff = np.abs(src_np - dst_np).mean(axis=2)  # (H,W)
+
+                    y_coords = list(range(0, max(0, h - resolution) + 1, stride))
+                    x_coords = list(range(0, max(0, w - resolution) + 1, stride))
+                    if h > resolution and (h - resolution) % stride != 0:
+                        y_coords.append(h - resolution)
+                    if w > resolution and (w - resolution) % stride != 0:
+                        x_coords.append(w - resolution)
+
+                    for y in sorted(set(y_coords)):
+                        for x in sorted(set(x_coords)):
+                            patch_diff = diff[y:y+resolution, x:x+resolution]
+                            max_diff = float(patch_diff.max())
+                            thumb = src_img.crop((x, y, x+resolution, y+resolution))
+                            thumb = thumb.resize((THUMB, THUMB), _Image.BILINEAR)
+                            patch_data.append((max_diff, thumb))
+                except Exception:
+                    continue
+
+        progress = QProgressDialog("Scanning patches…", None, 0, 0, win)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+
+        scan_thread = threading.Thread(target=_scan, daemon=True)
+        scan_thread.start()
+
+        def _wait_for_scan():
+            if scan_thread.is_alive():
+                QTimer.singleShot(100, _wait_for_scan)
+                return
+            progress.close()
+            _render_grid(thresh_spin.value())
+
+        def _render_grid(threshold):
+            # Clear existing grid
+            while grid_layout.count():
+                item = grid_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+
+            kept = sum(1 for d, _ in patch_data if d >= threshold)
+            skipped = len(patch_data) - kept
+            stats_label.setText(
+                f"Total: {len(patch_data)}   "
+                f"<span style='color:#16A34A'>Kept: {kept}</span>   "
+                f"<span style='color:#EF4444'>Skipped: {skipped}</span>   "
+                f"({100*skipped/max(1,len(patch_data)):.0f}% filtered)")
+
+            COLS = max(1, (win.width() - 40) // (THUMB + 4))
+            row_widget = None
+            row_layout = None
+            col = 0
+            for max_diff, thumb in patch_data:
+                if col % COLS == 0:
+                    row_widget = QWidget()
+                    row_layout = QHBoxLayout(row_widget)
+                    row_layout.setSpacing(2)
+                    row_layout.setContentsMargins(0, 0, 0, 0)
+                    grid_layout.addWidget(row_widget)
+
+                # Convert PIL thumb to QPixmap with colored border
+                from PIL import ImageDraw
+                bordered = thumb.copy()
+                draw = ImageDraw.Draw(bordered)
+                color = (34, 197, 94) if max_diff >= threshold else (239, 68, 68)
+                for i in range(3):
+                    draw.rectangle([i, i, THUMB-1-i, THUMB-1-i], outline=color)
+
+                img_data = bordered.tobytes("raw", "RGB")
+                from PySide6.QtGui import QImage
+                qimg = QImage(img_data, THUMB, THUMB, THUMB * 3, QImage.Format.Format_RGB888)
+                lbl = QLabel()
+                lbl.setPixmap(QPixmap.fromImage(qimg))
+                lbl.setToolTip(f"max diff: {max_diff:.1f}")
+                row_layout.addWidget(lbl)
+                col += 1
+
+            if row_layout:
+                row_layout.addStretch()
+            grid_layout.addStretch()
+
+        thresh_spin.valueChanged.connect(lambda v: _render_grid(v) if patch_data else None)
+        thresh_spin.valueChanged.connect(lambda v: self.skip_empty_threshold_input.setValue(v))
+
+        QTimer.singleShot(50, _wait_for_scan)
+
     def _check_finetune_compat(self):
         """Load the selected finetune .pth and compare its arch against current UI settings."""
         import torch

@@ -511,10 +511,17 @@ class TrainingTabMixin:
         auto_mask_gamma_row.addWidget(QLabel("Auto Mask Gamma:"))
         auto_mask_gamma_row.addWidget(self.auto_mask_gamma_input)
         form_mask.addRow(auto_mask_gamma_row)
+        self.preview_skip_btn = QPushButton("Preview Filter")
+        self.preview_skip_btn.setToolTip(
+            "Scan your dataset and show which patches will be kept (green) or\n"
+            "skipped (red) at the current threshold.\n\n"
+            "Drag the threshold slider to see the effect in real time.")
+        self.preview_skip_btn.clicked.connect(self._show_skip_filter_preview)
         skip_empty_row = QHBoxLayout()
         skip_empty_row.addWidget(self.skip_empty_patches_input)
         skip_empty_row.addWidget(QLabel("Threshold:"))
         skip_empty_row.addWidget(self.skip_empty_threshold_input)
+        skip_empty_row.addWidget(self.preview_skip_btn)
         form_mask.addRow(skip_empty_row)
         grp_mask.setContentLayout(form_mask)
         layout.addWidget(grp_mask)
