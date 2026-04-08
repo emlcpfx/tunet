@@ -1051,9 +1051,16 @@ def train(config):
 
     # --- Auto Batch Size (after model exists) ---
     if auto_batch_pending and model is not None:
-        config.training.batch_size = _auto_batch_size(
-            model, config.data.resolution, n_input_ch, device, device_type,
-            getattr(config.training, 'use_amp', True))
+        if is_main_process():
+            config.training.batch_size = _auto_batch_size(
+                model, config.data.resolution, n_input_ch, device, device_type,
+                getattr(config.training, 'use_amp', True))
+        if world_size > 1:
+            bs_list = [config.training.batch_size]
+            dist.broadcast_object_list(bs_list, src=0)
+            config.training.batch_size = bs_list[0]
+        if is_main_process():
+            logging.info(f"Auto batch size resolved to {config.training.batch_size} (broadcast to all ranks)")
         # Rebuild dataloaders with the resolved batch size
         try:
             dataset, dataloader, dataloader_iter, val_dataloader, val_dataset, has_val_preview, has_val_loss = _build_datasets(
@@ -1140,6 +1147,11 @@ def train(config):
     try:
         while True:
             _check_stop_file()
+            if world_size > 1:
+                sd_t = torch.tensor(int(shutdown_requested), device=device)
+                dist.broadcast(sd_t, src=0)
+                if sd_t.item() and not shutdown_requested:
+                    shutdown_requested = True
             if shutdown_requested:
                 if is_main_process(): logging.info(f"Shutdown requested @ step {global_step}.")
                 break
@@ -1220,9 +1232,9 @@ def train(config):
             _has_weighted_loss = (use_mask_loss and mask_batch is not None) or use_auto_mask
             batch_l1_raw = criterion_l1(out.detach(), dst).item() if _has_weighted_loss else batch_l1
             if world_size > 1:
-                l1_t = torch.tensor(batch_l1, device=device); lp_t = torch.tensor(batch_lp, device=device)
-                dist.all_reduce(l1_t, op=dist.ReduceOp.AVG); dist.all_reduce(lp_t, op=dist.ReduceOp.AVG)
-                batch_l1 = l1_t.item(); batch_lp = lp_t.item()
+                l1_t = torch.tensor(batch_l1, device=device); lp_t = torch.tensor(batch_lp, device=device); l2_t = torch.tensor(batch_l2, device=device)
+                dist.all_reduce(l1_t, op=dist.ReduceOp.AVG); dist.all_reduce(lp_t, op=dist.ReduceOp.AVG); dist.all_reduce(l2_t, op=dist.ReduceOp.AVG)
+                batch_l1 = l1_t.item(); batch_lp = lp_t.item(); batch_l2 = l2_t.item()
             ep_l1 += batch_l1; ep_lpips += batch_lp; ep_steps += 1
 
             # Step LR scheduler (cosine steps per-iteration)
@@ -1284,6 +1296,8 @@ def train(config):
                           if hasattr(config.saving, 'keep_last_checkpoints') and config.saving.keep_last_checkpoints >= 0:
                               prune_checkpoints(config.data.output_dir, config.saving.keep_last_checkpoints, ckpt_prefix)
                  except Exception as e: logging.error(f"Checkpoint save failed @ Step {global_step}: {e}", exc_info=True)
+            if world_size > 1 and (save_now or epoch_end_now):
+                dist.barrier()  # All ranks wait for rank 0 to finish writing checkpoint
 
             # --- Auto Export ---
             if is_main_process() and epoch_end_now and config.auto_export.interval > 0:
@@ -1373,6 +1387,13 @@ def train(config):
                         shutdown_requested = True
                 elif completed_epoch >= es_min_epochs and epochs_since_best >= es_patience // 2:
                     logging.info(f"[Plateau Watch] No improvement for {epochs_since_best}/{es_patience} epochs (best smoothed: {es_best_loss:.6f} @ ep {es_best_epoch})")
+
+            # Broadcast early-stopping decision from rank 0 to all ranks
+            if world_size > 1 and epoch_end_now:
+                sd_t = torch.tensor(int(shutdown_requested), device=device)
+                dist.broadcast(sd_t, src=0)
+                if sd_t.item() and not shutdown_requested:
+                    shutdown_requested = True
 
         # --- End of Training Loop ---
         training_successful = True
