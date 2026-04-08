@@ -107,6 +107,22 @@ def create_augmentations(augmentation_list, has_mask=False, use_auto_mask=False)
         return A.Compose(transforms)
     else: logging.debug(f"Creating Torchvision pipeline ({len(transforms)} steps)."); return T.Compose(transforms)
 
+# --- Dataset slice_info cache (process-level, avoids repeated filesystem scans) ---
+# Key: (src_dir, dst_dir, resolution, overlap_factor, skip_empty_patches,
+#        skip_empty_threshold, color_space, use_auto_mask, mask_dir)
+# Value: dict with slice_info, stats
+_SLICE_INFO_CACHE = {}
+
+def _dataset_cache_key(src_dir, dst_dir, resolution, overlap_factor,
+                       skip_empty_patches, skip_empty_threshold, color_space,
+                       use_auto_mask, mask_dir):
+    return (os.path.abspath(src_dir), os.path.abspath(dst_dir),
+            resolution, float(overlap_factor),
+            bool(skip_empty_patches), float(skip_empty_threshold),
+            color_space, bool(use_auto_mask),
+            os.path.abspath(mask_dir) if mask_dir else None)
+
+
 # --- Augmented Dataset Class ---
 class AugmentedImagePairSlicingDataset(Dataset):
     def __init__(self, src_dir, dst_dir, resolution, overlap_factor=0.0,
@@ -131,12 +147,30 @@ class AugmentedImagePairSlicingDataset(Dataset):
         self.slice_info, self.skipped_count, self.processed_files, self.total_slices_generated, self.empty_patches_skipped = [], 0, 0, 0, 0
         self.skipped_file_reasons = []
         overlap_pixels = int(resolution * overlap_factor); self.stride = max(1, resolution - overlap_pixels)
+
+        # --- Cache check: skip filesystem scan if same params seen before ---
+        _cache_key = _dataset_cache_key(src_dir, dst_dir, resolution, overlap_factor,
+                                        skip_empty_patches, skip_empty_threshold,
+                                        color_space, use_auto_mask, mask_dir)
+        if _cache_key in _SLICE_INFO_CACHE:
+            _cached = _SLICE_INFO_CACHE[_cache_key]
+            self.slice_info = _cached['slice_info']
+            self.skipped_count = _cached['skipped_count']
+            self.processed_files = _cached['processed_files']
+            self.total_slices_generated = _cached['total_slices_generated']
+            self.empty_patches_skipped = _cached['empty_patches_skipped']
+            self.skipped_file_reasons = _cached['skipped_file_reasons']
+            if is_main_process(): logging.debug(f"Dataset cache hit: {len(self.slice_info)} slices (skipped filesystem scan)")
+            if len(self.slice_info) == 0:
+                raise ValueError(f"Cached dataset has 0 usable slices for {self.src_dir}")
+            if is_main_process(): logging.info(f"Dataset ready. Total usable slices: {len(self.slice_info)} (from cache)")
+            return
+        # --- End cache check ---
+
         src_glob_pattern = os.path.join(self.src_dir, '*.*')
-        # Use DEBUG for file search pattern
         if is_main_process(): logging.debug(f"Dataset searching: {src_glob_pattern}")
         src_files = sorted(glob.glob(src_glob_pattern))
         if not src_files: logging.error(f"No source files found in '{self.src_dir}'"); # Keep Error
-        # Use DEBUG for number of files found
         if is_main_process(): logging.debug(f"Found {len(src_files)} potential source files.")
 
         for i, src_path in enumerate(src_files):
@@ -235,6 +269,16 @@ class AugmentedImagePairSlicingDataset(Dataset):
         elif is_main_process():
              # Keep INFO for final confirmation
              logging.info(f"Dataset ready. Total usable slices: {len(self.slice_info)}")
+
+        # --- Store in cache so future instances with same params skip the scan ---
+        _SLICE_INFO_CACHE[_cache_key] = {
+            'slice_info': self.slice_info,
+            'skipped_count': self.skipped_count,
+            'processed_files': self.processed_files,
+            'total_slices_generated': self.total_slices_generated,
+            'empty_patches_skipped': self.empty_patches_skipped,
+            'skipped_file_reasons': self.skipped_file_reasons,
+        }
 
     def __len__(self): return len(self.slice_info)
     def __getitem__(self, idx):
