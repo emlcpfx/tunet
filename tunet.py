@@ -1120,6 +1120,8 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                     })
             self._inf_refresh_queue_display()
 
+        self._sync_aug_enabled()
+
     # =========================================================================
     # Config file save/load
     # =========================================================================
@@ -2391,6 +2393,11 @@ def apply_spark_theme(app):
         QComboBox:on {{
             border-color: {ACCENT};
         }}
+        QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {{
+            color: {TEXT_FAINT};
+            background-color: {BG};
+            border-color: {BORDER};
+        }}
         QComboBox::drop-down {{
             border: none;
             width: 24px;
@@ -2434,6 +2441,10 @@ def apply_spark_theme(app):
         }}
         QCheckBox:disabled {{
             color: {TEXT_FAINT};
+        }}
+        QCheckBox::indicator:disabled {{
+            background-color: {BG};
+            border-color: {BORDER};
         }}
 
         /* -- Scroll Area -- */
