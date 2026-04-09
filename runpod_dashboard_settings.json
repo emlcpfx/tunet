@@ -1,0 +1,9 @@
+{
+  "config": "D:/Work/Dropbox/Documents_DB/Work_DB/Bouffant_db/tunet_models/Porter_0408_REDO/runpod.yaml",
+  "pod_name": "",
+  "gpu": "rtxpro6000",
+  "disk": 50,
+  "volume": 100,
+  "skip_code": false,
+  "terminate": false
+}
