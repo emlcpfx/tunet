@@ -1,4 +1,5 @@
 import sys
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox, QScrollArea,
     QLabel, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QPushButton,
@@ -98,6 +99,19 @@ class TrainingTabMixin:
         self.auto_mask_gamma_input.setValue(p.get("auto_mask_gamma", 1.0))
         self.skip_empty_patches_input.setChecked(p["skip_empty_patches"])
         self.progressive_res_check.setChecked(p.get("progressive_resolution", False))
+
+    def _sync_aug_enabled(self):
+        """Sync augmentation sub-widget enabled state to their parent checkboxes."""
+        self.hflip_p.setEnabled(self.hflip_check.isChecked())
+        aff = self.affine_check.isChecked()
+        for w in self._affine_sub_widgets:
+            w.setEnabled(aff)
+        gam = self.gamma_check.isChecked()
+        for w in self._gamma_sub_widgets:
+            w.setEnabled(gam)
+        col = self.color_check.isChecked()
+        for w in self._color_sub_widgets:
+            w.setEnabled(col)
 
     def _create_training_tab(self):
         """Training tab — project folder, model, optimization, schedule, logging."""
@@ -575,21 +589,25 @@ class TrainingTabMixin:
         self.affine_scale_max = QDoubleSpinBox(decimals=2, minimum=0.1, maximum=5.0, value=1.1, singleStep=0.05)
         self.affine_scale_min.setToolTip("Min zoom. 0.9 = up to 10% zoom out.")
         self.affine_scale_max.setToolTip("Max zoom. 1.1 = up to 10% zoom in.")
-        form_aug.addRow("  Scale:", self._create_range_layout(self.affine_scale_min, self.affine_scale_max))
+        self._affine_scale_row = self._create_range_layout(self.affine_scale_min, self.affine_scale_max)
+        form_aug.addRow("  Scale:", self._affine_scale_row)
 
         self.affine_translate_min = QDoubleSpinBox(decimals=2, minimum=-0.5, maximum=0.5, value=-0.1, singleStep=0.01)
         self.affine_translate_max = QDoubleSpinBox(decimals=2, minimum=-0.5, maximum=0.5, value=0.1, singleStep=0.01)
-        form_aug.addRow("  Translate %:", self._create_range_layout(self.affine_translate_min, self.affine_translate_max))
+        self._affine_translate_row = self._create_range_layout(self.affine_translate_min, self.affine_translate_max)
+        form_aug.addRow("  Translate %:", self._affine_translate_row)
 
         self.affine_rotate_min = QSpinBox(minimum=-180, maximum=180, value=-3)
         self.affine_rotate_max = QSpinBox(minimum=-180, maximum=180, value=3)
         self.affine_rotate_min.setToolTip("Rotation range in degrees.")
-        form_aug.addRow("  Rotate:", self._create_range_layout(self.affine_rotate_min, self.affine_rotate_max))
+        self._affine_rotate_row = self._create_range_layout(self.affine_rotate_min, self.affine_rotate_max)
+        form_aug.addRow("  Rotate:", self._affine_rotate_row)
 
         self.affine_shear_min = QSpinBox(minimum=-45, maximum=45, value=-1)
         self.affine_shear_max = QSpinBox(minimum=-45, maximum=45, value=1)
         self.affine_shear_min.setToolTip("Shear range in degrees. Skews the image diagonally.")
-        form_aug.addRow("  Shear:", self._create_range_layout(self.affine_shear_min, self.affine_shear_max))
+        self._affine_shear_row = self._create_range_layout(self.affine_shear_min, self.affine_shear_max)
+        form_aug.addRow("  Shear:", self._affine_shear_row)
 
         self.affine_interpolation = QSpinBox(minimum=0, maximum=5, value=2)
         self.affine_interpolation.setToolTip("0 = Nearest, 1 = Bilinear, 2 = Cubic (recommended).")
@@ -600,10 +618,9 @@ class TrainingTabMixin:
         form_aug.addRow("  Keep Ratio:", self.affine_keep_ratio)
 
         self._affine_sub_widgets = [
-            self.affine_p, self.affine_scale_min, self.affine_scale_max,
-            self.affine_translate_min, self.affine_translate_max,
-            self.affine_rotate_min, self.affine_rotate_max,
-            self.affine_shear_min, self.affine_shear_max,
+            self.affine_p,
+            self._affine_scale_row, self._affine_translate_row,
+            self._affine_rotate_row, self._affine_shear_row,
             self.affine_interpolation, self.affine_keep_ratio,
         ]
         for w in self._affine_sub_widgets:
@@ -627,9 +644,10 @@ class TrainingTabMixin:
         self.gamma_limit_min = QSpinBox(minimum=0, maximum=255, value=40)
         self.gamma_limit_max = QSpinBox(minimum=0, maximum=255, value=160)
         self.gamma_limit_min.setToolTip("100 = no change. Below 100 = darken, above 100 = brighten.")
-        form_aug.addRow("  Gamma Limit:", self._create_range_layout(self.gamma_limit_min, self.gamma_limit_max))
+        self._gamma_limit_row = self._create_range_layout(self.gamma_limit_min, self.gamma_limit_max)
+        form_aug.addRow("  Gamma Limit:", self._gamma_limit_row)
 
-        self._gamma_sub_widgets = [self.gamma_p, self.gamma_limit_min, self.gamma_limit_max]
+        self._gamma_sub_widgets = [self.gamma_p, self._gamma_limit_row]
         for w in self._gamma_sub_widgets:
             w.setEnabled(False)
         self.gamma_check.toggled.connect(
@@ -655,26 +673,28 @@ class TrainingTabMixin:
         self.color_brightness_min.setToolTip(
             "Brightness adjustment range. 0 = no change.\n"
             "Negative = darker, positive = brighter. ±0.2 is a safe default.")
-        form_aug.addRow("  Brightness:", self._create_range_layout(self.color_brightness_min, self.color_brightness_max))
+        self._color_brightness_row = self._create_range_layout(self.color_brightness_min, self.color_brightness_max)
+        form_aug.addRow("  Brightness:", self._color_brightness_row)
 
         self.color_contrast_min = QDoubleSpinBox(decimals=2, minimum=-1.0, maximum=1.0, value=-0.2, singleStep=0.05)
         self.color_contrast_max = QDoubleSpinBox(decimals=2, minimum=-1.0, maximum=1.0, value=0.2, singleStep=0.05)
         self.color_contrast_min.setToolTip(
             "Contrast adjustment range. 0 = no change.\n"
             "Negative = lower contrast, positive = higher contrast.")
-        form_aug.addRow("  Contrast:", self._create_range_layout(self.color_contrast_min, self.color_contrast_max))
+        self._color_contrast_row = self._create_range_layout(self.color_contrast_min, self.color_contrast_max)
+        form_aug.addRow("  Contrast:", self._color_contrast_row)
 
         self.color_saturation_min = QSpinBox(minimum=-100, maximum=100, value=-30)
         self.color_saturation_max = QSpinBox(minimum=-100, maximum=100, value=30)
         self.color_saturation_min.setToolTip(
             "Saturation shift range. 0 = no change.\n"
             "Negative = desaturate, positive = boost color intensity.")
-        form_aug.addRow("  Saturation:", self._create_range_layout(self.color_saturation_min, self.color_saturation_max))
+        self._color_saturation_row = self._create_range_layout(self.color_saturation_min, self.color_saturation_max)
+        form_aug.addRow("  Saturation:", self._color_saturation_row)
 
         self._color_sub_widgets = [
-            self.color_p, self.color_brightness_min, self.color_brightness_max,
-            self.color_contrast_min, self.color_contrast_max,
-            self.color_saturation_min, self.color_saturation_max,
+            self.color_p, self._color_brightness_row,
+            self._color_contrast_row, self._color_saturation_row,
         ]
         for w in self._color_sub_widgets:
             w.setEnabled(False)
@@ -683,6 +703,19 @@ class TrainingTabMixin:
 
         grp_aug.setContentLayout(form_aug)
         layout.addWidget(grp_aug)
+        # Re-apply enabled states after setContentLayout reparents widgets into
+        # the collapsible body (reparenting can reset Qt's native enabled state).
+        # Must check current checkbox state, not hardcode False, because
+        # _load_session() may have restored checked augmentations before this fires.
+        def _reapply_aug_enabled():
+            self.hflip_p.setEnabled(self.hflip_check.isChecked())
+            for w in self._affine_sub_widgets:
+                w.setEnabled(self.affine_check.isChecked())
+            for w in self._gamma_sub_widgets:
+                w.setEnabled(self.gamma_check.isChecked())
+            for w in self._color_sub_widgets:
+                w.setEnabled(self.color_check.isChecked())
+        QTimer.singleShot(0, _reapply_aug_enabled)
 
         # =================================================================
         # LOGGING & CHECKPOINTS — collapsible
@@ -789,3 +822,8 @@ class TrainingTabMixin:
         scroll.setWidgetResizable(True)
         scroll.setWidget(tab)
         self.tabs.addTab(scroll, "Training")
+
+        # Apply initial disabled state for aug sub-widgets here, after all
+        # widgets have been fully parented into the scroll area. Qt resets
+        # enabled state during reparenting, so this must be the last step.
+        self._sync_aug_enabled()
