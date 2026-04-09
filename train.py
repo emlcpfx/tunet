@@ -545,62 +545,60 @@ def _setup_logging(config, rank, device, world_size):
 
 
 def _auto_batch_size(model, resolution, n_input_ch, device, device_type, use_amp):
-    """Probe GPU memory and find the largest batch size that fits without OOM.
+    """Estimate the largest batch size that fits in GPU memory without OOM.
 
-    Tries batch sizes from 32 down to 1, running a dummy forward+backward pass
-    for each. Returns the largest that succeeds, or 1 as a fallback.
+    Runs a single no_grad forward pass at bs=1 to measure real activation memory,
+    then scales linearly to estimate all other batch sizes. No backward pass is
+    run during probing, so this is fast and doesn't grind the machine.
     """
     if device_type != 'cuda':
         if is_main_process():
             logging.info("Auto batch size: not on CUDA, defaulting to 4.")
         return 4
 
-    model.train()
+    model.eval()
     candidates = [32, 24, 16, 12, 8, 6, 4, 2, 1]
-    chosen = 1
+
+    free, total = torch.cuda.mem_get_info(device)
     if is_main_process():
-        free, total = torch.cuda.mem_get_info(device)
-        logging.info(f"Auto batch size: probing (GPU {total / 1e9:.1f}GB total, {free / 1e9:.1f}GB free, res={resolution})")
-    for bs in candidates:
+        logging.info(f"Auto batch size: estimating (GPU {total / 1e9:.1f}GB total, {free / 1e9:.1f}GB free, res={resolution})")
+
+    # Measure real activation memory for bs=1 via a single no_grad forward.
+    # `free` already accounts for model params/optimizer state (they're already allocated),
+    # so we only need to estimate the per-sample training activation cost.
+    # Backward stores ~2x the no_grad activation memory (intermediate feature maps kept for grad).
+    chosen = 1
+    try:
         torch.cuda.empty_cache()
-        _stop_heartbeat = threading.Event()
-        def _heartbeat(bs=bs, stop=_stop_heartbeat):
-            elapsed = 0
-            while not stop.wait(5):
-                elapsed += 5
-                if is_main_process():
-                    logging.info(f"Auto batch size: still probing batch_size={bs}... ({elapsed}s elapsed)")
-        hb = threading.Thread(target=_heartbeat, daemon=True)
-        try:
-            if is_main_process():
-                logging.info(f"Auto batch size: trying batch_size={bs} (first run compiles CUDA kernels, may take minutes)...")
-            hb.start()
-            t0 = time.time()
-            dummy = torch.randn(bs, n_input_ch, resolution, resolution, device=device)
+        torch.cuda.reset_peak_memory_stats(device)
+        baseline = torch.cuda.memory_allocated(device)
+        dummy = torch.randn(1, n_input_ch, resolution, resolution, device=device)
+        with torch.no_grad():
             with autocast(device_type='cuda', enabled=use_amp):
                 out = model(dummy)
-                loss = out.mean()
-            loss.backward()
-            model.zero_grad(set_to_none=True)
-            del dummy, out, loss
-            torch.cuda.empty_cache()
-            _stop_heartbeat.set()
-            chosen = bs
-            if is_main_process():
-                logging.info(f"Auto batch size: batch_size={bs} OK ({time.time() - t0:.1f}s)")
-            break
-        except torch.cuda.OutOfMemoryError:
-            _stop_heartbeat.set()
-            if is_main_process():
-                logging.info(f"Auto batch size: batch_size={bs} OOM, trying smaller...")
-            torch.cuda.empty_cache()
-            continue
-        except Exception as e:
-            _stop_heartbeat.set()
-            if is_main_process():
-                logging.warning(f"Auto batch size: batch_size={bs} failed ({type(e).__name__}: {e})")
-            torch.cuda.empty_cache()
-            continue
+        peak = torch.cuda.max_memory_allocated(device)
+        del dummy, out
+        torch.cuda.empty_cache()
+        activation_per_sample = max(peak - baseline, 1)
+        # backward stores ~3x the no_grad activation memory (empirically validated)
+        per_sample_train = activation_per_sample * 3
+        usable = free * 0.85  # leave 15% headroom
+        if is_main_process():
+            logging.info(f"Auto batch size: measured {activation_per_sample / 1e6:.0f}MB/sample no_grad "
+                         f"(~{per_sample_train / 1e6:.0f}MB with backward). "
+                         f"Usable: {usable / 1e6:.0f}MB / {free / 1e6:.0f}MB free.")
+        for bs in candidates:
+            if per_sample_train * bs <= usable:
+                chosen = bs
+                break
+        if is_main_process():
+            logging.info(f"Auto batch size: {chosen} (estimated {per_sample_train * chosen / 1e6:.0f}MB / {usable / 1e6:.0f}MB usable)")
+    except Exception as e:
+        if is_main_process():
+            logging.warning(f"Auto batch size: estimation failed ({e}), defaulting to 4.")
+        chosen = 4
+
+    model.train()
     if is_main_process():
         free, total = torch.cuda.mem_get_info(device)
         logging.info(f"Auto batch size: {chosen} (GPU {total / 1e9:.1f}GB total, {free / 1e9:.1f}GB free)")
@@ -633,11 +631,18 @@ def _build_datasets(config, src_transforms, dst_transforms, shared_transforms, s
     pin = True if device_type == 'cuda' else False
     persist = config.dataloader.num_workers > 0 and len(dataset) >= 1000
     prefetch = config.dataloader.prefetch_factor if config.dataloader.num_workers > 0 else None
-    if CURRENT_OS == 'Windows' and config.dataloader.num_workers > 0 and is_main_process():
-        logging.warning("Using num_workers > 0 on Windows. If issues occur, try num_workers=0.")
+    num_workers = config.dataloader.num_workers
+    if CURRENT_OS == 'Windows' and num_workers > 0:
+        if is_main_process():
+            logging.warning("num_workers > 0 causes hangs on Windows (spawn multiprocessing). Forcing num_workers=0.")
+        num_workers = 0
+        persist = False
+        prefetch = None
+    if CURRENT_OS == 'Windows':
+        pin = False  # pin_memory spawns a background thread that deadlocks on Windows with num_workers=0
     dataloader = DataLoader(
         dataset, batch_size=config.training.batch_size, sampler=sampler,
-        num_workers=config.dataloader.num_workers, pin_memory=pin,
+        num_workers=num_workers, pin_memory=pin,
         prefetch_factor=prefetch, persistent_workers=persist,
         collate_fn=collate_skip_none, drop_last=True)
     dataloader_iter = cycle(dataloader)

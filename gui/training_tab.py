@@ -1,3 +1,4 @@
+import sys
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox, QScrollArea,
     QLabel, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QPushButton,
@@ -422,9 +423,15 @@ class TrainingTabMixin:
         for label, _ in self.num_workers_presets:
             self.num_workers_input.addItem(label)
         self.num_workers_input.setCurrentIndex(0)
-        self.num_workers_input.setToolTip(
-            "CPU threads loading data in parallel.\n"
-            "'Auto' picks based on your hardware \u2014 recommended for most users.")
+        if sys.platform == 'win32':
+            self.num_workers_input.setEnabled(False)
+            self.num_workers_input.setToolTip(
+                "Not available on Windows — DataLoader workers cause hangs due to\n"
+                "Python's spawn-based multiprocessing. Training will use num_workers=0.")
+        else:
+            self.num_workers_input.setToolTip(
+                "CPU threads loading data in parallel.\n"
+                "'Auto' picks based on your hardware \u2014 recommended for most users.")
         form_sched.addRow("DataLoader Workers:", self.num_workers_input)
         grp_sched.setContentLayout(form_sched)
         layout.addWidget(grp_sched)
