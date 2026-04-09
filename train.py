@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import itertools # For infinite dataloader cycle
 import signal # For graceful shutdown signal handling
 import re # For checkpoint pruning regex
+import threading # For async checkpoint saves
 import numpy as np
 import platform # OS detection
 
@@ -112,6 +113,22 @@ def create_augmentations(augmentation_list, has_mask=False, use_auto_mask=False)
 #        skip_empty_threshold, color_space, use_auto_mask, mask_dir)
 # Value: dict with slice_info, stats
 _SLICE_INFO_CACHE = {}
+
+# --- Image pixel cache (process-level, avoids re-decoding the same image file) ---
+# Key: absolute file path  |  Value: decoded numpy HWC array
+# Linear images: float32 linear RGB  |  sRGB images: uint8 RGB
+_IMAGE_PIXEL_CACHE: dict = {}
+
+def _load_cached_image(path: str, is_linear: bool) -> np.ndarray:
+    """Load full image from process-level cache (decode once, reuse every crop)."""
+    if path not in _IMAGE_PIXEL_CACHE:
+        if is_linear:
+            _IMAGE_PIXEL_CACHE[path] = load_image_linear(path)
+        else:
+            img = load_image_any_format(path)
+            _IMAGE_PIXEL_CACHE[path] = np.array(img)
+            img.close()
+    return _IMAGE_PIXEL_CACHE[path]
 
 def _dataset_cache_key(src_dir, dst_dir, resolution, overlap_factor,
                        skip_empty_patches, skip_empty_threshold, color_space,
@@ -285,10 +302,8 @@ class AugmentedImagePairSlicingDataset(Dataset):
         try: info = self.slice_info[idx]; src_path, dst_path, crop_box = info['src_path'], info['dst_path'], info['crop_box']
         except IndexError: logging.error(f"Index {idx} out of bounds for slice_info (len {len(self.slice_info)})."); return None
         try:
-            if self.is_linear:
-                src_img_np = load_image_linear(src_path); dst_img_np = load_image_linear(dst_path)
-            else:
-                src_img = load_image_any_format(src_path); dst_img = load_image_any_format(dst_path)
+            src_img_np = _load_cached_image(src_path, self.is_linear)
+            dst_img_np = _load_cached_image(dst_path, self.is_linear)
         except Exception as load_e: logging.error(f"Item {idx}: Img load error ({os.path.basename(src_path)}): {load_e}"); return None
         # Load mask if configured
         mask_slice = None
@@ -298,9 +313,9 @@ class AugmentedImagePairSlicingDataset(Dataset):
             x1, y1, x2, y2 = crop_box
             mask_slice = mask_full[y1:y2, x1:x2]
         try:
+            x1, y1, x2, y2 = crop_box
             if self.is_linear:
                 # --- Linear float32 path ---
-                x1, y1, x2, y2 = crop_box
                 src_slice_current = src_img_np[y1:y2, x1:x2].copy()
                 dst_slice_current = dst_img_np[y1:y2, x1:x2].copy()
 
@@ -329,11 +344,13 @@ class AugmentedImagePairSlicingDataset(Dataset):
                 src_tensor, dst_tensor = norm(src_tensor), norm(dst_tensor)
             else:
                 # --- sRGB uint8 path (original) ---
-                src_slice_pil = src_img.crop(crop_box); dst_slice_pil = dst_img.crop(crop_box)
-                src_img.close(); dst_img.close()
+                # src_img_np / dst_img_np are uint8 HWC from cache — slice directly
                 use_numpy = isinstance(self.shared_transforms, A.Compose) or isinstance(self.src_transforms, A.Compose) or isinstance(self.dst_transforms, A.Compose)
-                if use_numpy: src_slice_current, dst_slice_current = np.array(src_slice_pil), np.array(dst_slice_pil)
-                else: src_slice_current, dst_slice_current = src_slice_pil, dst_slice_pil
+                src_slice_current = src_img_np[y1:y2, x1:x2].copy()
+                dst_slice_current = dst_img_np[y1:y2, x1:x2].copy()
+                if not use_numpy:
+                    src_slice_current = Image.fromarray(src_slice_current)
+                    dst_slice_current = Image.fromarray(dst_slice_current)
 
                 # Compute auto-mask raw diff BEFORE augmentation (no border artifacts)
                 auto_mask_slice = None
@@ -546,9 +563,19 @@ def _auto_batch_size(model, resolution, n_input_ch, device, device_type, use_amp
         logging.info(f"Auto batch size: probing (GPU {total / 1e9:.1f}GB total, {free / 1e9:.1f}GB free, res={resolution})")
     for bs in candidates:
         torch.cuda.empty_cache()
+        _stop_heartbeat = threading.Event()
+        def _heartbeat(bs=bs, stop=_stop_heartbeat):
+            elapsed = 0
+            while not stop.wait(5):
+                elapsed += 5
+                if is_main_process():
+                    logging.info(f"Auto batch size: still probing batch_size={bs}... ({elapsed}s elapsed)")
+        hb = threading.Thread(target=_heartbeat, daemon=True)
         try:
             if is_main_process():
-                logging.info(f"Auto batch size: trying batch_size={bs}...")
+                logging.info(f"Auto batch size: trying batch_size={bs} (first run compiles CUDA kernels, may take minutes)...")
+            hb.start()
+            t0 = time.time()
             dummy = torch.randn(bs, n_input_ch, resolution, resolution, device=device)
             with autocast(device_type='cuda', enabled=use_amp):
                 out = model(dummy)
@@ -557,16 +584,19 @@ def _auto_batch_size(model, resolution, n_input_ch, device, device_type, use_amp
             model.zero_grad(set_to_none=True)
             del dummy, out, loss
             torch.cuda.empty_cache()
+            _stop_heartbeat.set()
             chosen = bs
             if is_main_process():
-                logging.info(f"Auto batch size: batch_size={bs} OK")
+                logging.info(f"Auto batch size: batch_size={bs} OK ({time.time() - t0:.1f}s)")
             break
         except torch.cuda.OutOfMemoryError:
+            _stop_heartbeat.set()
             if is_main_process():
                 logging.info(f"Auto batch size: batch_size={bs} OOM, trying smaller...")
             torch.cuda.empty_cache()
             continue
         except Exception as e:
+            _stop_heartbeat.set()
             if is_main_process():
                 logging.warning(f"Auto batch size: batch_size={bs} failed ({type(e).__name__}: {e})")
             torch.cuda.empty_cache()
@@ -1188,6 +1218,7 @@ def train(config):
 
     # --- Main Training Loop ---
     model.train()
+    _pending_ckpt_thread: threading.Thread | None = None
     try:
         while True:
             _check_stop_file()
@@ -1322,6 +1353,9 @@ def train(config):
             save_interval = config.saving.save_iterations_interval; save_now = (save_interval > 0 and global_step % save_interval == 0)
             epoch_end_now = (global_step % iter_epoch == 0) and global_step > 0
             if is_main_process() and (save_now or epoch_end_now):
+                 # Wait for any in-flight checkpoint write before starting a new one
+                 if _pending_ckpt_thread is not None and _pending_ckpt_thread.is_alive():
+                     _pending_ckpt_thread.join()
                  ckpt_ep = global_step // iter_epoch; ep_ckpt_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_epoch_{ckpt_ep:09d}.pth') if epoch_end_now else None
                  latest_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth'); cfg_dict = config_to_dict(config)
                  m_state = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
@@ -1330,21 +1364,30 @@ def train(config):
                  scheduler_state = scheduler.state_dict() if scheduler is not None else None
                  ckpt_data = {'epoch': ckpt_ep, 'global_step': global_step, 'model_state_dict': m_state, 'optimizer_state_dict': optimizer.state_dict(),
                               'scaler_state_dict': scaler_state, 'scheduler_state_dict': scheduler_state, 'config': cfg_dict, 'effective_model_size': eff_size, 'n_input_channels': n_input_ch, 'model_type': model_type}
-                 try:
-                     reason = "interval" if save_now else "epoch end"
-                     torch.save(ckpt_data, latest_path)
-                     logging.info(f"Saved latest checkpoint ({reason}) @ Step {global_step}")
-                     if ep_ckpt_path:
-                          torch.save(ckpt_data, ep_ckpt_path)
-                          logging.info(f"Saved epoch checkpoint: {os.path.basename(ep_ckpt_path)}")
-                          if hasattr(config.saving, 'keep_last_checkpoints') and config.saving.keep_last_checkpoints >= 0:
-                              prune_checkpoints(config.data.output_dir, config.saving.keep_last_checkpoints, ckpt_prefix)
-                 except Exception as e: logging.error(f"Checkpoint save failed @ Step {global_step}: {e}", exc_info=True)
+                 _save_step = global_step; _save_reason = "interval" if save_now else "epoch end"
+                 def _do_ckpt_save(data=ckpt_data, lpath=latest_path, eppath=ep_ckpt_path, step=_save_step, reason=_save_reason, out_dir=config.data.output_dir, prefix=ckpt_prefix):
+                     try:
+                         torch.save(data, lpath)
+                         logging.info(f"Saved latest checkpoint ({reason}) @ Step {step}")
+                         if eppath:
+                             torch.save(data, eppath)
+                             logging.info(f"Saved epoch checkpoint: {os.path.basename(eppath)}")
+                             if hasattr(config.saving, 'keep_last_checkpoints') and config.saving.keep_last_checkpoints >= 0:
+                                 prune_checkpoints(out_dir, config.saving.keep_last_checkpoints, prefix)
+                     except Exception as e: logging.error(f"Checkpoint save failed @ Step {step}: {e}", exc_info=True)
+                 _pending_ckpt_thread = threading.Thread(target=_do_ckpt_save, daemon=True)
+                 _pending_ckpt_thread.start()
             if world_size > 1 and (save_now or epoch_end_now):
+                # Ensure rank 0 finishes writing before other ranks proceed
+                if _pending_ckpt_thread is not None and _pending_ckpt_thread.is_alive():
+                    _pending_ckpt_thread.join()
                 dist.barrier()  # All ranks wait for rank 0 to finish writing checkpoint
 
             # --- Auto Export ---
             if is_main_process() and epoch_end_now and config.auto_export.interval > 0:
+                # Ensure async checkpoint is written before we copy it for export
+                if _pending_ckpt_thread is not None and _pending_ckpt_thread.is_alive():
+                    _pending_ckpt_thread.join()
                 completed_ep = global_step // iter_epoch
                 if completed_ep % config.auto_export.interval == 0:
                     from exporters.auto_export import export_flame, export_nuke
@@ -1448,6 +1491,9 @@ def train(config):
         logging.error("FATAL Training loop error:", exc_info=True);
         shutdown_requested = True
     finally:
+        # Flush any async checkpoint write before proceeding to final save
+        if _pending_ckpt_thread is not None and _pending_ckpt_thread.is_alive():
+            _pending_ckpt_thread.join()
         max_steps_reached = max_steps > 0 and final_global_step >= max_steps
         if (shutdown_requested or max_steps_reached) and is_main_process():
             logging.info(f"Performing final checkpoint save (State @ Step {final_global_step})...")
