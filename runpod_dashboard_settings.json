@@ -5,5 +5,7 @@
   "disk": 50,
   "volume": 100,
   "skip_code": false,
-  "terminate": false
+  "terminate": false,
+  "export_dest": "D:/Work/Dropbox/Documents_DB/Work_DB/Bouffant_db/tunet_models/Porter_0408_REDO/model/export_runpod",
+  "download_pth_dest": "D:/Work/Dropbox/Documents_DB/Work_DB/Bouffant_db/tunet_models/Porter_0408_REDO/model/export_runpod"
 }

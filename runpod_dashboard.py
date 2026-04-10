@@ -109,6 +109,21 @@ def get_ssh(pod):
     return None, None
 
 
+def _pod_uptime_seconds(pod):
+    """Compute uptime from lastStartedAt ISO timestamp (more reliable than uptimeSeconds)."""
+    import datetime
+    started = pod.get('lastStartedAt')
+    if started:
+        try:
+            # RunPod returns e.g. "2026-04-09T18:00:00.000Z"
+            ts = started.rstrip('Z')
+            dt = datetime.datetime.fromisoformat(ts).replace(tzinfo=datetime.timezone.utc)
+            return max(0, (datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds())
+        except Exception:
+            pass
+    return pod.get('uptimeSeconds') or 0
+
+
 def fmt_uptime(secs):
     if not secs:
         return '--'
@@ -121,7 +136,7 @@ def fmt_uptime(secs):
 
 def fmt_cost(pod):
     cph = pod.get('costPerHr') or 0
-    up  = pod.get('uptimeSeconds') or 0
+    up  = _pod_uptime_seconds(pod)
     spent = cph * up / 3600
     return f'${cph:.2f}/hr  (${spent:.2f} spent)'
 
@@ -213,6 +228,295 @@ def launch_monitor_for_pod(pod):
     threading.Thread(target=_tail, daemon=True).start()
 
 
+# ── Training analysis (ported from training_monitor.py) ──────────────────────
+
+def _compute_analysis(steps, losses):
+    """Return analysis dict or None if not enough data."""
+    if not steps or len(steps) < 10:
+        return None
+    current_epoch = steps[-1]
+    if current_epoch < 5:
+        return None
+
+    window_epochs = min(20, current_epoch * 0.5)
+    cutoff = current_epoch - window_epochs
+    pairs = [(s, l) for s, l in zip(steps, losses) if s >= cutoff]
+    if len(pairs) < 10:
+        return None
+    w_steps, w_losses = zip(*pairs)
+    w_steps, w_losses = list(w_steps), list(w_losses)
+
+    # EMA smoothing
+    smoothed, alpha, last = [], 0.95, w_losses[0]
+    for v in w_losses:
+        last = alpha * last + (1 - alpha) * v
+        smoothed.append(last)
+
+    # Linear regression slope (relative)
+    n = len(smoothed)
+    xm, ym = sum(w_steps) / n, sum(smoothed) / n
+    ss_xy = sum((x - xm) * (y - ym) for x, y in zip(w_steps, smoothed))
+    ss_xx = sum((x - xm) ** 2 for x in w_steps)
+    slope = ss_xy / ss_xx if ss_xx > 0 else 0
+    rel_slope = slope / smoothed[-1] if smoothed[-1] > 0 else 0
+
+    # Half-window improvement %
+    mid = len(smoothed) // 2
+    f_avg = sum(smoothed[:mid]) / mid
+    s_avg = sum(smoothed[mid:]) / (n - mid)
+    pct = ((s_avg - f_avg) / f_avg * 100) if f_avg > 0 else 0
+
+    # Best epoch
+    best_idx = losses.index(min(losses))
+    best_epoch = steps[best_idx]
+    since_best = current_epoch - best_epoch
+
+    if rel_slope < -0.005:   trend, tc = 'Improving', '#22c55e'
+    elif rel_slope > 0.005:  trend, tc = 'Diverging', '#ef4444'
+    else:                    trend, tc = 'Flat',      '#f59e0b'
+
+    ic = '#22c55e' if pct < -1 else ('#ef4444' if pct > 1 else '#f59e0b')
+
+    if since_best < 10:    pc, pl = f'Best {since_best:.0f}ep ago', '#22c55e'
+    elif since_best < 30:  pc, pl = f'Best {since_best:.0f}ep ago', '#f59e0b'
+    else:                  pc, pl = f'Best {since_best:.0f}ep ago', '#ef4444'
+
+    if   rel_slope < -0.005 and since_best < 20: rec, rc = 'Training well',       '#22c55e'
+    elif rel_slope > 0.01:                        rec, rc = 'Diverging - check LR','#ef4444'
+    elif since_best > 50:                         rec, rc = 'Consider stopping',   '#ef4444'
+    elif since_best > 30 or abs(rel_slope) < 0.001: rec, rc = 'Plateau - may stop','#f59e0b'
+    elif rel_slope < -0.001:                      rec, rc = 'Slow progress',       '#f59e0b'
+    else:                                         rec, rc = 'Stable',              '#6b7280'
+
+    return dict(trend=trend, trend_color=tc,
+                pct=f'{pct:+.1f}%', pct_color=ic,
+                plateau=pc, plateau_color=pl,
+                rec=rec, rec_color=rc,
+                best_epoch=best_epoch)
+
+
+# ── Training stats bar widget ─────────────────────────────────────────────────
+
+_MONO = "font-family: 'Consolas', 'Fira Code', monospace;"
+
+class TrainingStatsBar(QWidget):
+    _data_ready  = Signal(object, object)
+    _fetch_error = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pod_id   = None
+        self._pod_name = '--'
+        self._timer    = QTimer(self)
+        self._timer.timeout.connect(self._poll)
+        self._timer.start(30_000)
+        self._data_ready.connect(self._apply)
+        self._fetch_error.connect(self._on_fetch_error)
+        self._build_ui()
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        # Object name so stylesheet scopes only this widget, not children
+        self.setObjectName('statsBar')
+        self.setStyleSheet('''
+            #statsBar {
+                background: #0f172a;
+                border: 1px solid #1e293b;
+                border-radius: 8px;
+            }
+            QLabel { background: transparent; color: #f8fafc; }
+        ''')
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 10, 16, 10)
+        root.setSpacing(0)
+
+        # ── Row 1: analysis ───────────────────────────────────────────────────
+        row1 = QHBoxLayout()
+        row1.setSpacing(0)
+
+        def dim(text):
+            l = QLabel(text)
+            l.setStyleSheet('color:#475569; font-size:11px;')
+            return l
+
+        row1.addWidget(dim('Analysis'))
+        row1.addSpacing(16)
+
+        self._analysis_fields = {}
+        analysis_defs = [
+            ('trend',   'Trend'),
+            ('pct',     'Recent Change'),
+            ('plateau', 'Plateau Check'),
+            ('rec',     'Status'),
+        ]
+        for i, (key, caption) in enumerate(analysis_defs):
+            if i > 0:
+                sep = QFrame()
+                sep.setFrameShape(QFrame.VLine)
+                sep.setStyleSheet('color: #1e293b;')
+                sep.setFixedWidth(1)
+                row1.addSpacing(16)
+                row1.addWidget(sep)
+                row1.addSpacing(16)
+            cap = dim(caption)
+            val = QLabel('--')
+            val.setStyleSheet('color:#475569; font-size:11px; font-weight:600;')
+            row1.addWidget(cap)
+            row1.addSpacing(5)
+            row1.addWidget(val)
+            self._analysis_fields[key] = val
+
+        row1.addStretch()
+        root.addLayout(row1)
+
+        # ── Separator ─────────────────────────────────────────────────────────
+        root.addSpacing(8)
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet('background: #1e293b; border: none;')
+        line.setFixedHeight(1)
+        root.addWidget(line)
+        root.addSpacing(8)
+
+        # ── Row 2: metrics ────────────────────────────────────────────────────
+        row2 = QHBoxLayout()
+        row2.setSpacing(0)
+
+        self._metric_vals = {}
+        metric_defs = [
+            ('run',        'Run',        False),
+            ('epoch',      'Epoch',      True),
+            ('loss',       'Loss',       True),
+            ('best_loss',  'Best Loss',  True),
+            ('best_ep',    'Best @Ep',   True),
+            ('val_loss',   'Val Loss',   True),
+            ('val_best',   'Val Best',   True),
+            ('lpips',      'LPIPS',      True),
+            ('lpips_best', 'LPIPS Best', True),
+            ('psnr',       'PSNR (dB)',  True),
+            ('ssim',       'SSIM',       True),
+            ('pts',        'Data Pts',   True),
+            ('step_time',  'Step Time',  True),
+        ]
+        for i, (key, caption, is_mono) in enumerate(metric_defs):
+            if i > 0:
+                sep = QFrame()
+                sep.setFrameShape(QFrame.VLine)
+                sep.setStyleSheet('color: #1e293b;')
+                sep.setFixedWidth(1)
+                row2.addSpacing(16)
+                row2.addWidget(sep)
+                row2.addSpacing(16)
+
+            col = QVBoxLayout()
+            col.setSpacing(2)
+
+            cap = QLabel(caption)
+            cap.setStyleSheet('color:#475569; font-size:10px; font-weight:500; letter-spacing: 0.05em;')
+
+            val = QLabel('--')
+            mono_part = _MONO if is_mono else ''
+            val.setStyleSheet(f'color:#f8fafc; font-size:12px; font-weight:600; {mono_part}')
+
+            col.addWidget(cap)
+            col.addWidget(val)
+            row2.addLayout(col)
+            self._metric_vals[key] = val
+
+        row2.addStretch()
+        root.addLayout(row2)
+
+    # ── Public API ────────────────────────────────────────────────────────────
+    def set_pod(self, pod_id, pod_name=''):
+        self._pod_id   = pod_id
+        self._pod_name = pod_name or pod_id or '--'
+        # Immediately show run name; other fields fill in when poll succeeds
+        self._metric_vals['run'].setText(self._pod_name)
+        self._metric_vals['run'].setStyleSheet('color:#a78bfa; font-size:12px; font-weight:700;')
+        for key in ('trend', 'pct', 'plateau', 'rec'):
+            self._analysis_fields[key].setText('Connecting...')
+            self._analysis_fields[key].setStyleSheet('color:#475569; font-size:11px; font-weight:600;')
+        self._poll()
+
+    def clear(self):
+        self._pod_id = None
+        dim = 'color:#475569; font-size:11px; font-weight:600;'
+        for v in self._analysis_fields.values():
+            v.setText('--')
+            v.setStyleSheet(dim)
+        for v in self._metric_vals.values():
+            v.setText('--')
+
+    # ── Polling ───────────────────────────────────────────────────────────────
+    def _poll(self):
+        if not self._pod_id:
+            return
+        pod_id = self._pod_id
+        def _fetch():
+            url = f'https://{pod_id}-{MONITOR_PORT}.proxy.runpod.net'
+            try:
+                status  = requests.get(f'{url}/api/status',  timeout=5).json()
+                metrics = requests.get(f'{url}/api/metrics', timeout=5).json()
+                self._data_ready.emit(status, metrics)
+            except Exception as e:
+                self._fetch_error.emit(str(e))
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    # ── Apply data (main thread) ──────────────────────────────────────────────
+    def _apply(self, status, metrics):
+        steps      = metrics.get('steps',     [])
+        losses     = metrics.get('l1',        [])
+        val_l1     = metrics.get('val_l1',    [])
+        val_psnr   = metrics.get('val_psnr',  [])
+        val_ssim   = metrics.get('val_ssim',  [])
+        lpips_list = metrics.get('lpips',     [])
+
+        def fmt(v, d=5):
+            return f'{v:.{d}f}' if v is not None else '--'
+
+        best_ep = '--'
+        if steps and losses:
+            bi = losses.index(min(losses))
+            best_ep = f'{steps[bi]:.1f}'
+
+        run_name = self._pod_name
+        self._metric_vals['run'       ].setText(run_name)
+        self._metric_vals['run'       ].setStyleSheet(
+            'color:#a78bfa; font-size:12px; font-weight:700;')
+        self._metric_vals['epoch'     ].setText(f'{steps[-1]:.2f}' if steps else '--')
+        self._metric_vals['loss'      ].setText(fmt(status.get('loss')))
+        self._metric_vals['best_loss' ].setText(fmt(status.get('best_loss')))
+        self._metric_vals['best_ep'   ].setText(best_ep)
+        self._metric_vals['val_loss'  ].setText(fmt(val_l1[-1])      if val_l1      else '--')
+        self._metric_vals['val_best'  ].setText(fmt(min(val_l1))     if val_l1      else '--')
+        self._metric_vals['lpips'     ].setText(fmt(lpips_list[-1])  if lpips_list  else '--')
+        self._metric_vals['lpips_best'].setText(fmt(min(lpips_list)) if lpips_list  else '--')
+        self._metric_vals['psnr'      ].setText(f'{val_psnr[-1]:.2f}' if val_psnr  else '--')
+        self._metric_vals['ssim'      ].setText(f'{val_ssim[-1]:.4f}' if val_ssim  else '--')
+        self._metric_vals['pts'       ].setText(str(len(steps))      if steps       else '--')
+        st = status.get('step_time_s')
+        self._metric_vals['step_time' ].setText(f'{st:.3f}s'         if st          else '--')
+
+        # Analysis
+        analysis = _compute_analysis(steps, losses)
+        if analysis:
+            for key in ('trend', 'pct', 'plateau', 'rec'):
+                v = self._analysis_fields[key]
+                v.setText(analysis[key])
+                v.setStyleSheet(
+                    f'color:{analysis[key+"_color"]}; font-size:11px; font-weight:600;')
+        else:
+            for v in self._analysis_fields.values():
+                v.setText('Collecting...')
+                v.setStyleSheet('color:#475569; font-size:11px; font-weight:600;')
+
+    def _on_fetch_error(self, _err):
+        for key in ('trend', 'pct', 'plateau', 'rec'):
+            self._analysis_fields[key].setText('Unreachable')
+            self._analysis_fields[key].setStyleSheet('color:#ef4444; font-size:11px; font-weight:600;')
+
+
 # ── Main Window ───────────────────────────────────────────────────────────────
 
 COLS = ['Name', 'GPU', 'Status', 'Uptime', 'Cost', 'GPU Util', 'Actions']
@@ -296,7 +600,7 @@ class Dashboard(QMainWindow):
         self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Fixed)
-        self._table.setColumnWidth(6, 360)
+        self._table.setColumnWidth(6, 430)
         self._table.setSelectionMode(QAbstractItemView.SingleSelection)
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._table.setAlternatingRowColors(True)
@@ -309,6 +613,12 @@ class Dashboard(QMainWindow):
             QTableWidget::item:alternate { background: #F9FAFB; }
         """)
         layout.addWidget(self._table)
+
+        # Stats bar
+        self._stats_bar = TrainingStatsBar()
+        layout.addWidget(self._stats_bar)
+
+        self._table.selectionModel().selectionChanged.connect(self._on_row_selected)
 
         # Footer
         self._footer = QLabel('No pods found.')
@@ -323,6 +633,8 @@ class Dashboard(QMainWindow):
             QPushButton#danger:hover { background: #fef2f2; }
             QPushButton#watch { color: #ae69f4; border-color: #e9d5ff; }
             QPushButton#watch:hover { background: #F7F4FC; }
+            QPushButton#export { color: #0891b2; border-color: #bae6fd; }
+            QPushButton#export:hover { background: #f0f9ff; }
         """)
 
     def _on_refresh(self, pods):
@@ -353,7 +665,7 @@ class Dashboard(QMainWindow):
             status_item.setForeground(QColor(STATUS_COLORS.get(status, '#374151')))
             self._table.setItem(row, 2, status_item)
 
-            self._table.setItem(row, 3, cell(fmt_uptime(pod.get('uptimeSeconds')), Qt.AlignRight | Qt.AlignVCenter))
+            self._table.setItem(row, 3, cell(fmt_uptime(_pod_uptime_seconds(pod)), Qt.AlignRight | Qt.AlignVCenter))
             self._table.setItem(row, 4, cell(fmt_cost(pod)))
             self._table.setItem(row, 5, cell(gpu_util, Qt.AlignCenter | Qt.AlignVCenter))
 
@@ -374,6 +686,17 @@ class Dashboard(QMainWindow):
             console_btn.setEnabled(status == 'RUNNING')
             console_btn.clicked.connect(lambda _, p=pod: open_pod_console(p))
 
+            export_btn = QPushButton('Export')
+            export_btn.setObjectName('export')
+            export_btn.setFixedWidth(60)
+            export_btn.setEnabled(status == 'RUNNING')
+            export_btn.clicked.connect(lambda _, p=pod: self._do_export(p))
+
+            dl_btn = QPushButton('Download')
+            dl_btn.setFixedWidth(78)
+            dl_btn.setEnabled(status == 'RUNNING')
+            dl_btn.clicked.connect(lambda _, p=pod: self._do_download_pth(p))
+
             stop_btn = QPushButton('Stop')
             stop_btn.setFixedWidth(50)
             stop_btn.setEnabled(status == 'RUNNING')
@@ -386,9 +709,19 @@ class Dashboard(QMainWindow):
 
             btn_layout.addWidget(watch_btn)
             btn_layout.addWidget(console_btn)
+            btn_layout.addWidget(export_btn)
+            btn_layout.addWidget(dl_btn)
             btn_layout.addWidget(stop_btn)
             btn_layout.addWidget(kill_btn)
             self._table.setCellWidget(row, 6, btn_widget)
+
+        # Auto-select first running pod for stats bar
+        for row, pod in enumerate(pods):
+            if pod.get('desiredStatus') == 'RUNNING':
+                self._table.selectRow(row)
+                break
+        else:
+            self._stats_bar.clear()
 
         count = len(pods)
         total_cph = sum(p.get('costPerHr') or 0 for p in pods if p.get('desiredStatus') == 'RUNNING')
@@ -396,6 +729,21 @@ class Dashboard(QMainWindow):
             f'{count} pod{"s" if count != 1 else ""}  ·  '
             f'${total_cph:.2f}/hr running'
         )
+
+    def _on_row_selected(self):
+        rows = self._table.selectionModel().selectedRows()
+        if not rows:
+            return
+        row = rows[0].row()
+        if row < len(self._pods):
+            pod = self._pods[row]
+            if pod.get('desiredStatus') == 'RUNNING':
+                name = pod.get('name', pod['id'])
+                # Use just the part after "tunet-" if present
+                short = name.replace('tunet-', '', 1) if name.startswith('tunet-') else name
+                self._stats_bar.set_pod(pod['id'], short)
+            else:
+                self._stats_bar.clear()
 
     def _open_launch(self):
         dlg = LaunchDialog(self)
@@ -428,6 +776,14 @@ class Dashboard(QMainWindow):
                 self._first_fetch()
             threading.Thread(target=_term, daemon=True).start()
 
+    def _do_export(self, pod):
+        dlg = ExportDialog(pod, self)
+        dlg.exec()
+
+    def _do_download_pth(self, pod):
+        dlg = DownloadPthDialog(pod, self)
+        dlg.exec()
+
 
 
 # ── Launch settings persistence ───────────────────────────────────────────────
@@ -447,6 +803,359 @@ def _save_settings(s):
             json.dump(s, f, indent=2)
     except Exception:
         pass
+
+
+# ── Download .pth Dialog ─────────────────────────────────────────────────────
+
+class DownloadPthDialog(QDialog):
+    """Download checkpoint .pth files from the pod via SCP."""
+
+    def __init__(self, pod, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Download Checkpoint')
+        self.resize(560, 400)
+        self._pod = pod
+        self._running = False
+        self._build_ui()
+        self._populate_defaults()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(12)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+
+        self._remote_dir_edit = QLineEdit()
+        self._remote_dir_edit.setPlaceholderText('/workspace/output/<job>')
+        form.addRow('Remote output dir:', self._remote_dir_edit)
+
+        self._dest_edit = QLineEdit()
+        self._dest_edit.setPlaceholderText('Local folder to save .pth files')
+        browse_dest = QPushButton('…')
+        browse_dest.setFixedWidth(28)
+        browse_dest.clicked.connect(self._browse_dest)
+        dest_row = QHBoxLayout()
+        dest_row.addWidget(self._dest_edit)
+        dest_row.addWidget(browse_dest)
+        form.addRow('Save to:', dest_row)
+
+        root.addLayout(form)
+
+        self._log = QPlainTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setMinimumHeight(200)
+        self._log.setStyleSheet(
+            'QPlainTextEdit { background: #111827; color: #d1fae5; font-family: Consolas, monospace; font-size: 11px; border-radius: 6px; }'
+        )
+        root.addWidget(self._log)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._dl_btn = QPushButton('Download')
+        self._dl_btn.setFixedWidth(110)
+        self._dl_btn.setStyleSheet(
+            'QPushButton { background: #7c3aed; color: white; border: none; border-radius: 6px; padding: 5px 12px; font-size: 12px; font-weight: 600; }'
+            'QPushButton:hover { background: #6d28d9; }'
+            'QPushButton:disabled { background: #a78bfa; color: white; }'
+        )
+        self._dl_btn.clicked.connect(self._run)
+        self._close_btn = QPushButton('Close')
+        self._close_btn.setFixedWidth(80)
+        self._close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(self._dl_btn)
+        btn_row.addWidget(self._close_btn)
+        root.addLayout(btn_row)
+
+    def _populate_defaults(self):
+        pod_name = self._pod.get('name', '')
+        job = pod_name.replace('tunet-', '', 1) if pod_name.startswith('tunet-') else pod_name
+        self._remote_dir_edit.setText(f'/workspace/output/{job}')
+        s = _load_settings()
+        self._dest_edit.setText(s.get('download_pth_dest', ''))
+
+    def _browse_dest(self):
+        d = QFileDialog.getExistingDirectory(self, 'Select download folder', self._dest_edit.text() or os.path.expanduser('~'))
+        if d:
+            self._dest_edit.setText(d)
+
+    def _log_line(self, text):
+        self._log.appendPlainText(text)
+        self._log.moveCursor(QTextCursor.End)
+
+    def _run(self):
+        if self._running:
+            return
+        remote_dir = self._remote_dir_edit.text().strip().rstrip('/')
+        local_dest = self._dest_edit.text().strip()
+        if not remote_dir:
+            QMessageBox.warning(self, 'Missing', 'Enter the remote output directory.')
+            return
+        if not local_dest:
+            QMessageBox.warning(self, 'Missing', 'Choose a local folder to save files.')
+            return
+
+        host, port = get_ssh(self._pod)
+        if not host:
+            QMessageBox.warning(self, 'No SSH', 'Pod has no public SSH port.')
+            return
+
+        os.makedirs(local_dest, exist_ok=True)
+        s = _load_settings()
+        s['download_pth_dest'] = local_dest
+        _save_settings(s)
+
+        self._running = True
+        self._dl_btn.setEnabled(False)
+        self._log.clear()
+
+        stream = _LogStream()
+        stream.line.connect(self._log_line)
+
+        def _work():
+            old_stdout = sys.stdout
+            sys.stdout = stream
+            try:
+                import subprocess as _sp
+                rl = _import_launch()
+                key = SSH_KEY
+
+                # List .pth files in the remote dir
+                print(f'[download] Listing checkpoints in {remote_dir}...')
+                r = rl.ssh(host, port, key,
+                           f'find {remote_dir} -maxdepth 1 -name "*.pth" -type f',
+                           check=False, capture=True)
+                remote_files = [l.strip() for l in r.stdout.splitlines() if l.strip()]
+                if not remote_files:
+                    print(f'[download] No .pth files found in {remote_dir}')
+                    return
+
+                for rpath in sorted(remote_files):
+                    fname = os.path.basename(rpath)
+                    lpath = os.path.join(local_dest, fname)
+                    size_r = rl.ssh(host, port, key,
+                                    f'stat -c%s {rpath}', check=False, capture=True)
+                    size_mb = int(size_r.stdout.strip() or 0) / 1024 / 1024
+                    print(f'[download] {fname}  ({size_mb:.1f} MB) → {lpath}')
+                    result = _sp.run(
+                        ['scp', '-o', 'StrictHostKeyChecking=no',
+                         '-o', 'BatchMode=yes',
+                         '-o', 'ConnectTimeout=15',
+                         '-i', key,
+                         '-P', str(port),
+                         f'root@{host}:{rpath}', lpath],
+                        capture_output=True, text=True
+                    )
+                    if result.returncode != 0:
+                        print(f'[download] ERROR: {result.stderr.strip()}')
+                    else:
+                        print(f'[download] ✓ {fname}')
+
+                print(f'\n[download] Done! Files saved to: {local_dest}')
+
+            except Exception as e:
+                print(f'[download] ERROR: {e}')
+            finally:
+                sys.stdout = old_stdout
+                self._running = False
+                self._dl_btn.setEnabled(True)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+
+# ── Export Dialog ────────────────────────────────────────────────────────────
+
+class ExportDialog(QDialog):
+    """SSH into pod, run flame_exporter.py on latest .pth, download .onnx + .json."""
+
+    def __init__(self, pod, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Export Model')
+        self.resize(560, 460)
+        self._pod = pod
+        self._running = False
+        self._build_ui()
+        self._populate_defaults()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(12)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+
+        self._pth_edit = QLineEdit()
+        self._pth_edit.setPlaceholderText('/workspace/output/<job>/model_tunet_latest.pth')
+        browse_pth = QPushButton('…')
+        browse_pth.setFixedWidth(28)
+        browse_pth.clicked.connect(self._browse_pth)
+        pth_row = QHBoxLayout()
+        pth_row.addWidget(self._pth_edit)
+        pth_row.addWidget(browse_pth)
+        form.addRow('Remote .pth path:', pth_row)
+
+        self._dest_edit = QLineEdit()
+        self._dest_edit.setPlaceholderText('Local folder to save .onnx / .json')
+        browse_dest = QPushButton('…')
+        browse_dest.setFixedWidth(28)
+        browse_dest.clicked.connect(self._browse_dest)
+        dest_row = QHBoxLayout()
+        dest_row.addWidget(self._dest_edit)
+        dest_row.addWidget(browse_dest)
+        form.addRow('Save to:', dest_row)
+
+        root.addLayout(form)
+
+        self._log = QPlainTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setMinimumHeight(240)
+        self._log.setStyleSheet(
+            'QPlainTextEdit { background: #111827; color: #d1fae5; font-family: Consolas, monospace; font-size: 11px; border-radius: 6px; }'
+        )
+        root.addWidget(self._log)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._export_btn = QPushButton('Export + Download')
+        self._export_btn.setFixedWidth(150)
+        self._export_btn.setStyleSheet(
+            'QPushButton { background: #0891b2; color: white; border: none; border-radius: 6px; padding: 5px 12px; font-size: 12px; font-weight: 600; }'
+            'QPushButton:hover { background: #0e7490; }'
+            'QPushButton:disabled { background: #a5f3fc; color: white; }'
+        )
+        self._export_btn.clicked.connect(self._run)
+        self._close_btn = QPushButton('Close')
+        self._close_btn.setFixedWidth(80)
+        self._close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(self._export_btn)
+        btn_row.addWidget(self._close_btn)
+        root.addLayout(btn_row)
+
+    def _populate_defaults(self):
+        # Pre-fill remote path with the most common pattern
+        pod_name = self._pod.get('name', '')
+        # job name is everything after "tunet-"
+        job = pod_name.replace('tunet-', '', 1) if pod_name.startswith('tunet-') else pod_name
+        self._pth_edit.setText(f'/workspace/output/{job}/model_tunet_latest.pth')
+
+        # Default local dest from settings
+        s = _load_settings()
+        self._dest_edit.setText(s.get('export_dest', ''))
+
+    def _browse_pth(self):
+        # Can't browse remote; let user type. This is a no-op placeholder.
+        pass
+
+    def _browse_dest(self):
+        d = QFileDialog.getExistingDirectory(self, 'Select download folder', self._dest_edit.text() or os.path.expanduser('~'))
+        if d:
+            self._dest_edit.setText(d)
+
+    def _log_line(self, text):
+        self._log.appendPlainText(text)
+        self._log.moveCursor(QTextCursor.End)
+
+    def _run(self):
+        if self._running:
+            return
+        remote_pth = self._pth_edit.text().strip()
+        local_dest = self._dest_edit.text().strip()
+        if not remote_pth:
+            QMessageBox.warning(self, 'Missing', 'Enter the remote .pth path.')
+            return
+        if not local_dest:
+            QMessageBox.warning(self, 'Missing', 'Choose a local folder to save exports.')
+            return
+
+        host, port = get_ssh(self._pod)
+        if not host:
+            QMessageBox.warning(self, 'No SSH', 'Pod has no public SSH port.')
+            return
+
+        os.makedirs(local_dest, exist_ok=True)
+
+        # Save dest for next time
+        s = _load_settings()
+        s['export_dest'] = local_dest
+        _save_settings(s)
+
+        self._running = True
+        self._export_btn.setEnabled(False)
+        self._log.clear()
+
+        stream = _LogStream()
+        stream.line.connect(self._log_line)
+
+        def _work():
+            old_stdout = sys.stdout
+            sys.stdout = stream
+            try:
+                rl = _import_launch()
+                key = SSH_KEY
+
+                remote_dir = os.path.dirname(remote_pth).replace('\\', '/')
+                remote_export_dir = remote_dir + '/exports/flame'
+
+                # 1. Run exporter on pod
+                print(f'[export] Running flame_exporter.py on pod...')
+                export_cmd = (
+                    f'cd /workspace/tunet && '
+                    f'python exporters/flame_exporter.py '
+                    f'--checkpoint {remote_pth} '
+                    f'--output_dir {remote_export_dir}'
+                )
+                r = rl.ssh(host, port, key, export_cmd, check=False, capture=True, timeout=300)
+                output = (r.stdout + r.stderr).strip()
+                for line in output.splitlines():
+                    print(f'  {line}')
+                if r.returncode != 0:
+                    print(f'[export] ERROR: exporter exited {r.returncode}')
+                    return
+
+                # 2. List exported files
+                print(f'[export] Listing exports...')
+                r = rl.ssh(host, port, key,
+                           f'find {remote_export_dir} -maxdepth 1 -type f',
+                           check=False, capture=True)
+                remote_files = [l.strip() for l in r.stdout.splitlines()
+                                if l.strip() and any(l.strip().endswith(e) for e in ('.onnx', '.json'))]
+                if not remote_files:
+                    print(f'[export] No .onnx/.json files found in {remote_export_dir}')
+                    return
+
+                # 3. Download each file
+                import subprocess as _sp
+                for rpath in remote_files:
+                    fname = os.path.basename(rpath)
+                    lpath = os.path.join(local_dest, fname)
+                    size_r = rl.ssh(host, port, key,
+                                    f'stat -c%s {rpath}', check=False, capture=True)
+                    size_mb = int(size_r.stdout.strip() or 0) / 1024 / 1024
+                    print(f'[download] {fname}  ({size_mb:.1f} MB) → {lpath}')
+                    result = _sp.run(
+                        ['scp', '-o', 'StrictHostKeyChecking=no',
+                         '-o', 'BatchMode=yes',
+                         '-o', 'ConnectTimeout=15',
+                         '-i', key,
+                         '-P', str(port),
+                         f'root@{host}:{rpath}', lpath],
+                        capture_output=True, text=True
+                    )
+                    if result.returncode != 0:
+                        print(f'[download] ERROR: {result.stderr.strip()}')
+
+                print(f'\n[export] Done! Files saved to: {local_dest}')
+
+            except Exception as e:
+                print(f'[export] ERROR: {e}')
+            finally:
+                sys.stdout = old_stdout
+                self._running = False
+                self._export_btn.setEnabled(True)
+
+        threading.Thread(target=_work, daemon=True).start()
 
 
 # ── Launch Dialog ─────────────────────────────────────────────────────────────
