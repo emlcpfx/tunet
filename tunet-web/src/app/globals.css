@@ -1,0 +1,99 @@
+@import "tailwindcss";
+
+/* ── Spark Design System — CSS Custom Properties ─────────────────────────── */
+:root {
+  /* Brand */
+  --spark-purple:          #ae69f4;
+  --spark-purple-dark:     #7E3AF2;
+  --spark-purple-deep:     #6C2BD9;
+  --spark-purple-gradient: linear-gradient(to right, #ae69f4, #c084fc);
+  --spark-purple-light:    #F7F4FC;
+
+  /* Neutrals */
+  --gray-900: #111827;
+  --gray-800: #1F2937;
+  --gray-700: #374151;
+  --gray-600: #4b5563;
+  --gray-500: #6b7280;
+  --gray-400: #9ca3af;
+  --gray-300: #D1D5DB;
+  --gray-200: #e5e7eb;
+  --gray-100: #F9FAFB;
+  --white:    #ffffff;
+
+  /* Semantic */
+  --green:      #16A34A;
+  --green-dark: #15803D;
+  --red:        #EF4444;
+  --blue:       #1c64f2;
+  --pink:       #E74694;
+  --amber:      #D97706;
+  --navy:       #020E49;
+
+  /* Typography */
+  --font-sans: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Fira Mono', ui-monospace, 'SFMono-Regular', Menlo, Monaco, Consolas, monospace;
+}
+
+/* ── Base ────────────────────────────────────────────────────────────────── */
+html, body {
+  font-family: var(--font-sans);
+  background-color: var(--gray-100);
+  color: var(--gray-900);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Card shadow ─────────────────────────────────────────────────────────── */
+.card-shadow {
+  box-shadow:
+    0 1px 3px rgba(174, 105, 244, 0.1),
+    0 0 20px -5px rgba(174, 105, 244, 0.15);
+}
+
+/* ── Sidebar ─────────────────────────────────────────────────────────────── */
+.sidebar {
+  width: 200px;
+  min-height: 100vh;
+  background: var(--white);
+  border-right: 1px solid var(--gray-200);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+/* ── Animations ──────────────────────────────────────────────────────────── */
+@keyframes slideIn {
+  0%   { opacity: 0; transform: translateY(-10px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.6; }
+}
+
+.animate-slide-in {
+  animation: slideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* ── Scrollbar ───────────────────────────────────────────────────────────── */
+::-webkit-scrollbar        { width: 6px; height: 6px; }
+::-webkit-scrollbar-track  { background: transparent; }
+::-webkit-scrollbar-thumb  { background: var(--gray-300); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--spark-purple); }
+
+/* ── Log viewer monospace ────────────────────────────────────────────────── */
+.log-console {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  background: #0f172a;
+  color: #d1fae5;
+  border-radius: 8px;
+  padding: 12px 16px;
+  overflow-y: auto;
+}
