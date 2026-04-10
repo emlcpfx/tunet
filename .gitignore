@@ -50,3 +50,12 @@ inference_gui_settings.json
 Spark/frontend/.env
 
 yml/
+
+# Web app
+tunet-web/node_modules/
+tunet-web/.next/
+tunet-web/.env*.local
+tunet-web/next-env.d.ts
+
+# Scratch files
+aws_gpu_pricing.html
