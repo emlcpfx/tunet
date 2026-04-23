@@ -1,0 +1,111 @@
+'use client'
+import Link from 'next/link'
+import { usePathname } from 'next/navigation'
+import { formatCredits } from '@/types'
+
+const navItems = [
+  {
+    href: '/demo/dashboard',
+    label: 'Dashboard',
+    exact: true,
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+        <polyline points="9 22 9 12 15 12 15 22"/>
+      </svg>
+    ),
+  },
+  {
+    href: '/demo/jobs',
+    label: 'Training Jobs',
+    exact: false,
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>
+      </svg>
+    ),
+  },
+  {
+    href: '/demo/billing',
+    label: 'Billing',
+    exact: false,
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect width="20" height="14" x="2" y="5" rx="2"/><line x1="2" x2="22" y1="10" y2="10"/>
+      </svg>
+    ),
+  },
+]
+
+function SparkLogo() {
+  return (
+    <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-8 h-8">
+      <circle cx="16" cy="16" r="14" fill="#ae69f4"/>
+      <path d="M12 10c0-1 1.5-2 4-2s4 1 4 2c0 2-4 3-4 5 0 1.5 0 2 0 2m0 3v1"
+        stroke="#fff" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  )
+}
+
+interface DemoSidebarProps {
+  creditBalance?: number
+  userName?: string
+}
+
+export function DemoSidebar({ creditBalance = 5250, userName = 'Eric Levy' }: DemoSidebarProps) {
+  const pathname = usePathname()
+
+  function isActive(item: { href: string; exact: boolean }) {
+    if (item.exact) return pathname === item.href
+    return pathname.startsWith(item.href)
+  }
+
+  return (
+    <nav className="sidebar">
+      <div className="flex items-center gap-2.5 px-4 py-5 border-b border-[#e5e7eb]">
+        <SparkLogo />
+        <span className="text-lg font-bold text-[#111827]">TuNet</span>
+        <span className="text-xs text-[#9ca3af] mt-0.5">Cloud</span>
+      </div>
+
+      <div className="flex-1 py-3 px-2 space-y-0.5 overflow-y-auto">
+        {navItems.map((item) => {
+          const active = isActive(item)
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors duration-150 ${
+                active
+                  ? 'text-[#ae69f4] bg-[#F7F4FC] border-l-2 border-[#ae69f4] pl-[10px]'
+                  : 'text-[#374151] hover:bg-[#F9FAFB]'
+              }`}
+            >
+              <span className={active ? 'text-[#ae69f4]' : 'text-[#6b7280]'}>{item.icon}</span>
+              {item.label}
+            </Link>
+          )
+        })}
+      </div>
+
+      {creditBalance !== undefined && (
+        <div className="mx-3 mb-2 px-3 py-2.5 bg-[#F7F4FC] rounded-lg">
+          <p className="text-xs text-[#6b7280]">Credits</p>
+          <p className="text-base font-bold text-[#ae69f4]">{formatCredits(creditBalance)}</p>
+        </div>
+      )}
+
+      <div className="border-t border-[#e5e7eb] px-3 py-3">
+        <div className="flex items-center gap-2.5 px-2 py-1.5">
+          <div className="w-7 h-7 rounded-full bg-[#ae69f4] flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">
+            {userName[0]?.toUpperCase() ?? 'U'}
+          </div>
+          <span className="text-sm text-[#374151] truncate">{userName}</span>
+        </div>
+        <div className="px-2 py-1 mt-1">
+          <span className="text-xs text-[#9ca3af] italic">Demo mode</span>
+        </div>
+      </div>
+    </nav>
+  )
+}

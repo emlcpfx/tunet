@@ -1187,6 +1187,9 @@ class _LogStream(QObject):
 
 
 class LaunchDialog(QDialog):
+    _pricing_ready         = Signal(list, str)
+    _refresh_pricing_btn_reset = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Launch Training Job')
@@ -1195,6 +1198,12 @@ class LaunchDialog(QDialog):
         self._running = False
         self._build_ui()
         self._restore()
+        self._pricing_ready.connect(self._apply_pricing)
+        self._refresh_pricing_btn_reset.connect(
+            lambda: (self._refresh_pricing_btn.setEnabled(True),
+                     self._refresh_pricing_btn.setText('↻')))
+        # Auto-fetch pricing when dialog opens
+        QTimer.singleShot(200, self._fetch_pricing)
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -1231,9 +1240,18 @@ class LaunchDialog(QDialog):
         # GPU type
         rl = _import_launch()
         self._gpu_combo = QComboBox()
+        self._gpu_combo.setMinimumWidth(380)
+        # Populate with static names initially; refreshed with live pricing after dialog opens
         for k, v in rl.GPU_TYPES.items():
-            self._gpu_combo.addItem(f'{v}  [{k}]', k)
-        form.addRow('GPU:', self._gpu_combo)
+            self._gpu_combo.addItem(v, k)
+        gpu_row = QHBoxLayout()
+        gpu_row.addWidget(self._gpu_combo, stretch=1)
+        self._refresh_pricing_btn = QPushButton('↻')
+        self._refresh_pricing_btn.setFixedWidth(28)
+        self._refresh_pricing_btn.setToolTip('Fetch live GPU pricing from RunPod')
+        self._refresh_pricing_btn.clicked.connect(self._fetch_pricing)
+        gpu_row.addWidget(self._refresh_pricing_btn)
+        form.addRow('GPU:', gpu_row)
 
         # Disk / Volume
         disk_row = QHBoxLayout()
@@ -1367,6 +1385,62 @@ class LaunchDialog(QDialog):
                 self._ckpt_info.setText('')
         except Exception:
             pass
+
+    def _fetch_pricing(self):
+        """Fetch live GPU pricing from RunPod and update the combo box."""
+        self._refresh_pricing_btn.setEnabled(False)
+        self._refresh_pricing_btn.setText('…')
+        saved_key = self._gpu_combo.currentData()
+
+        def _work():
+            try:
+                rl = _import_launch()
+                api_key = _api_key()
+                if not api_key:
+                    return
+                pricing = rl.fetch_gpu_pricing(api_key)
+                # API 'id' field matches our GPU_TYPES values
+                price_map = {p['id']: p for p in pricing}
+                items = []
+                for k, gpu_id in rl.GPU_TYPES.items():
+                    p = price_map.get(gpu_id, {})
+                    secure = p.get('securePrice')
+                    community = p.get('communityPrice')
+                    vram = p.get('memoryInGb', '')
+                    short = p.get('displayName') or gpu_id
+                    parts = []
+                    if secure:
+                        parts.append(f'${secure:.2f}/hr')
+                    if community and community != secure:
+                        parts.append(f'community ${community:.2f}/hr')
+                    if vram:
+                        parts.append(f'{vram}GB VRAM')
+                    label = short
+                    if parts:
+                        label += f'  —  {" · ".join(parts)}'
+                    items.append((label, k))
+                # Update combo on main thread via signal
+                self._pricing_ready.emit(items, saved_key)
+            except Exception as e:
+                self._pricing_ready.emit([], saved_key)
+            finally:
+                self._refresh_pricing_btn_reset.emit()
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _apply_pricing(self, items, saved_key):
+        if not items:
+            return
+        self._gpu_combo.blockSignals(True)
+        self._gpu_combo.clear()
+        for label, key in items:
+            self._gpu_combo.addItem(label, key)
+        # Restore selection
+        for i in range(self._gpu_combo.count()):
+            if self._gpu_combo.itemData(i) == saved_key:
+                self._gpu_combo.setCurrentIndex(i)
+                break
+        self._gpu_combo.blockSignals(False)
 
     def _restore(self):
         s = self._settings

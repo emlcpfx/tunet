@@ -78,6 +78,13 @@ def gql(api_key, query, variables=None):
     return data['data']
 
 
+def fetch_gpu_pricing(api_key):
+    """Return list of {id, displayName, memoryInGb, securePrice, communityPrice} dicts."""
+    q = '{ gpuTypes { id displayName memoryInGb securePrice communityPrice } }'
+    data = gql(api_key, q)
+    return data.get('gpuTypes') or []
+
+
 def find_ssh_key():
     """Return the path to the RunPod SSH private key."""
     priv = os.path.expanduser('~/.ssh/runpod')

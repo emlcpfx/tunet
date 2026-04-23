@@ -1,0 +1,12 @@
+{
+  "name": "beeble-tunet-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "node deploy.js"
+  },
+  "dependencies": {
+    "basic-ftp": "^5.0.5",
+    "dotenv": "^16.4.5"
+  }
+}

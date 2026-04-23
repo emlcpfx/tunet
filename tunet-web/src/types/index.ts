@@ -82,6 +82,10 @@ export interface JobCreatePayload {
   volume_gb: number
 }
 
+// ── Compute provider ─────────────────────────────────────────────────────────
+
+export type ComputeProvider = 'runpod' | 'spark'
+
 // ── RunPod types ──────────────────────────────────────────────────────────────
 
 export interface RunPodPort {
