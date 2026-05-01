@@ -169,10 +169,15 @@ const SKU_DISPLAY: Record<string, string> = {
   'g4dn.xlarge':  'NVIDIA T4',
   'g5.xlarge':    'NVIDIA A10',
   'g6.2xlarge':   'NVIDIA L4',
+  // Single L40S — both g6e.4xlarge (legacy) and g6e.8xlarge (current
+  // allow-list) carry the same single GPU; only host CPU/RAM differ.
   'g6e.4xlarge':  'NVIDIA L40S',
+  'g6e.8xlarge':  'NVIDIA L40S',
   'g5.24xlarge':  '4× NVIDIA A10',
   'g6e.12xlarge': '4× NVIDIA L40S',
+  // Single RTX PRO 6000 — g7e.xlarge (legacy) / g7e.2xlarge (current).
   'g7e.xlarge':   'NVIDIA RTX PRO 6000',
+  'g7e.2xlarge':  'NVIDIA RTX PRO 6000',
   'g7e.48xlarge': '8× NVIDIA RTX PRO 6000',
 }
 

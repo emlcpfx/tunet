@@ -406,28 +406,37 @@ export function pricePerHour(sku: string): number {
 }
 
 /**
- * Steps recommendation based on dataset size, calibrated against Foundry
- * CopyCat's published examples and practitioner guides:
+ * Steps recommendation based on dataset size, calibrated against:
  *
  *   - learn.foundry.com `cc-train.html`: their canonical example is 10,000
- *     epochs over 6 frames with batch 4 → 15,000 steps. That's the
- *     small-shot sweet spot.
- *   - aitorecheveste.com (CopyCat practitioner guide): 15,000–30,000 steps
- *     from-scratch on small datasets; 5,000–15,000 with pretrained weights.
- *   - keheka.com: 10,000 epochs is the suggested "good starting point"
- *     baseline; higher for larger datasets.
+ *     epochs over 6 frames with batch 4 → 15,000 steps. Sets a *floor*
+ *     for tiny datasets, but Foundry's stop signal is "looks right" not
+ *     a step count, so the literature underreports converged-run length.
  *
- * Translating those into per-frame-count tiers — most users converge before
- * the upper tiers; this is the "would not be surprised if it ran this long"
- * number, not a target. tunet's `max_steps=0` (run until stopped) is the
- * usual mode, so this is purely for estimating a *typical* converged run
- * for the cost preview.
+ *   - **Real-run reference (2026-04-09, RTX 3090, internal):** 96k steps
+ *     to plateau on a 457-slice dataset (~30–50 frames) at 1000
+ *     iterations/epoch with L1+LPIPS. Plateau detector triggered at
+ *     epoch 96 with best smoothed loss @ epoch 88. This is the only
+ *     converged-run data point we have, and it's *much* longer than
+ *     Foundry's published examples — Foundry stops on visual match,
+ *     which often happens earlier than loss plateau.
+ *
+ * Tier translation: the 3090 run = ~50 frames → 96k steps. Scale linearly-
+ * ish with dataset size since longer datasets need more passes for the
+ * model to see all variation, but cap to avoid runaway estimates on
+ * very large shots (past ~200 frames the marginal value of more steps
+ * drops sharply on a per-shot model).
+ *
+ * tunet's `max_steps=0` (run until stopped) is the usual mode, so this
+ * function is purely for estimating a *typical* converged run for the
+ * cost preview. Users can stop earlier when they see the result.
  */
 export function recommendedStepsForPairs(pairs: number): number {
-  if (pairs <= 15)   return 15_000   // matches Foundry's 6-frame example
-  if (pairs <= 60)   return 30_000   // small/medium shot
-  if (pairs <= 200)  return 50_000   // typical shot
-  return 80_000                      // long shot / dataset
+  if (pairs <= 10)   return 30_000   // floor — tiny datasets converge fast
+  if (pairs <= 30)   return 60_000
+  if (pairs <= 80)   return 100_000  // matches the 96k reference run
+  if (pairs <= 200)  return 130_000
+  return 160_000                     // long shot — diminishing returns past here
 }
 
 /**
@@ -469,20 +478,22 @@ function settingsMultiplier(opts: {
 
 /**
  * Baseline steps/sec for a GPU at the reference settings (UNet, model_size
- * 64, 512px, batch 2, L1 loss). These numbers are NOT benchmarked — they
- * sit on the optimistic end of throughput so the cost estimate doesn't
- * underbid reality too badly. The estimate UI flags them as approximate.
+ * 64, 512px, batch 2, L1 loss).
  *
- * If you later get real benchmark data, replace these and tighten the
- * confidence band in EstimateRange below.
+ * Calibration status:
+ *   - T4   → measured 4.09 step/sec via /demo/benchmark on 2026-05-01
+ *   - L4   → measured 6.23 step/sec via /demo/benchmark on 2026-05-01
+ *   - A10, L40S, RTX PRO → still hardcoded guesses; benchmark cancelled or
+ *     not yet run. These will be replaced by the matrix calibration page's
+ *     "Calibrated baseline" block once measured.
  */
 function baselineStepsPerSec(sku: string): number {
-  if (sku.startsWith('g4dn'))      return 2     // T4
-  if (sku.startsWith('g5'))        return 4     // A10
-  if (sku.startsWith('g6e'))       return 8     // L40S
-  if (sku.startsWith('g6.'))       return 5     // L4
-  if (sku.startsWith('g7e'))       return 12    // RTX PRO 6000
-  return 4
+  if (sku.startsWith('g4dn'))      return 4.09  // T4 (measured 2026-05-01)
+  if (sku.startsWith('g6.'))       return 6.23  // L4 (measured 2026-05-01)
+  if (sku.startsWith('g5'))        return 5     // A10 (guess; measure soon)
+  if (sku.startsWith('g6e'))       return 9     // L40S (guess)
+  if (sku.startsWith('g7e'))       return 14    // RTX PRO 6000 (guess)
+  return 5
 }
 
 export interface EstimateRange {

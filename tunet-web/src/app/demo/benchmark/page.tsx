@@ -28,8 +28,8 @@ const BENCH_GPUS: GpuOption[] = [
   { key: 't4',         sku: 'g4dn.xlarge', label: 'T4',           vram: '16GB' },
   { key: 'l4',         sku: 'g6.2xlarge',  label: 'L4',           vram: '24GB' },
   { key: 'a10',        sku: 'g5.xlarge',   label: 'A10',          vram: '24GB' },
-  { key: 'l40s',       sku: 'g6e.4xlarge', label: 'L40S',         vram: '48GB' },
-  { key: 'rtxpro6000', sku: 'g7e.xlarge',  label: 'RTX PRO 6000', vram: '96GB' },
+  { key: 'l40s',       sku: 'g6e.8xlarge', label: 'L40S',         vram: '48GB' },
+  { key: 'rtxpro6000', sku: 'g7e.2xlarge', label: 'RTX PRO 6000', vram: '96GB' },
 ]
 
 interface RunState {
@@ -37,6 +37,8 @@ interface RunState {
   sku:           string
   label:         string
   jobId:         string
+  resolution:    number
+  batchSize:     number
   startedAt:     number
   // Streaming state
   status:        'queued' | 'streaming' | 'measured' | 'failed' | 'closed'
@@ -47,8 +49,17 @@ interface RunState {
 
 const STEP_RATE_RE = /STEP_RATE:\s*([\d.]+)\s*step\/sec/
 
+// Sweep axes. Defaults match the server route. Skip batch=1 (always
+// sublinear → not informative for picking a *good* batch) and batch=16
+// (almost certainly OOM on T4 16GB at high res). User can adjust via the
+// checkbox grids on the page.
+const RESOLUTIONS = [256, 512, 1024]
+const BATCH_SIZES = [2, 4, 8]
+
 export default function BenchmarkPage() {
   const [selected, setSelected] = useState<Set<string>>(() => new Set(BENCH_GPUS.map(g => g.key)))
+  const [resSelected,   setResSelected]   = useState<Set<number>>(() => new Set(RESOLUTIONS))
+  const [batchSelected, setBatchSelected] = useState<Set<number>>(() => new Set(BATCH_SIZES))
   const [steps,   setSteps]     = useState(200)
   const [warmup,  setWarmup]    = useState(20)
   const [runs,    setRuns]      = useState<RunState[]>([])
@@ -106,18 +117,28 @@ export default function BenchmarkPage() {
     return next
   })
 
-  // Estimated total cost: assume 90 sec wall-clock per run (warmup + steps),
-  // plus ~30 sec provisioning we don't pay for. Honest +50% safety margin.
+  // Cells we'll actually submit (cartesian product). Useful for the cost
+  // line, the cap warning, and the empty-state in the results table.
+  const cellCount = selected.size * resSelected.size * batchSelected.size
+
+  // Estimated total cost: ~90 sec per cell at 512px (warmup + 200 steps),
+  // scaled by (res/512)² for higher res, with a +50% safety margin since
+  // some cells will OOM and exit fast (cheaper) but provisioning + cold
+  // pull dominate when stuff queues serially.
   const totalCost = useMemo(() => {
     let usd = 0
     for (const k of selected) {
       const g = BENCH_GPUS.find(x => x.key === k)
       if (!g) continue
-      const seconds = 90 * 1.5
-      usd += (seconds / 3600) * pricePerHour(g.sku)
+      const hourly = pricePerHour(g.sku)
+      for (const r of resSelected) {
+        const resPenalty = (r / 512) ** 2
+        const cellSeconds = 90 * resPenalty * 1.5
+        usd += (cellSeconds / 3600) * hourly * batchSelected.size
+      }
     }
     return usd
-  }, [selected])
+  }, [selected, resSelected, batchSelected])
 
   async function runBenchmark() {
     if (selected.size === 0 || submitting) return
@@ -153,7 +174,10 @@ export default function BenchmarkPage() {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
-          gpus: BENCH_GPUS.map(g => g.key).filter(k => selected.has(k)),
+          gpus:        BENCH_GPUS.map(g => g.key).filter(k => selected.has(k)),
+          // Send sorted so the results matrix has stable column order.
+          resolutions: [...resSelected].sort((a, b) => a - b),
+          batchSizes:  [...batchSelected].sort((a, b) => a - b),
           benchmarkSteps:  steps,
           benchmarkWarmup: warmup,
           ...(useStageId ? { stageId: useStageId } : {}),
@@ -161,11 +185,13 @@ export default function BenchmarkPage() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
-      const newRuns: RunState[] = (data.runs ?? []).map((r: { gpuKey: string; sku: string; jobId: string; label: string }) => ({
+      const newRuns: RunState[] = (data.runs ?? []).map((r: { gpuKey: string; sku: string; jobId: string; label: string; resolution: number; batchSize: number }) => ({
         gpuKey:      r.gpuKey,
         sku:         r.sku,
         label:       r.label,
         jobId:       r.jobId,
+        resolution:  r.resolution,
+        batchSize:   r.batchSize,
         startedAt:   Date.now(),
         status:      'streaming',
         rate:        null,
@@ -269,6 +295,59 @@ export default function BenchmarkPage() {
           })}
         </div>
 
+        <div className="mt-4 grid grid-cols-2 gap-4 text-sm border-t border-[#e5e7eb] pt-4">
+          <div>
+            <p className="text-xs font-semibold text-[#374151] uppercase tracking-wider mb-2">Resolutions</p>
+            <div className="flex gap-2 flex-wrap">
+              {RESOLUTIONS.map(r => {
+                const on = resSelected.has(r)
+                return (
+                  <button
+                    key={r}
+                    type="button"
+                    onClick={() => setResSelected(prev => {
+                      const next = new Set(prev)
+                      if (next.has(r)) next.delete(r); else next.add(r)
+                      return next
+                    })}
+                    className={`px-3 py-1.5 rounded text-sm font-mono border-2 transition-all ${
+                      on ? 'border-[#7E3AF2] bg-[#F7F4FC] text-[#7E3AF2]'
+                         : 'border-[#e5e7eb] bg-white text-[#6b7280] hover:border-[#D1D5DB]'
+                    }`}
+                  >
+                    {r}px
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+          <div>
+            <p className="text-xs font-semibold text-[#374151] uppercase tracking-wider mb-2">Batch sizes</p>
+            <div className="flex gap-2 flex-wrap">
+              {BATCH_SIZES.map(b => {
+                const on = batchSelected.has(b)
+                return (
+                  <button
+                    key={b}
+                    type="button"
+                    onClick={() => setBatchSelected(prev => {
+                      const next = new Set(prev)
+                      if (next.has(b)) next.delete(b); else next.add(b)
+                      return next
+                    })}
+                    className={`px-3 py-1.5 rounded text-sm font-mono border-2 transition-all ${
+                      on ? 'border-[#7E3AF2] bg-[#F7F4FC] text-[#7E3AF2]'
+                         : 'border-[#e5e7eb] bg-white text-[#6b7280] hover:border-[#D1D5DB]'
+                    }`}
+                  >
+                    bs={b}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+
         <div className="mt-4 flex items-center gap-4 text-sm">
           <label className="flex items-center gap-2">
             <span className="text-[#374151]">Timed steps:</span>
@@ -289,7 +368,8 @@ export default function BenchmarkPage() {
             />
           </label>
           <span className="text-[11px] text-[#9ca3af] ml-auto">
-            Est. total cost: <span className="font-mono text-[#374151]">~${totalCost.toFixed(2)}</span>
+            <span className="font-mono text-[#374151]">{cellCount}</span> cells ·
+            est. <span className="font-mono text-[#374151]">~${totalCost.toFixed(2)}</span>
           </span>
         </div>
 
@@ -297,10 +377,14 @@ export default function BenchmarkPage() {
           <button
             type="button"
             onClick={runBenchmark}
-            disabled={submitting || selected.size === 0}
+            disabled={submitting || cellCount === 0 || cellCount > 60}
             className="px-4 py-2 text-sm font-semibold bg-[#7E3AF2] hover:bg-[#6C2BD9] text-white rounded disabled:opacity-50"
           >
-            {submitting ? 'Submitting…' : `Run benchmark on ${selected.size} GPU${selected.size === 1 ? '' : 's'}`}
+            {submitting
+              ? 'Submitting…'
+              : cellCount > 60
+                ? `Too many cells (${cellCount}, cap 60)`
+                : `Run benchmark · ${cellCount} job${cellCount === 1 ? '' : 's'}`}
           </button>
           {submitError && <span className="text-xs text-[#EF4444]">Error: {submitError}</span>}
         </div>
@@ -340,38 +424,152 @@ function Card({ children }: { children: React.ReactNode }) {
 }
 
 function ResultsTable({ runs, setRuns }: { runs: RunState[]; setRuns: (f: (r: RunState[]) => RunState[]) => void }) {
+  // We still need to attach the per-run polling/streaming effect to every
+  // run, but don't render them as a flat list — render as a per-GPU matrix
+  // below. This invisible block handles the side-effects.
+  const sideEffects = runs.map(r => <RunSideEffects key={r.jobId} run={r} setRuns={setRuns} />)
+
+  // Group by GPU, then within each GPU build a res × batch grid.
+  const byGpu = new Map<string, RunState[]>()
+  for (const r of runs) {
+    if (!byGpu.has(r.gpuKey)) byGpu.set(r.gpuKey, [])
+    byGpu.get(r.gpuKey)!.push(r)
+  }
+
+  // Stable axes — distinct values across all runs, sorted.
+  const allRes   = [...new Set(runs.map(r => r.resolution))].sort((a, b) => a - b)
+  const allBatch = [...new Set(runs.map(r => r.batchSize))].sort((a, b) => a - b)
+
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-left text-[11px] uppercase tracking-wider text-[#6b7280] border-b border-[#e5e7eb]">
-            <th className="px-3 py-2">GPU</th>
-            <th className="px-3 py-2">Job</th>
-            <th className="px-3 py-2">Status</th>
-            <th className="px-3 py-2 text-right">step/sec</th>
-            <th className="px-3 py-2 text-right">Elapsed</th>
-            <th className="px-3 py-2"></th>
-          </tr>
-        </thead>
-        <tbody>
-          {runs.map(r => (
-            <RunRow key={r.jobId} run={r} setRuns={setRuns} />
-          ))}
-        </tbody>
-      </table>
+    <div>
+      <div style={{ display: 'none' }}>{sideEffects}</div>
+      <div className="space-y-5">
+        {[...byGpu.entries()].map(([gpuKey, gpuRuns]) => (
+          <GpuMatrix
+            key={gpuKey}
+            gpuKey={gpuKey}
+            label={gpuRuns[0].label}
+            sku={gpuRuns[0].sku}
+            runs={gpuRuns}
+            allRes={allRes}
+            allBatch={allBatch}
+          />
+        ))}
+      </div>
     </div>
   )
 }
 
-function RunRow({ run, setRuns }: { run: RunState; setRuns: (f: (r: RunState[]) => RunState[]) => void }) {
+/**
+ * One GPU's slice of the 3-axis matrix: rows = resolutions, cols = batches.
+ * Each cell shows step/sec (raw) and samples/sec (= step/sec × batch),
+ * status pill, and an OOM/failed marker. Clicking a cell jumps to that
+ * job's detail page.
+ */
+function GpuMatrix({
+  gpuKey, label, sku, runs, allRes, allBatch,
+}: {
+  gpuKey: string
+  label:  string
+  sku:    string
+  runs:   RunState[]
+  allRes: number[]
+  allBatch: number[]
+}) {
+  // Index runs by (res, batch) for O(1) lookup
+  const cell = new Map<string, RunState>()
+  for (const r of runs) cell.set(`${r.resolution}|${r.batchSize}`, r)
+  void gpuKey   // referenced only via key prop in parent
+
+  return (
+    <div className="border border-[#e5e7eb] rounded-lg overflow-hidden">
+      <div className="px-4 py-2 bg-[#fafafa] border-b border-[#e5e7eb]">
+        <p className="text-sm font-semibold text-[#111827]">{label}</p>
+        <p className="text-[11px] text-[#9ca3af] font-mono">{sku}</p>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-[11px] uppercase tracking-wider text-[#6b7280] border-b border-[#F3F4F6]">
+              <th className="px-3 py-2 text-left">Resolution</th>
+              {allBatch.map(b => (
+                <th key={b} className="px-3 py-2 text-right font-mono normal-case">batch={b}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {allRes.map(r => (
+              <tr key={r} className="border-b border-[#F3F4F6] last:border-b-0">
+                <td className="px-3 py-2 font-mono text-[#374151]">{r}px</td>
+                {allBatch.map(b => {
+                  const run = cell.get(`${r}|${b}`)
+                  return <MatrixCell key={b} run={run} />
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function MatrixCell({ run }: { run: RunState | undefined }) {
+  if (!run) {
+    return <td className="px-3 py-2 text-right text-[#d1d5db] text-xs">—</td>
+  }
+  const samplesPerSec = run.rate != null ? run.rate * run.batchSize : null
+  return (
+    <td className="px-3 py-2 text-right">
+      {run.rate != null ? (
+        <Link href={`/demo/jobs/${run.jobId}`} className="block hover:bg-[#F7F4FC] rounded -mx-2 px-2 py-0.5">
+          <div className="font-mono text-sm font-semibold text-[#16A34A]">
+            {run.rate.toFixed(2)}<span className="text-[10px] text-[#9ca3af] font-normal"> step/s</span>
+          </div>
+          <div className="font-mono text-[10px] text-[#7E3AF2]">
+            {samplesPerSec!.toFixed(1)} samp/s
+          </div>
+        </Link>
+      ) : run.status === 'failed' ? (
+        <Link href={`/demo/jobs/${run.jobId}`} className="block hover:bg-[#FEF2F2] rounded -mx-2 px-2 py-0.5" title={run.errorMsg ?? 'failed'}>
+          <span className="text-xs text-[#EF4444] font-semibold">
+            {(run.errorMsg ?? '').toLowerCase().includes('memory') || (run.errorMsg ?? '').toLowerCase().includes('oom')
+              ? 'OOM' : 'Failed'}
+          </span>
+        </Link>
+      ) : run.status === 'closed' ? (
+        <span className="text-xs text-[#9ca3af]">no rate</span>
+      ) : (
+        <Link href={`/demo/jobs/${run.jobId}`} className="block hover:bg-[#F9FAFB] rounded -mx-2 px-2 py-0.5">
+          <span className="text-xs text-[#6b7280]">running…</span>
+        </Link>
+      )}
+    </td>
+  )
+}
+
+/**
+ * Side-effects-only component: opens the SSE log stream, polls the job
+ * status, and dispatches updates to the shared `runs` state. Doesn't
+ * render anything itself — the matrix view above reads from `runs`
+ * directly. Kept as a separate component (instead of inline in
+ * GpuMatrix) so each run gets its own effect lifecycle keyed on jobId.
+ */
+function RunSideEffects({ run, setRuns }: { run: RunState; setRuns: (f: (r: RunState[]) => RunState[]) => void }) {
+  // Reuse the original RunRow's effects.
+  return <RunRow run={run} setRuns={setRuns} headless />
+}
+
+function RunRow({ run, setRuns, headless = false }: { run: RunState; setRuns: (f: (r: RunState[]) => RunState[]) => void; headless?: boolean }) {
   const [tick, setTick] = useState(0)
 
   // Tick clock for the "elapsed" cell while the run is open
   useEffect(() => {
+    if (headless) return  // headless instances don't render the elapsed cell
     if (run.status === 'measured' || run.status === 'failed' || run.status === 'closed') return
     const id = window.setInterval(() => setTick(t => t + 1), 1000)
     return () => window.clearInterval(id)
-  }, [run.status])
+  }, [run.status, headless])
 
   // Open the SSE log stream and grep STEP_RATE. Once we find it (or the run
   // ends), close the stream so we're not holding open EventSources forever.
@@ -410,6 +608,7 @@ function RunRow({ run, setRuns }: { run: RunState; setRuns: (f: (r: RunState[]) 
   }, [run.jobId, run.status, setRuns])
 
   // Cheap status poll so we know if the job died before logging STEP_RATE.
+  // Spark uses `succeeded` (not `completed`) as its terminal-success status.
   useEffect(() => {
     if (run.status !== 'streaming') return
     const id = window.setInterval(async () => {
@@ -425,10 +624,10 @@ function RunRow({ run, setRuns }: { run: RunState; setRuns: (f: (r: RunState[]) 
               ? { ...r, status: 'failed', errorMsg: j.error_message ?? `job ${j.status}` }
               : r))
         }
-        if (j.status === 'completed' && run.rate == null) {
-          // Edge case: completed without us catching STEP_RATE (e.g. user
-          // refreshed mid-stream and missed it). Mark as closed; UI shows
-          // "no rate parsed".
+        if ((j.status === 'completed' || j.status === 'succeeded') && run.rate == null) {
+          // Edge case: terminal-success without us catching STEP_RATE (e.g.
+          // page refresh, slow log proxy). Mark as closed so the matrix
+          // cell shows "no rate" rather than spinning forever.
           setRuns(prev => prev.map(r =>
             r.jobId === run.jobId
               ? { ...r, status: r.rate == null ? 'closed' : r.status }
@@ -441,6 +640,12 @@ function RunRow({ run, setRuns }: { run: RunState; setRuns: (f: (r: RunState[]) 
 
   const elapsed = formatElapsed(Date.now() - run.startedAt)
   void tick   // ensure re-render
+
+  // headless mode: only side-effects, no DOM. Used by the matrix view in the
+  // 3-axis benchmark — that view renders its own cells from `runs`, but
+  // still wants this component's effects (SSE stream + status poll) keyed
+  // per jobId.
+  if (headless) return null
 
   return (
     <tr className="border-b border-[#F3F4F6]">
@@ -543,26 +748,70 @@ function formatBytes(n: number): string {
  * keep the existing fallback so the function stays valid for unmeasured
  * SKUs (callers won't crash if calibration is partial).
  */
+/**
+ * Emit calibration code from a 3D matrix of measurements.
+ *
+ * Two outputs in one block:
+ *
+ *  1. `baselineStepsPerSec()` — uses the **reference cell** (512px, batch=2)
+ *     for each GPU, since that's what `settingsMultiplier()` in
+ *     spark-presets.ts treats as 1.0×. Falls back to the measured cell
+ *     closest to the reference if the reference cell wasn't run or OOMed.
+ *
+ *  2. A `BENCHMARK_MEASUREMENTS` JSON literal with the full surface — every
+ *     (gpu, res, batch) → step/sec — for archival, fitting a real
+ *     `resolutionPenalty()` / `batchSizeMultiplier()`, or sanity-checking
+ *     the existing heuristics. Doesn't get used at runtime; copy-paste it
+ *     into a comment or commit it next to the constants.
+ */
 function emitTsBaseline(runs: RunState[]): string {
-  const byKey: Record<string, number | null> = {}
-  for (const r of runs) byKey[r.gpuKey] = r.rate
-
-  const fmt = (k: string, comment: string, fallback: number) => {
-    const v = byKey[k]
-    if (v == null) return `  // ${k}: not measured this run`
-    return `  if (sku.startsWith(${skuPrefix(k)})) return ${v.toFixed(2)}    // ${comment} (measured ${new Date().toISOString().slice(0, 10)}, fallback was ${fallback})`
+  // Pick the per-GPU reference rate: prefer (512, 2). If that's missing or
+  // didn't measure, fall back to the cell with the smallest |res-512| +
+  // |batch-2| weighted distance.
+  const refRate = (gpuKey: string): { rate: number; res: number; batch: number } | null => {
+    const cells = runs.filter(r => r.gpuKey === gpuKey && r.rate != null)
+    if (cells.length === 0) return null
+    const score = (r: RunState) =>
+      Math.abs(r.resolution - 512) / 512 + Math.abs(r.batchSize - 2) * 0.5
+    cells.sort((a, b) => score(a) - score(b))
+    const c = cells[0]
+    return { rate: c.rate!, res: c.resolution, batch: c.batchSize }
   }
 
-  return [
-    'function baselineStepsPerSec(sku: string): number {',
-    fmt('t4',         'T4',           2),
-    fmt('a10',        'A10',          4),
-    fmt('l40s',       'L40S',         8),
-    fmt('l4',         'L4',           5),
-    fmt('rtxpro6000', 'RTX PRO 6000', 12),
-    '  return 4',
-    '}',
-  ].filter(Boolean).join('\n')
+  const date = new Date().toISOString().slice(0, 10)
+  const fmt = (k: string, comment: string, fallback: number) => {
+    const ref = refRate(k)
+    if (!ref) return `  // ${k}: no successful cells this run (was ${fallback})`
+    const note = ref.res === 512 && ref.batch === 2
+      ? `reference cell`
+      : `from ${ref.res}px/bs${ref.batch} — no 512px/bs2 cell`
+    return `  if (sku.startsWith(${skuPrefix(k)})) return ${ref.rate.toFixed(2)}  // ${comment} (${note}, ${date}, was ${fallback})`
+  }
+
+  // Compact full-matrix dump for archival / future curve fitting.
+  const matrix: Record<string, Record<string, number | string>> = {}
+  for (const r of runs) {
+    if (!matrix[r.gpuKey]) matrix[r.gpuKey] = {}
+    const key = `${r.resolution}px/bs${r.batchSize}`
+    matrix[r.gpuKey][key] = r.rate != null
+      ? Number(r.rate.toFixed(3))
+      : (r.status === 'failed' ? (r.errorMsg ?? 'failed') : r.status)
+  }
+
+  const lines: string[] = []
+  lines.push('function baselineStepsPerSec(sku: string): number {')
+  lines.push(fmt('t4',         'T4',           2))
+  lines.push(fmt('l4',         'L4',           5))
+  lines.push(fmt('a10',        'A10',          4))
+  lines.push(fmt('l40s',       'L40S',         8))
+  lines.push(fmt('rtxpro6000', 'RTX PRO 6000', 12))
+  lines.push('  return 4')
+  lines.push('}')
+  lines.push('')
+  lines.push(`// Full 3-axis sweep (step/sec). Use to fit resolutionPenalty()`)
+  lines.push(`// and batchSizeMultiplier() instead of the current heuristics.`)
+  lines.push(`const BENCHMARK_MEASUREMENTS = ${JSON.stringify(matrix, null, 2)}`)
+  return lines.join('\n')
 }
 
 function skuPrefix(gpuKey: string): string {

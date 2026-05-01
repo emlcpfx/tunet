@@ -53,8 +53,8 @@ const GPU_OPTIONS: GpuOption[] = [
   { key: 't4',         sku: 'g4dn.xlarge', label: 'T4',           vram: '16GB', badge: 'cheap'       },
   { key: 'l4',         sku: 'g6.2xlarge',  label: 'L4',           vram: '24GB'                       },
   { key: 'a10',        sku: 'g5.xlarge',   label: 'A10',          vram: '24GB'                       },
-  { key: 'l40s',       sku: 'g6e.4xlarge', label: 'L40S',         vram: '48GB', badge: 'recommended' },
-  { key: 'rtxpro6000', sku: 'g7e.xlarge',  label: 'RTX PRO 6000', vram: '96GB', badge: 'fastest'     },
+  { key: 'l40s',       sku: 'g6e.8xlarge', label: 'L40S',         vram: '48GB', badge: 'recommended' },
+  { key: 'rtxpro6000', sku: 'g7e.2xlarge', label: 'RTX PRO 6000', vram: '96GB', badge: 'fastest'     },
 ]
 
 const RESOLUTIONS = [256, 384, 512, 768, 1024]

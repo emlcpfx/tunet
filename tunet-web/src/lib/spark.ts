@@ -33,10 +33,14 @@ export const GPU_TYPES = {
   t4:           { sku: 'g4dn.xlarge',   gpu: 'NVIDIA T4',           vramGb: 16, gpuCount: 1, label: 'T4 16GB · slow' },
   a10:          { sku: 'g5.xlarge',     gpu: 'NVIDIA A10',          vramGb: 24, gpuCount: 1, label: 'A10 24GB · cheap' },
   l4:           { sku: 'g6.2xlarge',    gpu: 'NVIDIA L4',           vramGb: 24, gpuCount: 1, label: 'L4 24GB' },
-  l40s:         { sku: 'g6e.4xlarge',   gpu: 'NVIDIA L40S',         vramGb: 48, gpuCount: 1, label: 'L40S 48GB · recommended' },
+  // 2026-05-01: g6e.4xlarge dropped from Spark allow-list. g6e.8xlarge has
+  // the same single L40S — just more host CPU/RAM, similar hourly rate.
+  l40s:         { sku: 'g6e.8xlarge',   gpu: 'NVIDIA L40S',         vramGb: 48, gpuCount: 1, label: 'L40S 48GB · recommended' },
   a10x4:        { sku: 'g5.24xlarge',   gpu: 'NVIDIA A10',          vramGb: 24, gpuCount: 4, label: '4× A10 24GB · multi-GPU' },
   l40sx4:       { sku: 'g6e.12xlarge',  gpu: 'NVIDIA L40S',         vramGb: 48, gpuCount: 4, label: '4× L40S 48GB · multi-GPU' },
-  rtxpro6000:   { sku: 'g7e.xlarge',    gpu: 'NVIDIA RTX PRO 6000', vramGb: 96, gpuCount: 1, label: 'RTX PRO 6000 96GB · fastest' },
+  // 2026-05-01: g7e.xlarge dropped from allow-list. g7e.2xlarge is the
+  // smallest single-GPU RTX PRO 6000 still eligible.
+  rtxpro6000:   { sku: 'g7e.2xlarge',   gpu: 'NVIDIA RTX PRO 6000', vramGb: 96, gpuCount: 1, label: 'RTX PRO 6000 96GB · fastest' },
   rtxpro6000x8: { sku: 'g7e.48xlarge',  gpu: 'NVIDIA RTX PRO 6000', vramGb: 96, gpuCount: 8, label: '8× RTX PRO 6000 · ludicrous' },
 } as const
 

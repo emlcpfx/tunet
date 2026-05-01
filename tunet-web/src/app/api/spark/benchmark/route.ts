@@ -44,14 +44,12 @@ export const runtime = 'nodejs'
 export const maxDuration = 120  // five sequential submits + five tarball packs
 
 // ── Reference benchmark settings ─────────────────────────────────────────────
-// These MUST stay in sync with the assumed baseline in
-// spark-presets.ts → settingsMultiplier() (model_size 64, batch 2, UNet, L1)
-// otherwise the calibration data won't apply 1:1 to the multiplier formula.
-const BENCH_SETTINGS = {
-  resolution:      512,
+// resolution + batch_size are now per-job axes (cartesian-product across the
+// `resolutions` and `batchSizes` request fields). Everything else stays
+// fixed so the only variables are GPU × res × batch.
+const BENCH_FIXED = {
   model_size_dims: 64,
   model_type:      'unet' as const,
-  batch_size:      2,
   loss:            'l1' as const,
   // No augmentation, no progressive res — pure throughput measurement.
   overlap_factor:  0.25,
@@ -59,14 +57,23 @@ const BENCH_SETTINGS = {
 
 // Default GPUs to benchmark — single-GPU SKUs only, matches the new-job UI.
 const DEFAULT_GPU_KEYS: GpuKey[] = ['t4', 'l4', 'a10', 'l40s', 'rtxpro6000']
+// Default sweep grid. Skips batch=1 (always sublinear) and batch=16
+// (almost certainly OOM on the smaller cards at high res).
+const DEFAULT_RESOLUTIONS = [256, 512, 1024]
+const DEFAULT_BATCH_SIZES = [2, 4, 8]
 
-// Synthetic dataset: 8 pairs at 768×768 so the 512px patch grid produces
-// usable patches without huge memory pressure.
+// Synthetic dataset: 8 pairs at 1280×1280 so even the 1024px patch grid
+// produces multiple valid extracts per image (ensures the dataloader
+// doesn't run dry).
 const SYNTH_PAIRS = 8
-const SYNTH_SIZE  = 768
+const SYNTH_SIZE  = 1280
 
 interface Body {
   gpus?:            string[]
+  /** Resolutions to sweep (px). Default [256, 512, 1024]. */
+  resolutions?:     number[]
+  /** Batch sizes to sweep. Default [2, 4, 8]. */
+  batchSizes?:      number[]
   benchmarkSteps?:  number
   benchmarkWarmup?: number
   /**
@@ -79,10 +86,12 @@ interface Body {
 }
 
 interface Run {
-  gpuKey: string
-  sku:    string
-  jobId:  string
-  label:  string
+  gpuKey:     string
+  sku:        string
+  jobId:      string
+  label:      string
+  resolution: number
+  batchSize:  number
 }
 
 export async function POST(req: Request) {
@@ -120,6 +129,22 @@ export async function POST(req: Request) {
   const benchmarkSteps  = body.benchmarkSteps  && body.benchmarkSteps  > 0 ? body.benchmarkSteps  : 200
   const benchmarkWarmup = body.benchmarkWarmup && body.benchmarkWarmup > 0 ? body.benchmarkWarmup : 20
 
+  // Resolution + batch-size sweep axes. Validate ranges so a fat-fingered
+  // submit doesn't fire 500 jobs at 4096px.
+  const resolutions = (body.resolutions && body.resolutions.length > 0) ? body.resolutions : DEFAULT_RESOLUTIONS
+  const batchSizes  = (body.batchSizes  && body.batchSizes.length  > 0) ? body.batchSizes  : DEFAULT_BATCH_SIZES
+  for (const r of resolutions) {
+    if (!Number.isInteger(r) || r < 64 || r > 2048) return jsonError(`resolution ${r} out of range [64, 2048]`, 400)
+  }
+  for (const b of batchSizes) {
+    if (!Number.isInteger(b) || b < 1 || b > 64) return jsonError(`batch size ${b} out of range [1, 64]`, 400)
+  }
+  // Cap the cartesian product so a misclick can't fire 100+ jobs at once.
+  const totalJobs = gpuKeys.length * resolutions.length * batchSizes.length
+  if (totalJobs > 60) {
+    return jsonError(`would submit ${totalJobs} jobs (cap is 60). Trim the GPU/resolution/batch grid.`, 400)
+  }
+
   // ── 1. Resolve the dataset stage dir ───────────────────────────────────────
   // Two paths:
   //   a) body.stageId set → user pre-uploaded a folder via /upload-stage.
@@ -152,12 +177,11 @@ export async function POST(req: Request) {
     }
   }
 
-  // ── 2. Build the bench config (same for every GPU) ─────────────────────────
-  const benchConfig = buildBenchmarkConfig()
-
-  // ── 3. Submit one job per GPU sequentially ─────────────────────────────────
+  // ── 2. Submit one job per (gpu × resolution × batch) cell ─────────────────
   // Sequential submits keep the rate-limit happy and let us bail early on a
-  // bad token without leaving half the runs orphaned.
+  // bad token without leaving half the runs orphaned. Each cell gets a
+  // unique config (resolution + batch are baked into the YAML) and a
+  // descriptive job name like `bench-l40s-512px-bs4-<stamp>`.
   const runs: Run[] = []
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
   const filesBase = process.env.SPARK_FILES_BASE_URL?.replace(/\/+$/, '')
@@ -165,50 +189,57 @@ export async function POST(req: Request) {
   try {
     for (const gpuKey of gpuKeys) {
       const sku = GPU_TYPES[gpuKey].sku
-      const jobName = `bench-${gpuKey}-${stamp}`
-      const outputDir = `/output/${jobName}`
+      for (const resolution of resolutions) {
+        for (const batchSize of batchSizes) {
+          const jobName = `bench-${gpuKey}-${resolution}px-bs${batchSize}-${stamp}`
+          const outputDir = `/output/${jobName}`
 
-      // Pack a fresh tarball per submit. Cheap (~800 KB) and avoids any
-      // cross-job state confusion. Cast `data` to a plain record so we can
-      // spread + override output_dir without losing the rest of the config.
-      const data = benchConfig.data as Record<string, unknown>
-      const pack = await packInputTarball({
-        config:   { ...benchConfig, data: { ...data, output_dir: outputDir } },
-        stageDir,
-      })
+          // Per-cell config: resolution + batch are the only varying axes.
+          const cfg = buildBenchmarkConfig(resolution, batchSize)
+          const data = cfg.data as Record<string, unknown>
+          const pack = await packInputTarball({
+            config:   { ...cfg, data: { ...data, output_dir: outputDir } },
+            stageDir,
+          })
 
-      const submitResp = await submitJob({
-        name:            jobName,
-        instanceType:    sku,
-        image:           DEFAULT_IMAGE,
-        command:         ['bash', '/input/spark_start.sh', outputDir, '/input/config.yaml'],
-        idleHoldSeconds: 0,
-        env: {
-          TUNET_JOB_NAME:   jobName,
-          TUNET_PRESET:     'benchmark',
-          TUNET_GPU:        gpuKey,
-          BENCHMARK_STEPS:  String(benchmarkSteps),
-          BENCHMARK_WARMUP: String(benchmarkWarmup),
-          ...(filesBase ? { TUNET_FILES_BASE: filesBase } : {}),
-        },
-      })
+          const submitResp = await submitJob({
+            name:            jobName,
+            instanceType:    sku,
+            image:           DEFAULT_IMAGE,
+            command:         ['bash', '/input/spark_start.sh', outputDir, '/input/config.yaml'],
+            idleHoldSeconds: 0,
+            env: {
+              TUNET_JOB_NAME:   jobName,
+              TUNET_PRESET:     'benchmark',
+              TUNET_GPU:        gpuKey,
+              // Stash the cell coordinates so the dashboard / future tooling
+              // can pivot results without re-parsing the job name.
+              TUNET_BENCH_RES:   String(resolution),
+              TUNET_BENCH_BATCH: String(batchSize),
+              BENCHMARK_STEPS:  String(benchmarkSteps),
+              BENCHMARK_WARMUP: String(benchmarkWarmup),
+              ...(filesBase ? { TUNET_FILES_BASE: filesBase } : {}),
+            },
+          })
 
-      // Upload the tarball to the per-job upload URL.
-      await uploadInputTarball(submitResp.input.uploadUrl, pack.buffer)
+          await uploadInputTarball(submitResp.input.uploadUrl, pack.buffer)
 
-      // Cache discovered files-base on first successful submit.
-      if (submitResp.output?.shareSyncBaseUrl) {
-        try {
-          writeDiscoveredFilesBase(submitResp.output.shareSyncBaseUrl, submitResp.output.shareSyncPath)
-        } catch { /* ignore */ }
+          if (submitResp.output?.shareSyncBaseUrl) {
+            try {
+              writeDiscoveredFilesBase(submitResp.output.shareSyncBaseUrl, submitResp.output.shareSyncPath)
+            } catch { /* ignore */ }
+          }
+
+          runs.push({
+            gpuKey,
+            sku,
+            jobId: submitResp.jobId,
+            label: GPU_TYPES[gpuKey].label,
+            resolution,
+            batchSize,
+          })
+        }
       }
-
-      runs.push({
-        gpuKey,
-        sku,
-        jobId: submitResp.jobId,
-        label: GPU_TYPES[gpuKey].label,
-      })
     }
   } catch (e) {
     return new Response(
@@ -293,14 +324,14 @@ function clamp8(n: number): number {
  * dependency-free of presets so the benchmark stays a stable measurement
  * point even if the preset library changes.
  */
-function buildBenchmarkConfig(): Record<string, unknown> {
+function buildBenchmarkConfig(resolution: number, batchSize: number): Record<string, unknown> {
   return {
     data: {
       src_dir:        '/input/data/src',
       dst_dir:        '/input/data/dst',
       output_dir:     '/output/_bench',     // overridden per-job above
-      resolution:     BENCH_SETTINGS.resolution,
-      overlap_factor: BENCH_SETTINGS.overlap_factor,
+      resolution:     resolution,
+      overlap_factor: BENCH_FIXED.overlap_factor,
       color_space:    'srgb',
       mask_dir:       null,
       val_src_dir:    null,
@@ -316,12 +347,12 @@ function buildBenchmarkConfig(): Record<string, unknown> {
       skip_empty_threshold: 3.0,
     },
     model: {
-      model_type:       BENCH_SETTINGS.model_type,
-      model_size_dims:  BENCH_SETTINGS.model_size_dims,
+      model_type:       BENCH_FIXED.model_type,
+      model_size_dims:  BENCH_FIXED.model_size_dims,
       recurrence_steps: 2,
     },
     training: {
-      loss:                    BENCH_SETTINGS.loss,
+      loss:                    BENCH_FIXED.loss,
       lr:                      1e-4,
       lr_scheduler:            'none',
       lambda_lpips:            0.2,
@@ -329,7 +360,7 @@ function buildBenchmarkConfig(): Record<string, unknown> {
       l2_weight:               0.5,
       lpips_weight:            0.2,
       use_amp:                 true,
-      batch_size:              BENCH_SETTINGS.batch_size,
+      batch_size:              batchSize,
       iterations_per_epoch:    1000,
       max_steps:               0,         // benchmark exits via --benchmark-steps
       progressive_resolution:  false,

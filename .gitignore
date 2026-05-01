@@ -58,8 +58,9 @@ tunet-web/.env*.local
 tunet-web/next-env.d.ts
 # Incremental TypeScript build cache — regenerated on every build
 tunet-web/tsconfig.tsbuildinfo
-# Personal dev-watch helper — not part of the shipping app
-tunet-web/.bench-watch.sh
+# Personal dev helpers — not part of the shipping app (any dotfile script
+# under tunet-web/ that starts with .bench-)
+tunet-web/.bench-*
 
 # Scratch files
 aws_gpu_pricing.html
