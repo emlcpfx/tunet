@@ -3,6 +3,10 @@
  *
  * Spark statuses: queued | provisioning | running | completed | failed | cancelled
  * (different from the legacy DbJob statuses in <StatusBadge> from ui/badge.tsx)
+ *
+ * Pass `liveOverride` to force the displayed status (e.g. when the parent
+ * already knows logs are streaming so the container must be running, even
+ * though Spark's job record hasn't transitioned yet).
  */
 
 type SparkStatus = 'queued' | 'provisioning' | 'running' | 'completed' | 'failed' | 'cancelled' | string
@@ -18,18 +22,19 @@ const CONFIG: Record<string, { label: string; dot: string; text: string; bg: str
 
 const FALLBACK = { label: 'Unknown', dot: '#9ca3af', text: '#6b7280', bg: '#F9FAFB' }
 
-export function SparkStatusBadge({ status }: { status: SparkStatus }) {
-  const cfg = CONFIG[status] ?? FALLBACK
+export function SparkStatusBadge({ status, liveOverride }: { status: SparkStatus; liveOverride?: SparkStatus }) {
+  const shown = liveOverride ?? status
+  const cfg = CONFIG[shown] ?? FALLBACK
   return (
     <span
       className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium"
       style={{ background: cfg.bg, color: cfg.text }}
     >
       <span
-        className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${status === 'running' ? 'animate-pulse' : ''}`}
+        className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${shown === 'running' ? 'animate-pulse' : ''}`}
         style={{ background: cfg.dot }}
       />
-      {cfg.label || status}
+      {cfg.label || shown}
     </span>
   )
 }

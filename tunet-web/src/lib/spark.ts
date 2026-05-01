@@ -257,6 +257,277 @@ export async function openLogStream(jobId: string): Promise<Response> {
   })
 }
 
+// ── ShareSync (WebDAV) — read-only file access for outputs ───────────────────
+
+/**
+ * Resolve the WebDAV base URL for a job's output directory.
+ *
+ * Spark's submit response gives us a fully-qualified `shareSyncBaseUrl`, but
+ * the list/detail responses only echo `output_share_sync_path` (the path
+ * portion). To reconstruct the full URL we read either:
+ *
+ *   1. `env.TUNET_FILES_BASE` if we stashed it at submit time (jobs
+ *      submitted through this UI), OR
+ *   2. `SPARK_FILES_BASE_URL` env on the server (covers all jobs in the
+ *      account — Spark's WebDAV root is per-user, so it's a constant)
+ *
+ * Returns null if neither is available + the path is missing.
+ */
+export function shareSyncBaseUrl(j: SparkJob): string | null {
+  const path = j.output_share_sync_path
+  if (!path) return null
+  // Order matters:
+  //   1. Discovered cache — written from a real Spark submit response, so
+  //      always correct. Wins over per-job env in case the job was submitted
+  //      with a stale/wrong SPARK_FILES_BASE_URL value.
+  //   2. Per-job env stash — only useful when the cache hasn't been seeded.
+  //   3. Process env — the static fallback the user configures by hand.
+  const filesBase = readDiscoveredFilesBase()
+                 ?? j.env?.TUNET_FILES_BASE
+                 ?? process.env.SPARK_FILES_BASE_URL
+  if (!filesBase) return null
+  // The trainer writes to `/output/<jobname>/...` (we set output_dir to
+  // /output/<safeName> at submit time, see api/spark/training-jobs/route.ts).
+  // Spark's agent streams the entire /output/ mount to ShareSync at
+  // `output_share_sync_path` — so the actual file lives at:
+  //   <files-base> / <output_share_sync_path> / <jobname-subdir> / <relpath>
+  //
+  // Without the subdir we 404 on every file. Recover the subdir name from the
+  // command we issued: it's the basename of command[2] when it starts with
+  // /output/. Falls back to no subdir if we can't recover (older jobs, or
+  // ones submitted from elsewhere with a different layout).
+  const subdir = jobOutputSubdir(j)
+  const segs = [
+    filesBase.replace(/\/+$/, ''),
+    path.replace(/^\/+/, '').replace(/\/+$/, ''),
+    ...(subdir ? [subdir] : []),
+  ].filter(s => s.length > 0)
+  return segs.join('/')
+}
+
+/**
+ * Recover the per-job subdirectory name the trainer wrote into. We need this
+ * because Spark uploads /output/ wholesale, so the files end up nested under
+ * the basename of the path we passed as the trainer's output_dir.
+ */
+function jobOutputSubdir(j: SparkJob): string | null {
+  const cmd = j.command
+  if (!Array.isArray(cmd) || cmd.length < 3) return null
+  const arg = cmd[2]
+  if (typeof arg !== 'string' || !arg.startsWith('/output/')) return null
+  const base = arg.slice('/output/'.length).split('/').filter(Boolean)[0]
+  return base ?? null
+}
+
+/** Same as shareSyncBaseUrl but for the input dir, used for Preview Filter scans. */
+export function shareSyncInputBaseUrl(j: SparkJob): string | null {
+  const path = j.input_share_sync_path
+  if (!path) return null
+  const filesBase = readDiscoveredFilesBase()
+                 ?? j.env?.TUNET_FILES_BASE
+                 ?? process.env.SPARK_FILES_BASE_URL
+  if (!filesBase) return null
+  return `${filesBase.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`
+}
+
+/**
+ * Discovered ShareSync base URL — written to a tiny on-disk file by the
+ * submit route after a successful POST /api/compute/jobs (the response
+ * includes a fully-qualified `output.shareSyncBaseUrl`). The proxy reads
+ * this on every request as a fallback for jobs whose env doesn't yet
+ * carry TUNET_FILES_BASE (e.g. the very first job, or jobs submitted
+ * outside this UI).
+ *
+ * Lives in os.tmpdir() — survives across requests within a process but
+ * resets when Vercel/Next gives us a fresh container, which is fine: any
+ * subsequent successful submit re-populates it.
+ */
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+
+const DISCOVERED_BASE_FILE = path.join(os.tmpdir(), 'tunet-spark-files-base.txt')
+
+export function readDiscoveredFilesBase(): string | null {
+  try {
+    if (!fs.existsSync(DISCOVERED_BASE_FILE)) return null
+    const v = fs.readFileSync(DISCOVERED_BASE_FILE, 'utf-8').trim()
+    return v.length > 0 ? v : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Cache the ShareSync base URL discovered from a submit response.
+ * Strips any per-job suffix so the result is reusable across jobs:
+ *   submit gives us  https://eric.files.../dav/spaces/<space>/Compute Jobs/<jobid>
+ *   we want to cache https://eric.files.../dav/spaces/<space>
+ * The job's output_share_sync_path then provides the rest.
+ */
+export function writeDiscoveredFilesBase(submitBaseUrl: string, jobOutputPath: string | undefined): void {
+  if (!submitBaseUrl) return
+  let stripped = submitBaseUrl.replace(/\/+$/, '')
+
+  // The submit URL ends with the job's output_share_sync_path, but they
+  // mismatch on URL encoding: the URL has `Compute%20Jobs` while the
+  // path string has `Compute Jobs`. Decode both sides before comparing.
+  if (jobOutputPath) {
+    const suffix = jobOutputPath.replace(/^\/+/, '').replace(/\/+$/, '')
+    if (suffix) {
+      const strippedDecoded = safeDecode(stripped)
+      const cmpSuffix       = '/' + suffix
+      if (strippedDecoded.endsWith(cmpSuffix)) {
+        // Find the corresponding cut point in the original encoded URL by
+        // walking back the same number of decoded characters.
+        const cutLenDecoded = cmpSuffix.length
+        // Decoded → encoded length isn't 1:1 (`%20` is 3 chars vs ` ` is 1),
+        // so re-derive by encoding the decoded prefix.
+        const prefix = strippedDecoded.slice(0, strippedDecoded.length - cutLenDecoded)
+        // Rebuild encoded prefix: split on '/' and encode each segment.
+        try {
+          const u = new URL(prefix)
+          const segs = u.pathname.split('/').filter(Boolean).map(encodeURIComponent)
+          stripped = `${u.protocol}//${u.host}/${segs.join('/')}`.replace(/\/+$/, '')
+        } catch {
+          // Fall back to the decoded prefix as-is if we can't parse it.
+          stripped = prefix.replace(/\/+$/, '')
+        }
+      }
+    }
+  }
+
+  try {
+    fs.writeFileSync(DISCOVERED_BASE_FILE, stripped, 'utf-8')
+  } catch {
+    /* best-effort */
+  }
+}
+
+function safeDecode(s: string): string {
+  try { return decodeURI(s) } catch { return s }
+}
+
+/**
+ * Fetch a file from a job's output ShareSync directory.
+ * Path is relative to output_share_sync_path, e.g. 'training_preview.jpg'.
+ */
+export async function fetchOutputFile(
+  j: SparkJob,
+  relPath: string,
+  init?: { method?: 'GET' | 'HEAD'; headers?: Record<string, string> },
+): Promise<Response> {
+  const base = shareSyncBaseUrl(j)
+  if (!base) {
+    throw new Error('No ShareSync URL available for this job')
+  }
+  const safe = relPath.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/')
+  const tok  = await getToken()
+  return fetch(`${base}/${safe}`, {
+    method: init?.method ?? 'GET',
+    headers: {
+      'Authorization': `Bearer ${tok}`,
+      ...(init?.headers ?? {}),
+    },
+    cache: 'no-store',
+  })
+}
+
+interface WebdavEntry {
+  name:     string         // basename
+  href:     string         // raw href from PROPFIND (server URL-encoded)
+  size:     number
+  modified: string | null
+  isDir:    boolean
+}
+
+/**
+ * List the contents of a job's output dir via WebDAV PROPFIND (Depth: 1).
+ * Returns just the immediate children (no recursion).
+ */
+export async function listOutputDir(j: SparkJob): Promise<WebdavEntry[]> {
+  const base = shareSyncBaseUrl(j)
+  if (!base) throw new Error('No ShareSync URL available for this job')
+
+  const tok = await getToken()
+  const res = await fetch(`${base}/`, {
+    method: 'PROPFIND',
+    headers: {
+      'Authorization': `Bearer ${tok}`,
+      'Depth':         '1',
+      'Accept':        'application/xml,text/xml',
+      'Content-Type':  'application/xml',
+    },
+    body: `<?xml version="1.0" encoding="utf-8"?>
+<propfind xmlns="DAV:">
+  <prop>
+    <displayname/>
+    <getcontentlength/>
+    <getlastmodified/>
+    <resourcetype/>
+  </prop>
+</propfind>`,
+    cache: 'no-store',
+  })
+  if (!res.ok) {
+    throw new Error(`PROPFIND failed: HTTP ${res.status}`)
+  }
+  const xml = await res.text()
+  return parseWebdavMultistatus(xml, base)
+}
+
+/**
+ * Minimal WebDAV multistatus parser. We don't pull in a dependency for this —
+ * the response is small and the schema is fixed. Skips the entry whose href
+ * matches the parent dir.
+ */
+function parseWebdavMultistatus(xml: string, parentBase: string): WebdavEntry[] {
+  const entries: WebdavEntry[] = []
+  // Match <response>...</response> blocks (case-insensitive, possibly namespaced)
+  const responseRe = /<(?:\w+:)?response\b[^>]*>([\s\S]*?)<\/(?:\w+:)?response>/gi
+  const get = (block: string, tag: string): string | null => {
+    const m = block.match(new RegExp(`<(?:\\w+:)?${tag}\\b[^>]*>([\\s\\S]*?)<\\/(?:\\w+:)?${tag}>`, 'i'))
+    return m ? m[1].trim() : null
+  }
+
+  // Compute the parent's path-only portion to detect self-referential entries
+  let parentPath = ''
+  try { parentPath = new URL(parentBase).pathname.replace(/\/+$/, '') } catch { /* ignore */ }
+
+  let m: RegExpExecArray | null
+  while ((m = responseRe.exec(xml)) !== null) {
+    const block = m[1]
+    const hrefRaw = get(block, 'href')
+    if (!hrefRaw) continue
+
+    // href is URL-encoded; we keep it that way for fetching but decode for the basename
+    const hrefPath = hrefRaw.replace(/&amp;/g, '&').replace(/<!\[CDATA\[(.+?)\]\]>/g, '$1').trim()
+
+    // Skip the self entry (the parent dir itself)
+    let pathOnly = hrefPath
+    try { pathOnly = new URL(hrefPath, parentBase).pathname } catch { /* relative */ }
+    const normSelf = pathOnly.replace(/\/+$/, '')
+    if (normSelf === parentPath) continue
+
+    const isDir = /<(?:\w+:)?collection\b/i.test(get(block, 'resourcetype') ?? '')
+    let name = decodeURIComponent(pathOnly.split('/').filter(Boolean).pop() ?? '')
+    if (!name) continue
+
+    const sizeStr = get(block, 'getcontentlength')
+    const size    = sizeStr ? parseInt(sizeStr, 10) : 0
+    const modified = get(block, 'getlastmodified')
+
+    entries.push({
+      name,
+      href: hrefPath,
+      size: Number.isFinite(size) ? size : 0,
+      modified,
+      isDir,
+    })
+  }
+  return entries
+}
+
 // ── Status helpers (UI shared) ───────────────────────────────────────────────
 
 export const ACTIVE_STATUSES = new Set(['queued', 'provisioning', 'running'])

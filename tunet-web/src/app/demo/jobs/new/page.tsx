@@ -13,17 +13,29 @@
  * tarball server-side and ships it to Spark. On 201 → redirect to job detail.
  */
 
-import { useEffect, useMemo, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { Suspense, useEffect, useMemo, useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Input, FormRow } from '@/components/ui/input'
 import { FolderPicker, type FolderPickerResult } from '@/components/spark/folder-picker'
 import { SubmitProgress, type SubmitEvent } from '@/components/spark/submit-progress'
+import { PreviewFilterDialog } from '@/components/spark/preview-filter-dialog'
+import { AutoMaskDialog } from '@/components/spark/auto-mask-dialog'
+import { AdvancedSettings } from '@/components/spark/advanced-settings'
+import { ModePicker } from '@/components/spark/mode-picker'
+import { SourceJobPicker } from '@/components/spark/source-job-picker'
 import {
   PRESETS, type Preset, type PresetKey, type AdvancedOverrides,
-  estimateRuntimeHours, pricePerHour,
+  estimateTraining, pricePerHour, resolveColorSpace,
 } from '@/lib/spark-presets'
+import {
+  buildFormState, parseFormState,
+  type TrainingMode, type SourceJobRef,
+} from '@/lib/spark-form-state'
+import { uploadStage } from '@/lib/upload-stage'
+import { jobLabel } from '@/lib/spark-types'
+import type { SparkJob } from '@/lib/spark-types'
 
 interface GpuOption {
   key:   string
@@ -33,15 +45,16 @@ interface GpuOption {
   badge?: 'recommended' | 'cheap' | 'fastest' | 'expensive'
 }
 
+// Multi-GPU options removed: spark_start.sh:71 runs `python train.py` (not
+// `torchrun`), so DDP never engages — multi-GPU SKUs would just charge 4×/8×
+// for the same wall-clock as 1×. Re-add once we wire torchrun + benchmark
+// the actual scaling factor.
 const GPU_OPTIONS: GpuOption[] = [
-  { key: 't4',           sku: 'g4dn.xlarge',  label: 'T4',           vram: '16GB',   badge: 'cheap'       },
-  { key: 'a10',          sku: 'g5.xlarge',    label: 'A10',          vram: '24GB'                          },
-  { key: 'l4',           sku: 'g6.2xlarge',   label: 'L4',           vram: '24GB'                          },
-  { key: 'l40s',         sku: 'g6e.4xlarge',  label: 'L40S',         vram: '48GB',   badge: 'recommended' },
-  { key: 'a10x4',        sku: 'g5.24xlarge',  label: '4× A10',       vram: '24GB'                          },
-  { key: 'l40sx4',       sku: 'g6e.12xlarge', label: '4× L40S',      vram: '48GB',   badge: 'expensive'   },
-  { key: 'rtxpro6000',   sku: 'g7e.xlarge',   label: 'RTX PRO 6000', vram: '96GB',   badge: 'fastest'     },
-  { key: 'rtxpro6000x8', sku: 'g7e.48xlarge', label: '8× RTX PRO',   vram: '96GB',   badge: 'expensive'   },
+  { key: 't4',         sku: 'g4dn.xlarge', label: 'T4',           vram: '16GB', badge: 'cheap'       },
+  { key: 'l4',         sku: 'g6.2xlarge',  label: 'L4',           vram: '24GB'                       },
+  { key: 'a10',        sku: 'g5.xlarge',   label: 'A10',          vram: '24GB'                       },
+  { key: 'l40s',       sku: 'g6e.4xlarge', label: 'L40S',         vram: '48GB', badge: 'recommended' },
+  { key: 'rtxpro6000', sku: 'g7e.xlarge',  label: 'RTX PRO 6000', vram: '96GB', badge: 'fastest'     },
 ]
 
 const RESOLUTIONS = [256, 384, 512, 768, 1024]
@@ -55,10 +68,26 @@ const LOSSES: { value: AdvancedOverrides['loss']; label: string }[] = [
 ]
 
 export default function NewJobPage() {
+  // useSearchParams requires a Suspense boundary in Next 15 — wrap the actual
+  // form so the page can still SSR.
+  return (
+    <Suspense fallback={<div className="text-sm text-[#9ca3af] p-6">Loading…</div>}>
+      <NewJobPageInner />
+    </Suspense>
+  )
+}
+
+function NewJobPageInner() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const cloneFromId = searchParams.get('clone')
 
   // Form state
   const [name,    setName]    = useState('')
+  const [mode,    setMode]    = useState<TrainingMode>('new')
+  // Source job for resume / fine-tune (null = unset). The SourceJobPicker
+  // resolves it when the user picks a job + checkpoint.
+  const [source,  setSource]  = useState<SourceJobRef | null>(null)
   const [srcDir,  setSrcDir]  = useState('/input/data/src')
   const [dstDir,  setDstDir]  = useState('/input/data/dst')
   const [valSrcDir, setValSrcDir] = useState<string>('')
@@ -67,10 +96,19 @@ export default function NewJobPage() {
   const [gpuKey,  setGpuKey]  = useState<string>('l40s')
   const [advanced, setAdvanced] = useState<AdvancedOverrides>({})
   const [showAdvanced, setShowAdvanced] = useState(false)
-  const [maxSteps, setMaxSteps] = useState<number>(15000)
+  // Default to 0 (unlimited) — match the desktop app's "run until you stop
+  // it" default. Cost estimate falls back to 15k for the dollar figure but
+  // the job itself runs without a cap unless the user sets one.
+  const [maxSteps, setMaxSteps] = useState<number>(0)
   const [pairs, setPairs] = useState<number>(200)   // user-supplied or auto-detected from folder pick
   const [pairsAutoDetected, setPairsAutoDetected] = useState(false)
   const [idleHold, setIdleHold] = useState(0)
+  // Training-alert prefs — read by api/cron/training-alerts. Defaulting both
+  // to ON because the whole point is to save the user money; opting out is
+  // explicit. Email is empty by default to force a deliberate choice.
+  const [alertEmail,    setAlertEmail]    = useState('')
+  const [alertPlateau,  setAlertPlateau]  = useState(true)
+  const [alertDiverging, setAlertDiverging] = useState(true)
   const [showManualPaths, setShowManualPaths] = useState(false)
   const [picked, setPicked] = useState<FolderPickerResult | null>(null)
 
@@ -85,21 +123,161 @@ export default function NewJobPage() {
   const [progressStartTs, setProgressStartTs] = useState<number>(0)
   const [elapsedMs,      setElapsedMs]      = useState(0)
 
+  // Preview Filter dialog runs entirely in the browser via a Web Worker now —
+  // no upload needed. We just compute matched src↔dst File pairs from the
+  // picked folder and hand them to the dialog when it opens.
+  const [filterOpen, setFilterOpen]       = useState(false)
+  const [filterError, setFilterError]     = useState<string | null>(null)
+  // Skip threshold lives on `advanced.skip_empty_threshold` so the Preview
+  // Filter dialog and the Mask & Skip-empty section in Advanced Settings
+  // share one value. Default 3.0 matches the desktop app + base/base.yaml.
+  const skipThreshold = advanced.skip_empty_threshold ?? 3.0
+  const setSkipThreshold = (t: number) =>
+    setAdvanced({ ...advanced, skip_empty_threshold: t })
+
+  // Auto-mask gamma — same pattern as skipThreshold. Lives on
+  // advanced.auto_mask_gamma so the dialog and the form stay in sync.
+  const [autoMaskOpen, setAutoMaskOpen] = useState(false)
+  const autoMaskGamma =
+    advanced.auto_mask_gamma ?? PRESETS[preset].mask.auto_mask_gamma ?? 1.0
+  const setAutoMaskGamma = (g: number) =>
+    setAdvanced({ ...advanced, auto_mask_gamma: g })
+  const openAutoMaskPreview = () => {
+    if (!filterPairs || filterPairs.length === 0) return
+    setAutoMaskOpen(true)
+  }
+
+  // Match src↔dst File handles by stem. Stable across renders so the dialog's
+  // scan-cache effect can detect "same dataset" and not redo work.
+  const filterPairs = useMemo(() => {
+    if (!picked || picked.src.length === 0 || picked.dst.length === 0) return null
+    const dstByStem = new Map<string, File>()
+    for (const e of picked.dst) dstByStem.set(stemLower(e.name), e.file)
+    const out: { name: string; src: File; dst: File }[] = []
+    for (const e of picked.src) {
+      const m = dstByStem.get(stemLower(e.name))
+      if (m) out.push({ name: e.name, src: e.file, dst: m })
+    }
+    return out
+  }, [picked])
+
+  function openPreviewFilter() {
+    if (!filterPairs || filterPairs.length === 0) {
+      setFilterError('Pick a project folder with matching src/ and dst/ files first.')
+      setFilterOpen(true)
+      return
+    }
+    setFilterError(null)
+    setFilterOpen(true)
+  }
+
+  // ── Clone-from-job rehydration ─────────────────────────────────────────────
+  // When ?clone=<jobId> is present, fetch that job and rehydrate the form
+  // from its TUNET_FORM_STATE env stash. Falls back to inferring from
+  // env.TUNET_PRESET / env.TUNET_GPU when the stash isn't present (older jobs).
+  // The dataset (folder pick) is intentionally NOT cloned — the user has to
+  // pick frames again so we don't silently re-use a different project.
+  const [cloneSource, setCloneSource] = useState<{ id: string; label: string } | null>(null)
+  const [cloneError, setCloneError] = useState<string | null>(null)
+  useEffect(() => {
+    if (!cloneFromId) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(`/api/spark/jobs/${cloneFromId}`, { cache: 'no-store' })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data = await res.json()
+        const job = data.job as SparkJob | undefined
+        if (!job)             throw new Error('source job not found')
+        if (cancelled)        return
+        applyClonedJob(job)
+      } catch (e) {
+        if (!cancelled) setCloneError(e instanceof Error ? e.message : 'Clone failed')
+      }
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional one-shot on mount
+  }, [cloneFromId])
+
+  function applyClonedJob(job: SparkJob) {
+    setCloneSource({ id: job.id, label: jobLabel(job) })
+
+    const stashed = parseFormState(job.env?.TUNET_FORM_STATE)
+    if (stashed) {
+      // Full rehydration from the stash — most accurate.
+      setPreset(stashed.preset in PRESETS ? stashed.preset : 'beauty')
+      setGpuKey(stashed.gpuKey)
+      // Merge skipThreshold into advanced.skip_empty_threshold in one shot —
+      // calling setSkipThreshold separately would race with setAdvanced
+      // because both spread the same closure-captured `advanced`.
+      setAdvanced({
+        ...(stashed.advanced ?? {}),
+        skip_empty_threshold: stashed.skipThreshold,
+      })
+      setMaxSteps(stashed.maxSteps)
+      setIdleHold(stashed.idleHoldSeconds)
+      if (stashed.pairs > 0) {
+        setPairs(stashed.pairs)
+        setPairsAutoDetected(false)
+      }
+      setAlertEmail(stashed.alerts.email)
+      setAlertPlateau(stashed.alerts.plateau)
+      setAlertDiverging(stashed.alerts.diverging)
+      if (stashed.manual) {
+        setShowManualPaths(true)
+        setSrcDir(stashed.manual.srcDir)
+        setDstDir(stashed.manual.dstDir)
+        setValSrcDir(stashed.manual.valSrcDir)
+        setValDstDir(stashed.manual.valDstDir)
+      }
+    } else {
+      // Older job without a form-state stash — fall back to env hints.
+      const presetGuess = job.env?.TUNET_PRESET
+      if (presetGuess && presetGuess in PRESETS) setPreset(presetGuess as PresetKey)
+      const gpuGuess = job.env?.TUNET_GPU
+      if (gpuGuess) setGpuKey(gpuGuess)
+      const emailGuess = job.env?.TUNET_ALERT_EMAIL
+      if (emailGuess) {
+        setAlertEmail(emailGuess)
+        setAlertPlateau(job.env?.TUNET_ALERT_PLATEAU === '1')
+        setAlertDiverging(job.env?.TUNET_ALERT_DIVERGING === '1')
+      }
+    }
+
+    // Suggest a derived name like "<prior> v2" so the user is nudged to rename
+    // and can't accidentally clobber the cloned job's output dir.
+    const base = jobLabel(job).replace(/\s+v\d+$/i, '').trim()
+    setName(base ? `${base} v2` : '')
+  }
+
   // Derived
   const selectedPreset = PRESETS[preset]
   const selectedGpu = GPU_OPTIONS.find(g => g.key === gpuKey) ?? GPU_OPTIONS[3]
   const effectiveResolution = advanced.resolution ?? selectedPreset.data.resolution
   const effectiveModelSize  = advanced.model_size_dims ?? selectedPreset.model.model_size_dims
 
-  const estHours = useMemo(() => estimateRuntimeHours({
-    sku:        selectedGpu.sku,
+  // Training-time estimate. Returns a range + basis so we can display low–high
+  // and "why this estimate?" rather than a fake-precise single number. Pulls
+  // in the heavy-impact settings (model size, type, loss, batch) — see
+  // estimateTraining() in spark-presets.ts.
+  const estimate = useMemo(() => estimateTraining({
+    sku:               selectedGpu.sku,
     pairs,
-    resolution: effectiveResolution,
+    resolution:        effectiveResolution,
     maxSteps,
-  }), [selectedGpu.sku, pairs, effectiveResolution, maxSteps])
+    model_size_dims:   effectiveModelSize,
+    model_type:        advanced.model_type ?? selectedPreset.model.model_type,
+    loss:              advanced.loss       ?? selectedPreset.training.loss,
+    batch_size:        advanced.batch_size,
+  }), [
+    selectedGpu.sku, pairs, effectiveResolution, maxSteps, effectiveModelSize,
+    advanced.model_type, advanced.loss, advanced.batch_size,
+    selectedPreset.model.model_type, selectedPreset.training.loss,
+  ])
 
-  const hourlyRate = pricePerHour(selectedGpu.sku)
-  const estCostUSD = estHours * hourlyRate
+  const hourlyRate     = pricePerHour(selectedGpu.sku)
+  const estCostLowUSD  = estimate.lowHours  * hourlyRate
+  const estCostHighUSD = estimate.highHours * hourlyRate
 
   function autoName() {
     if (name) return
@@ -120,8 +298,15 @@ export default function NewJobPage() {
       setSubmitError('Pick a project folder or enter ShareSync paths'); return
     }
 
+    // Resume / fine-tune require a source job + checkpoint
+    if ((mode === 'resume' || mode === 'finetune') && (!source || !source.checkpointName)) {
+      setSubmitError(`${mode === 'resume' ? 'Resume' : 'Fine-tune'} requires picking a source job and checkpoint`)
+      return
+    }
+
     if (selectedGpu.badge === 'expensive') {
-      const msg = `${selectedGpu.label} costs about $${hourlyRate.toFixed(2)}/hr (~$${estCostUSD.toFixed(0)} for this run).\n\nProceed?`
+      const msg = `${selectedGpu.label} costs about $${hourlyRate.toFixed(2)}/hr ` +
+        `(estimated $${estCostLowUSD.toFixed(0)}–$${estCostHighUSD.toFixed(0)} for this run).\n\nProceed?`
       if (!window.confirm(msg)) return
     }
 
@@ -155,10 +340,30 @@ export default function NewJobPage() {
       }
     }
 
+    const formState = buildFormState({
+      mode,
+      ...(source ? { source } : {}),
+      preset,
+      gpuKey,
+      advanced,
+      maxSteps,
+      idleHoldSeconds: idleHold,
+      pairs,
+      skipThreshold,
+      alerts:  { email: alertEmail.trim(), plateau: alertPlateau, diverging: alertDiverging },
+      manual:  showManualPaths
+        ? { srcDir, dstDir, valSrcDir, valDstDir }
+        : undefined,
+    })
+
     const body = JSON.stringify({
       name:    name.trim(),
       preset,
       gpu:     gpuKey,
+      mode,
+      ...(source && (mode === 'resume' || mode === 'finetune')
+        ? { source: { jobId: source.jobId, checkpointName: source.checkpointName } }
+        : {}),
       ...(stageId ? { stageId } : {}),
       inputs: {
         // Only relevant when not using a stage
@@ -168,8 +373,20 @@ export default function NewJobPage() {
         val_dst_dir: valDstDir.trim() || null,
         output_dir:  `/output/${name.trim().replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64) || 'tunet'}`,
       },
-      advanced: { ...advanced, max_steps: maxSteps },
+      advanced: {
+        ...advanced,
+        max_steps:   maxSteps,
+        // Resolve 'auto' here so the server only ever sees a concrete value.
+        // tunet's YAML parser doesn't know what 'auto' means.
+        color_space: resolveColorSpace(advanced.color_space, picked?.sampleExt),
+      },
       idleHoldSeconds: idleHold,
+      alerts: alertEmail.trim() ? {
+        email:     alertEmail.trim(),
+        plateau:   alertPlateau,
+        diverging: alertDiverging,
+      } : undefined,
+      formState,
     })
 
     try {
@@ -262,6 +479,31 @@ export default function NewJobPage() {
         if (form) form.requestSubmit()
       }}
     />
+    <PreviewFilterDialog
+      open={filterOpen}
+      onClose={() => setFilterOpen(false)}
+      pairs={filterPairs}
+      resolution={effectiveResolution}
+      overlap={selectedPreset.data.overlap_factor ?? 0.25}
+      initialThreshold={skipThreshold}
+      onAccept={(t) => setSkipThreshold(t)}
+    />
+    <AutoMaskDialog
+      open={autoMaskOpen}
+      onClose={() => setAutoMaskOpen(false)}
+      pairs={filterPairs}
+      initialGamma={autoMaskGamma}
+      onAccept={(g) => setAutoMaskGamma(g)}
+    />
+    {filterError && filterOpen && (
+      <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setFilterOpen(false)}>
+        <div className="bg-white rounded-lg p-5 max-w-md" onClick={e => e.stopPropagation()}>
+          <h3 className="text-sm font-semibold text-[#EF4444]">Preview Filter</h3>
+          <p className="text-xs text-[#374151] mt-1">{filterError}</p>
+          <button onClick={() => setFilterOpen(false)} className="mt-3 px-3 py-1 text-xs bg-[#7E3AF2] text-white rounded">OK</button>
+        </div>
+      </div>
+    )}
     <div className="space-y-5 animate-slide-in max-w-3xl">
       <div>
         <Link href="/demo/jobs" className="text-sm text-[#6b7280] hover:text-[#374151]">← All Jobs</Link>
@@ -271,10 +513,81 @@ export default function NewJobPage() {
         </p>
       </div>
 
+      {cloneSource && (
+        <div className="px-4 py-3 bg-[#F7F4FC] border border-[#e9d5ff] rounded-lg flex items-start justify-between gap-3">
+          <div className="text-sm text-[#374151] min-w-0">
+            <p>
+              <span className="font-semibold">Cloned from</span>{' '}
+              <Link href={`/demo/jobs/${cloneSource.id}`} className="font-mono text-xs text-[#7E3AF2] hover:underline">
+                {cloneSource.label}
+              </Link>
+            </p>
+            <p className="text-xs text-[#6b7280] mt-1">
+              Settings are pre-filled. Pick your project folder again and adjust as needed.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => { setCloneSource(null); router.replace('/demo/jobs/new') }}
+            className="text-xs text-[#6b7280] hover:text-[#374151] flex-shrink-0"
+            aria-label="Clear clone"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      {cloneError && (
+        <div className="px-4 py-3 bg-[#FEF2F2] border border-[#fecaca] rounded-lg text-sm text-[#EF4444]">
+          Couldn&apos;t load source job: {cloneError}
+        </div>
+      )}
+
       <form onSubmit={onSubmit} className="space-y-5">
-        {/* ── Step 1: Name ──────────────────────────────────── */}
-        <Card step={1} title="Job Name">
-          <FormRow label="Name" hint="A friendly name for this run" required>
+        {/* ── Step 1: Mode ──────────────────────────────────── */}
+        <Card step={1} title="Training Mode">
+          <ModePicker
+            value={mode}
+            onChange={(m) => {
+              setMode(m)
+              // Switching back to 'new' clears any picked source so a stale
+              // checkpoint can't sneak into the submit body.
+              if (m === 'new') setSource(null)
+            }}
+          />
+          {(mode === 'resume' || mode === 'finetune') && (
+            <div className="mt-4">
+              <SourceJobPicker
+                mode={mode}
+                value={source}
+                onChange={(ref, meta) => {
+                  setSource(ref)
+                  // Resume requires the new run to use the source's preset/gpu
+                  // (train.py rejects loss/size mismatches). Auto-snap them
+                  // here so the user doesn't have to remember.
+                  if (ref && mode === 'resume') {
+                    if (meta.preset && meta.preset in PRESETS) setPreset(meta.preset as PresetKey)
+                    if (meta.gpuKey && GPU_OPTIONS.some(g => g.key === meta.gpuKey)) {
+                      setGpuKey(meta.gpuKey)
+                    }
+                  }
+                }}
+              />
+            </div>
+          )}
+        </Card>
+
+        {/* ── Step 2: Name ──────────────────────────────────── */}
+        <Card step={2} title="Job Name">
+          <FormRow
+            label="Name"
+            hint="A friendly name for this run"
+            tip="Used as the output folder name and as the friendly title in the dashboard.
+
+Convention: <project>_<task>_<version>, e.g.  hero_beauty_v3
+Letters, numbers, _ and - only — anything else is sanitized."
+            required
+          >
             <div className="flex gap-2">
               <Input
                 value={name}
@@ -294,8 +607,8 @@ export default function NewJobPage() {
           </FormRow>
         </Card>
 
-        {/* ── Step 2: Data ──────────────────────────────────── */}
-        <Card step={2} title="Training Data">
+        {/* ── Step 3: Data ──────────────────────────────────── */}
+        <Card step={3} title="Training Data">
           <p className="text-xs text-[#6b7280] mb-4">
             Pick your project folder to auto-detect <code className="bg-[#F9FAFB] px-1 rounded">src/</code>, <code className="bg-[#F9FAFB] px-1 rounded">dst/</code>, and validation folders.
             Or enter ShareSync paths manually below.
@@ -325,12 +638,26 @@ export default function NewJobPage() {
           />
 
           {picked && (
-            <p className="mt-3 text-xs text-[#6b7280]">
-              <strong className="text-[#16A34A]">Detected {picked.pairCount} pairs.</strong>{' '}
-              You&apos;ll need to upload these frames to ShareSync (e.g. via Finder/WebDAV)
-              before training can read them. The paths below assume <code className="bg-[#F9FAFB] px-1 rounded">/Compute Inputs/{picked.rootName}/...</code>;
-              edit them if your actual ShareSync layout differs.
-            </p>
+            <>
+              <p className="mt-3 text-xs text-[#6b7280]">
+                <strong className="text-[#16A34A]">Detected {picked.pairCount} pairs.</strong>{' '}
+                You&apos;ll need to upload these frames to ShareSync (e.g. via Finder/WebDAV)
+                before training can read them. The paths below assume <code className="bg-[#F9FAFB] px-1 rounded">/Compute Inputs/{picked.rootName}/...</code>;
+                edit them if your actual ShareSync layout differs.
+              </p>
+              <div className="mt-3 flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={openPreviewFilter}
+                  className="px-3 py-1.5 text-xs font-semibold border border-[#7E3AF2] text-[#7E3AF2] rounded hover:bg-[#faf5ff]"
+                >
+                  Preview Filter
+                </button>
+                <span className="text-[11px] text-[#6b7280]">
+                  Visualize which patches will be kept vs skipped at the empty-patch threshold.
+                </span>
+              </div>
+            </>
           )}
 
           {/* Manual paths — collapsible */}
@@ -413,14 +740,20 @@ export default function NewJobPage() {
           </div>
         </Card>
 
-        {/* ── Step 3: Preset ────────────────────────────────── */}
-        <Card step={3} title="Task Preset">
+        {/* ── Step 4: Preset ────────────────────────────────── */}
+        <Card step={4} title="Task Preset">
           <p className="text-xs text-[#6b7280] mb-4">
             Pick the preset that matches your task. Each one auto-configures model, loss, and training settings.
             You can override anything in Advanced below.
           </p>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {mode === 'resume' && (
+            <p className="mb-3 px-3 py-2 text-xs text-[#7E3AF2] bg-[#F7F4FC] border border-[#e9d5ff] rounded">
+              Locked to the source job&apos;s preset — train.py refuses to load a checkpoint with mismatched loss / model size.
+            </p>
+          )}
+
+          <div className={`grid grid-cols-1 md:grid-cols-2 gap-3 ${mode === 'resume' ? 'opacity-50 pointer-events-none' : ''}`}>
             {Object.values(PRESETS).map(p => (
               <PresetCard
                 key={p.key}
@@ -431,17 +764,37 @@ export default function NewJobPage() {
             ))}
           </div>
 
-          {/* Recommended (read-only) */}
+          {/* Recommended — Resolution is a one-click override; the rest are
+              read-only summary chips (drill into Advanced to change them). */}
           <div className="mt-5">
             <p className="text-xs font-semibold text-[#374151] mb-2 uppercase tracking-wider">
               Auto-configured
             </p>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
               <ReadonlyField label="Model"      value={`${selectedPreset.model.model_type.toUpperCase()} ${effectiveModelSize}`} />
-              <ReadonlyField label="Resolution" value={`${effectiveResolution}px`} />
+              <ResolutionField
+                value={effectiveResolution}
+                presetDefault={selectedPreset.data.resolution}
+                isOverride={advanced.resolution !== undefined && advanced.resolution !== selectedPreset.data.resolution}
+                onChange={(r) => setAdvanced({
+                  ...advanced,
+                  // Clearing back to the preset default removes the override
+                  // entirely so the chip un-highlights.
+                  resolution: r === selectedPreset.data.resolution ? undefined : r,
+                })}
+              />
               <ReadonlyField label="Loss"       value={selectedPreset.training.loss} />
               <ReadonlyField label="Auto-Mask"  value={selectedPreset.mask.use_auto_mask ? 'enabled' : 'off'} />
             </div>
+            {/* T4 + 512+ warning. T4 has 16GB VRAM — fine at 512 batch=1-2 in
+                AMP, but the default batch_size is 4. We don't auto-shrink
+                batch_size (that's an Advanced thing) so we just warn. */}
+            {gpuKey === 't4' && effectiveResolution >= 512 && (
+              <p className="mt-2 text-xs text-[#D97706]">
+                ⚠ T4 16GB at {effectiveResolution}px may need batch_size 1-2 (set in Advanced).
+                Consider 384px for faster training without VRAM headroom worries.
+              </p>
+            )}
           </div>
 
           {/* Advanced overrides (collapsible) */}
@@ -459,71 +812,27 @@ export default function NewJobPage() {
             </button>
 
             {showAdvanced && (
-              <div className="mt-3 p-4 bg-[#F9FAFB] border border-[#e5e7eb] rounded-lg space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <FormRow label="Resolution">
-                    <select
-                      value={advanced.resolution ?? selectedPreset.data.resolution}
-                      onChange={(e) => setAdvanced({ ...advanced, resolution: parseInt(e.target.value, 10) })}
-                      className="w-full border border-[#e5e7eb] rounded-lg px-3.5 py-2.5 text-sm bg-white"
-                    >
-                      {RESOLUTIONS.map(r => <option key={r} value={r}>{r}px</option>)}
-                    </select>
-                  </FormRow>
-                  <FormRow label="Model Size">
-                    <select
-                      value={advanced.model_size_dims ?? selectedPreset.model.model_size_dims}
-                      onChange={(e) => setAdvanced({ ...advanced, model_size_dims: parseInt(e.target.value, 10) })}
-                      className="w-full border border-[#e5e7eb] rounded-lg px-3.5 py-2.5 text-sm bg-white"
-                    >
-                      {MODEL_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                  </FormRow>
-                  <FormRow label="Batch Size">
-                    <select
-                      value={advanced.batch_size ?? 2}
-                      onChange={(e) => setAdvanced({ ...advanced, batch_size: parseInt(e.target.value, 10) })}
-                      className="w-full border border-[#e5e7eb] rounded-lg px-3.5 py-2.5 text-sm bg-white"
-                    >
-                      {BATCH_SIZES.map(b => <option key={b} value={b}>{b}</option>)}
-                    </select>
-                  </FormRow>
-                  <FormRow label="Learning Rate">
-                    <Input
-                      value={advanced.lr ?? selectedPreset.training.lr}
-                      onChange={(e) => {
-                        const v = parseFloat(e.target.value)
-                        if (!Number.isNaN(v)) setAdvanced({ ...advanced, lr: v })
-                      }}
-                      type="number"
-                      step="0.00001"
-                    />
-                  </FormRow>
-                  <FormRow label="Loss Function">
-                    <select
-                      value={advanced.loss ?? selectedPreset.training.loss}
-                      onChange={(e) => setAdvanced({ ...advanced, loss: e.target.value as AdvancedOverrides['loss'] })}
-                      className="w-full border border-[#e5e7eb] rounded-lg px-3.5 py-2.5 text-sm bg-white"
-                    >
-                      {LOSSES.map(l => <option key={l.value} value={l.value}>{l.label}</option>)}
-                    </select>
-                  </FormRow>
-                  <FormRow label="Max Steps" hint="0 = run until you stop it">
-                    <Input
-                      type="number"
-                      min={0}
-                      value={maxSteps}
-                      onChange={(e) => setMaxSteps(parseInt(e.target.value || '0', 10))}
-                    />
-                  </FormRow>
-                </div>
+              <div className="mt-3 space-y-3">
+                <AdvancedSettings
+                  value={advanced}
+                  onChange={setAdvanced}
+                  preset={selectedPreset}
+                  sampleExt={picked?.sampleExt ?? null}
+                  onPreviewFilter={openPreviewFilter}
+                  previewFilterReady={!!filterPairs && filterPairs.length > 0}
+                  onAutoMaskPreview={openAutoMaskPreview}
+                  autoMaskPreviewReady={!!filterPairs && filterPairs.length > 0}
+                />
+                <p className="text-[11px] text-[#9ca3af] italic">
+                  Empty fields fall back to the preset default. Reset by re-selecting a preset above.
+                </p>
               </div>
             )}
           </div>
         </Card>
 
-        {/* ── Step 4: Review & Train ─────────────────────────── */}
-        <Card step={4} title="Review & Train">
+        {/* ── Step 5: Review & Train ─────────────────────────── */}
+        <Card step={5} title="Review & Train">
           <FormRow label="GPU">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
               {GPU_OPTIONS.map(g => (
@@ -537,7 +846,17 @@ export default function NewJobPage() {
             </div>
           </FormRow>
 
-          <FormRow label="Idle hold (seconds)" hint="0 = stop instance immediately on exit. 300+ keeps warm for resubmits.">
+          <FormRow
+            label="Idle hold (seconds)"
+            hint="0 = stop instance immediately on exit. 300+ keeps warm for resubmits."
+            tip="How long to keep the GPU instance warm after training exits.
+
+  0    — Stop immediately. Cheapest. Re-submitting later cold-starts (~3-5 min).
+  300  — 5 min hold. Good if you might re-submit with tweaks.
+  3600 — 1 hour hold. Useful for iterating live.
+
+You're billed for idle time — keep this minimal unless you know you'll resubmit."
+          >
             <Input
               type="number"
               min={0}
@@ -548,23 +867,97 @@ export default function NewJobPage() {
             />
           </FormRow>
 
+          {/* Training alerts */}
+          <FormRow
+            label="Email alerts"
+            hint="Optional. We'll email you when the training run plateaus or diverges so you can stop it before wasting credit."
+            tip="A cron checks every 10 min and sends one email per kind:
+
+  Plateau / Done — best loss is 30-50+ epochs old (model isn't improving)
+  Diverging      — loss is going UP (LR too high, or bad pairs)
+
+Cooldown of 4 hours between same-kind alerts so you don't get spammed.
+Leave the email field empty to opt out for this job entirely."
+          >
+            <div className="space-y-2">
+              <Input
+                type="email"
+                value={alertEmail}
+                onChange={(e) => setAlertEmail(e.target.value)}
+                placeholder="you@example.com (leave empty to opt out)"
+                className="w-full max-w-md"
+              />
+              <div className={`flex flex-wrap items-center gap-4 text-xs ${alertEmail.trim() ? '' : 'opacity-50 pointer-events-none'}`}>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={alertPlateau}
+                    onChange={(e) => setAlertPlateau(e.target.checked)}
+                    className="accent-[#7E3AF2]"
+                  />
+                  <span className="text-[#374151]">
+                    Notify when training stalls / done
+                    <span className="text-[#9ca3af]"> (best loss is 30-50+ epochs old)</span>
+                  </span>
+                </label>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={alertDiverging}
+                    onChange={(e) => setAlertDiverging(e.target.checked)}
+                    className="accent-[#7E3AF2]"
+                  />
+                  <span className="text-[#374151]">
+                    Notify if loss starts going up
+                    <span className="text-[#9ca3af]"> (LR or data problem)</span>
+                  </span>
+                </label>
+              </div>
+            </div>
+          </FormRow>
+
           {/* Cost estimate */}
           <div className="mt-4 bg-gradient-to-r from-[#F7F4FC] to-[#fdf4ff] border border-[#e9d5ff] rounded-lg p-4">
             <p className="text-xs font-semibold text-[#7E3AF2] uppercase tracking-wider mb-3">Estimate</p>
             <div className="space-y-1.5 text-sm">
+              <CostRow
+                label="Mode"
+                value={
+                  mode === 'new' ? 'New (train from scratch)' :
+                  mode === 'resume'   ? `Resume of ${source?.jobLabel ?? '—'}`   :
+                                        `Fine-tune of ${source?.jobLabel ?? '—'}`
+                }
+              />
               <CostRow label="GPU" value={`${selectedGpu.label} ${selectedGpu.vram} · $${hourlyRate.toFixed(2)}/hr`} />
               <CostRow label="Data" value={`${pairs} frame pairs · ${effectiveResolution}px`} />
               <CostRow label="Preset" value={`${selectedPreset.name} (${selectedPreset.model.model_type.toUpperCase()} ${effectiveModelSize})`} />
-              <CostRow label="Steps" value={maxSteps > 0 ? `${maxSteps.toLocaleString()} max` : 'unlimited'} />
-              <CostRow label="Estimated runtime" value={estHours < 1 ? `${(estHours * 60).toFixed(0)} minutes` : `${estHours.toFixed(1)} hours`} />
+              <CostRow
+                label="Steps"
+                value={maxSteps > 0
+                  ? `${maxSteps.toLocaleString()} max`
+                  : `~${estimate.steps.toLocaleString()} (typical for ${pairs} frames)`}
+              />
+              <CostRow label="Estimated runtime" value={formatHourRange(estimate.lowHours, estimate.highHours)} />
               <div className="pt-2 mt-2 border-t border-[#e9d5ff] flex items-center justify-between">
                 <span className="font-semibold text-[#111827]">Estimated cost</span>
-                <span className="font-bold text-lg text-[#7E3AF2]">~${estCostUSD.toFixed(2)}</span>
+                <span className="font-bold text-lg text-[#7E3AF2]">
+                  ${estCostLowUSD.toFixed(0)}–${estCostHighUSD.toFixed(0)}
+                </span>
               </div>
             </div>
-            <p className="text-[10px] text-[#9ca3af] mt-2">
-              Estimate only — Spark bills per second on running. Actual cost depends on real T/Step which varies by content.
-            </p>
+            <details className="mt-2 text-[11px] text-[#6b7280]">
+              <summary className="cursor-pointer hover:text-[#374151] select-none">
+                Why this estimate?
+              </summary>
+              <ul className="mt-1.5 ml-4 list-disc space-y-0.5">
+                {estimate.basis.map((b, i) => <li key={i}>{b}</li>)}
+              </ul>
+              <p className="mt-1.5 text-[10px] text-[#9ca3af]">
+                Throughput numbers are unbenchmarked rough guesses by GPU class — real step/sec
+                varies 2× either way with content, augmentations, and data-loader pressure.
+                Spark bills per second; if your model converges early just stop the run.
+              </p>
+            </details>
           </div>
 
           {submitError && (
@@ -581,7 +974,7 @@ export default function NewJobPage() {
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <polygon points="5 3 19 12 5 21 5 3" />
               </svg>
-              {submitting ? 'Submitting…' : `Start Training · ~$${estCostUSD.toFixed(2)}`}
+              {submitting ? 'Submitting…' : `Start Training · ~$${estCostLowUSD.toFixed(0)}–$${estCostHighUSD.toFixed(0)}`}
             </Button>
           </div>
         </Card>
@@ -680,6 +1073,61 @@ function ReadonlyField({ label, value }: { label: string; value: string }) {
   )
 }
 
+/**
+ * Same shape as ReadonlyField but with a 4-up segmented control for one-click
+ * resolution override. The preset's recommended value gets a tiny "default"
+ * label; if the user has overridden, we surface that subtly via the border
+ * color so it's visible-but-not-loud.
+ */
+const QUICK_RES = [256, 384, 512, 768] as const
+function ResolutionField({
+  value, presetDefault, isOverride, onChange,
+}: {
+  value:         number
+  presetDefault: number
+  isOverride:    boolean
+  onChange:      (r: number) => void
+}) {
+  return (
+    <div className={`bg-[#F9FAFB] border rounded px-3 py-2 ${
+      isOverride ? 'border-[#ae69f4]' : 'border-[#e5e7eb]'
+    }`}>
+      <div className="flex items-center justify-between">
+        <p className="text-[10px] uppercase tracking-wider text-[#9ca3af] font-semibold">
+          Resolution
+        </p>
+        {isOverride && (
+          <span className="text-[9px] text-[#7E3AF2] uppercase tracking-wider font-semibold">
+            override
+          </span>
+        )}
+      </div>
+      <div className="mt-1 flex gap-0.5 bg-white border border-[#e5e7eb] rounded p-0.5">
+        {QUICK_RES.map(r => (
+          <button
+            key={r}
+            type="button"
+            onClick={() => onChange(r)}
+            title={r === presetDefault ? `Preset default (${r}px)` : `Use ${r}px`}
+            className={`flex-1 text-[10px] font-mono py-0.5 rounded transition-colors ${
+              value === r
+                ? 'bg-[#7E3AF2] text-white'
+                : 'text-[#6b7280] hover:bg-[#F9FAFB]'
+            }`}
+          >
+            {r}
+            {r === presetDefault && (
+              <span className={`block text-[8px] ${value === r ? 'text-white/70' : 'text-[#9ca3af]'}`}>
+                default
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // — Helper from the cost-box pattern in static HTML
 function CostRow({ label, value }: { label: string; value: string }) {
   return (
@@ -694,67 +1142,24 @@ function CostRow({ label, value }: { label: string; value: string }) {
 function pricePerHourReExport() { return pricePerHour }   // tree-shake hint
 void pricePerHourReExport
 
-// ── Stage upload ────────────────────────────────────────────────────────────
-
-const MAX_BATCH_BYTES = 200 * 1024 * 1024  // 200 MB per batch — keeps memory low
+function stemLower(name: string): string {
+  const dot = name.lastIndexOf('.')
+  return (dot < 0 ? name : name.slice(0, dot)).toLowerCase()
+}
 
 /**
- * Upload picker files in batches keyed by role. Files larger than
- * MAX_BATCH_BYTES are sent one per request; smaller files are grouped to
- * reduce request overhead. Reports total-bytes-sent progress to onProgress.
- *
- * Returns the stageId for the upload-stage server.
+ * Render a low–high hours range. Switches to minutes if both ends are < 1h
+ * so we don't show "0.3h" and call it useful.
  */
-async function uploadStage(
-  picked: FolderPickerResult,
-  onProgress: (sent: number, total: number, batchIdx: number, totalBatches: number) => void,
-): Promise<string> {
-  const batches: { role: string; files: File[]; bytes: number }[] = []
-
-  function addRole(role: string, entries: { name: string; size: number; file: File }[]) {
-    if (entries.length === 0) return
-    let cur: File[] = []
-    let curBytes = 0
-    for (const e of entries) {
-      if (curBytes + e.size > MAX_BATCH_BYTES && cur.length > 0) {
-        batches.push({ role, files: cur, bytes: curBytes })
-        cur = []
-        curBytes = 0
-      }
-      cur.push(e.file)
-      curBytes += e.size
-    }
-    if (cur.length > 0) batches.push({ role, files: cur, bytes: curBytes })
+function formatHourRange(low: number, high: number): string {
+  if (high < 1) {
+    return `${Math.round(low * 60)}–${Math.round(high * 60)} min`
   }
-
-  addRole('src',     picked.src)
-  addRole('dst',     picked.dst)
-  addRole('val_src', picked.valSrc)
-  addRole('val_dst', picked.valDst)
-  addRole('mask',    picked.mask)
-
-  const total = batches.reduce((s, b) => s + b.bytes, 0)
-  let sent = 0
-  let stageId: string | null = null
-
-  for (let i = 0; i < batches.length; i++) {
-    const b = batches[i]
-    const fd = new FormData()
-    fd.set('role', b.role)
-    if (stageId) fd.set('stageId', stageId)
-    for (const f of b.files) fd.append('files', f, f.name)
-
-    const res = await fetch('/api/spark/upload-stage', { method: 'POST', body: fd })
-    if (!res.ok) {
-      const j = await res.json().catch(() => ({}))
-      throw new Error(j.error ?? `upload-stage HTTP ${res.status}`)
-    }
-    const json = await res.json() as { stageId: string }
-    stageId = json.stageId
-    sent += b.bytes
-    onProgress(sent, total, i + 1, batches.length)
+  if (low < 1) {
+    return `${Math.round(low * 60)} min – ${high.toFixed(1)} h`
   }
-
-  if (!stageId) throw new Error('No batches uploaded — picker had no files')
-  return stageId
+  return `${low.toFixed(1)}–${high.toFixed(1)} h`
 }
+
+// uploadStage was extracted to lib/upload-stage.ts so the benchmark page can
+// share the same batching logic. It's imported above.

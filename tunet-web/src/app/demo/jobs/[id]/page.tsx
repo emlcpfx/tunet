@@ -12,11 +12,16 @@ import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { getJob } from '@/lib/spark'
 import {
-  type SparkJob, jobLabel, jobRuntimeMs, formatRuntime, formatStarted, ACTIVE_STATUSES,
+  type SparkJob, jobLabel, jobRuntimeMs, formatRuntime, formatStarted, jobGpuDisplay,
+  ACTIVE_STATUSES, derivedStatus,
 } from '@/lib/spark-types'
-import { SparkStatusBadge } from '@/components/spark/status-badge'
+import { LiveStatusBadge } from '@/components/spark/live-status-badge'
 import { JobLiveView } from '@/components/spark/job-live-view'
 import { CancelJobButton } from '@/components/spark/cancel-job-button'
+import { TrainingChart } from '@/components/spark/training-chart'
+import { TrainingStats } from '@/components/spark/training-stats'
+import { PreviewImages } from '@/components/spark/preview-images'
+import { DownloadsPanel } from '@/components/spark/downloads-panel'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -41,7 +46,12 @@ export default async function JobDetailPage({
 
   if (!job) notFound()
 
-  const isLive = ACTIVE_STATUSES.has(job.status)
+  // Use derivedStatus() rather than raw job.status — Spark's job-level status
+  // lags reality by minutes (it stays 'provisioning' even after the container
+  // is running and emitting logs). derivedStatus checks heartbeat freshness
+  // and started_running_at to surface a more accurate signal.
+  // See spark-types.ts for the heuristic.
+  const isLive = ACTIVE_STATUSES.has(derivedStatus(job))
 
   return (
     <div className="space-y-5 animate-slide-in">
@@ -59,14 +69,21 @@ export default async function JobDetailPage({
           <p className="text-xs text-[#9ca3af] mt-1 font-mono break-all">{job.id}</p>
         </div>
         <div className="flex items-center gap-3 flex-shrink-0">
-          <SparkStatusBadge status={job.status} />
+          <LiveStatusBadge initialJob={job} />
+          <Link
+            href={`/demo/jobs/new?clone=${job.id}`}
+            className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#e5e7eb] text-[#374151] hover:bg-[#F9FAFB] transition-colors"
+            title="Start a new job pre-filled from this one"
+          >
+            Clone
+          </Link>
           {isLive && <CancelJobButton jobId={job.id} />}
         </div>
       </div>
 
       {/* Metric strip */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-        <MetricBlock label="GPU"        value={job.gpu_name ?? '—'} />
+        <MetricBlock label="GPU"        value={jobGpuDisplay(job)} />
         <MetricBlock label="Instance"   value={job.instance_type_name ?? '—'} mono />
         <MetricBlock label="Started"    value={formatStarted(job)} />
         <MetricBlock label="Runtime"    value={formatRuntime(jobRuntimeMs(job))} />
@@ -80,6 +97,17 @@ export default async function JobDetailPage({
           <p className="text-[#7F1D1D] font-mono text-xs">{job.error_message}</p>
         </div>
       )}
+
+      {/* Training chart + Preview images side-by-side */}
+      <section className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <TrainingChart jobId={job.id} />
+        <PreviewImages job={job} />
+      </section>
+
+      {/* Stats + analysis strip */}
+      <section>
+        <TrainingStats jobId={job.id} />
+      </section>
 
       {/* Provisioning timeline + log stream (combined client view) */}
       <section>
@@ -95,12 +123,13 @@ export default async function JobDetailPage({
         <JobLiveView initialJob={job} initiallyLive={isLive} />
       </section>
 
-      {/* Output / ShareSync */}
+      {/* Downloads */}
       {job.output_share_sync_path && (
         <section>
-          <h2 className="text-sm font-semibold text-[#374151] mb-2">Output</h2>
-          <div className="bg-white border border-[#e5e7eb] rounded-lg px-4 py-3 text-xs font-mono text-[#374151] break-all">
-            {job.output_share_sync_path}
+          <h2 className="text-sm font-semibold text-[#374151] mb-2">Downloads</h2>
+          <DownloadsPanel job={job} />
+          <div className="mt-2 bg-white border border-[#e5e7eb] rounded-lg px-4 py-2 text-[11px] font-mono text-[#9ca3af] break-all">
+            ShareSync path: {job.output_share_sync_path}
           </div>
         </section>
       )}

@@ -371,6 +371,23 @@ wire without provisioning a real GPU.
 5. **`event: status` SSE events** — your doc mentions `data:` events; we
    only see `event: log`. Are there other named events (status changes,
    resource samples) we should be listening for?
+6. **Customizable `outputShareSyncPath`** — outputs currently land at
+   `/Compute Jobs/<jobId>/...`, keyed by UUID. From a user's perspective,
+   "where did my Porter_0408 model go?" requires looking up the jobId first.
+   Could the submit body accept an `outputShareSyncPath` parameter (e.g.
+   `/My Models/Porter_0408_REDO_v3/`) that overrides the default? Would
+   let us organize outputs by project / friendly name without a separate
+   move/rename step. Same question for `inputShareSyncPath` so users can
+   pre-stage data under their own folder names.
+7. **Job deletion / archival** — there's no `DELETE /api/compute/jobs/:id`
+   that we've found. We're hiding terminal jobs from our UI via localStorage
+   for now, but that just clutters Spark's account history. Is there a
+   server-side way to actually purge a job (and ideally its ShareSync
+   artifacts) from the account?
+8. **ShareSync storage pricing + cleanup** — what's the rate? Is there an
+   automatic TTL on `/Compute Jobs/<jobId>/` outputs, or do they live
+   forever until manually deleted via WebDAV? A typical TuNet run produces
+   ~2 GB of checkpoints; if users do hundreds of runs that adds up.
 
 ---
 

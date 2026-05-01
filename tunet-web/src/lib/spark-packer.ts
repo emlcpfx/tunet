@@ -113,6 +113,17 @@ export interface PackInput {
    * extracts to `/input/`, so the agent will see them at `/input/data/...`.
    */
   stageDir?: string
+  /**
+   * Optional: extra files to drop into the tarball at arbitrary relative
+   * paths. Used by Resume / Fine-tune to ship a `.pth` checkpoint:
+   *   - Resume:    relPath = `output/<jobname>/<ckpt-name>.pth`  (seeded
+   *                by spark_start.sh into /output/<jobname>/ before train.py
+   *                runs, so the trainer's auto-resume picks it up).
+   *   - Fine-tune: relPath = `finetune.pth` and config.training.finetune_from
+   *                points at `/input/finetune.pth`.
+   * Buffers are written verbatim, no exclude logic.
+   */
+  extraFiles?: { relPath: string; data: Buffer }[]
 }
 
 export interface PackResult {
@@ -183,6 +194,22 @@ export async function packInputTarball(input: PackInput): Promise<PackResult> {
         // No exclude logic for user data — copy as-is
         const copied = await mirrorDir(srcRole, dstRole, () => false)
         fileCount += copied
+      }
+    }
+
+    // 3c. Drop extra files (e.g. resume/finetune .pth) at arbitrary rel paths.
+    // Reject absolute paths and `..` traversal so a malformed caller can't
+    // escape the stageDir. Each file is written verbatim — no excludes.
+    if (input.extraFiles) {
+      for (const f of input.extraFiles) {
+        const rel = f.relPath.replace(/\\/g, '/').replace(/^\/+/, '')
+        if (rel.split('/').includes('..')) {
+          throw new Error(`extraFiles relPath contains '..' segment: ${f.relPath}`)
+        }
+        const dest = path.join(stageDir, rel)
+        await fs.promises.mkdir(path.dirname(dest), { recursive: true })
+        await fs.promises.writeFile(dest, f.data)
+        fileCount += 1
       }
     }
 

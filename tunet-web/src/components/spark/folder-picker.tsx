@@ -214,6 +214,9 @@ export function FolderPicker({ onPicked }: FolderPickerProps) {
               <p className="text-xs text-[#9ca3af]">
                 Auto-detects subfolders named <code className="bg-white px-1 rounded font-mono">src</code>/<code className="bg-white px-1 rounded font-mono">input</code>/<code className="bg-white px-1 rounded font-mono">source</code> and <code className="bg-white px-1 rounded font-mono">dst</code>/<code className="bg-white px-1 rounded font-mono">output</code>/<code className="bg-white px-1 rounded font-mono">target</code>. Optional: <code className="bg-white px-1 rounded font-mono">val_src</code>, <code className="bg-white px-1 rounded font-mono">val_dst</code>, <code className="bg-white px-1 rounded font-mono">mask</code>.
               </p>
+              <p className="text-[11px] text-[#9ca3af] italic mt-1">
+                Your browser will ask once to confirm the upload — that&apos;s normal for folder uploads. We only read images from the canonical subfolders above; nothing else leaves your machine.
+              </p>
             </div>
           </div>
         </label>

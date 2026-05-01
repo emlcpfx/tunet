@@ -64,9 +64,23 @@ fi
 # ── 4. Run training (foreground — agent owns lifetime) ──────
 # No nohup, no monitor_api, no auto-terminate. The Spark agent
 # uploads /output/ when this process exits.
+#
+# BENCHMARK_STEPS env var opts into a short calibration run: train.py runs
+# warmup + N steps, logs STEP_RATE, exits. Used by tunet-web to baseline
+# the cost estimator. Skip the file-write the regular run does.
 echo ""
 echo "[train] Starting train.py..."
 export OPENCV_IO_ENABLE_OPENEXR=1
 cd "$TUNET_DIR"
-$PY train.py --config "$CONFIG" --stop-file "$OUTPUT_DIR/.stop_training"
+
+BENCH_ARGS=""
+if [ -n "$BENCHMARK_STEPS" ] && [ "$BENCHMARK_STEPS" -gt 0 ] 2>/dev/null; then
+    BENCH_ARGS="--benchmark-steps $BENCHMARK_STEPS"
+    if [ -n "$BENCHMARK_WARMUP" ] && [ "$BENCHMARK_WARMUP" -gt 0 ] 2>/dev/null; then
+        BENCH_ARGS="$BENCH_ARGS --benchmark-warmup $BENCHMARK_WARMUP"
+    fi
+    echo "[bench] BENCHMARK MODE: $BENCH_ARGS"
+fi
+
+$PY train.py --config "$CONFIG" --stop-file "$OUTPUT_DIR/.stop_training" $BENCH_ARGS
 echo "[train] Finished with exit $?"

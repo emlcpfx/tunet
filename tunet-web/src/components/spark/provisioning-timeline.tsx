@@ -58,9 +58,10 @@ export function ProvisioningTimeline({ jobId, initialJob, onLogsStart, hasLogs }
   const [pollError, setPollError] = useState<string | null>(null)
   const [tick, setTick] = useState(0)   // forces relative-time labels to update
 
-  // Poll job state — slow down once we're "running" since logs take over
+  // Poll job state — slow down once we have evidence the container is up.
+  // Once logs are flowing we mostly only need to detect the terminal status.
   useEffect(() => {
-    const interval = job.status === 'running' ? 5000 : 2500
+    const interval = (job.status === 'running' || hasLogs) ? 5000 : 2500
     const id = window.setInterval(async () => {
       try {
         const res = await fetch(`/api/spark/jobs/${jobId}`)
@@ -73,7 +74,7 @@ export function ProvisioningTimeline({ jobId, initialJob, onLogsStart, hasLogs }
       }
     }, interval)
     return () => window.clearInterval(id)
-  }, [jobId, job.status])
+  }, [jobId, job.status, hasLogs])
 
   // Tick clock so "12s ago" updates without a poll
   useEffect(() => {
@@ -94,7 +95,7 @@ export function ProvisioningTimeline({ jobId, initialJob, onLogsStart, hasLogs }
     <div className="bg-white border border-[#e5e7eb] rounded-lg p-4">
       <div className="flex items-center justify-between mb-3">
         <p className="text-xs font-semibold text-[#374151] uppercase tracking-wider">
-          Provisioning {job.status === 'running' ? '· Container ready' : ''}
+          Provisioning {(job.status === 'running' || hasLogs) ? '· Container ready' : ''}
         </p>
         <span className="text-xs text-[#9ca3af] font-mono" data-tick={tick}>
           {pollError ? <span className="text-[#D97706]">{pollError}</span> : 'live'}
@@ -223,9 +224,20 @@ function derivePhases(job: SparkJob, hasLogs: boolean): Record<string, PhaseStat
   // For unknown codes, fall back to timestamp inference.
   const errorCode = job.error_code ?? null
 
+  // Strongest "container is running" signal in priority order:
+  //   1. started_running_at  (explicit, but Spark is slow to set this)
+  //   2. container-phase log lines flowing  (we're literally seeing stdout
+  //                                          from inside the container)
+  //   3. error_code === 'container_nonzero_exit' (container ran then exited)
+  //
+  // hasLogs is true iff at least one log line has arrived in <LogStreamPanel>;
+  // since Spark's agent banner ("Spark Compute Job") prints before the
+  // container starts, hasLogs alone isn't enough — but combined with the
+  // job no longer being just-queued, it's a reliable signal.
   const reachedRunning =
-    !!runStart                                    // explicit signal
-    || (isFailed && errorCode === 'container_nonzero_exit')   // container ran then exited
+    !!runStart
+    || hasLogs
+    || (isFailed && errorCode === 'container_nonzero_exit')
 
   const failedAtPhase: 'queued' | 'provisioning' | 'pulling' | 'running' | null =
     !isFailed                                 ? null :
@@ -264,7 +276,10 @@ function derivePhases(job: SparkJob, hasLogs: boolean): Record<string, PhaseStat
       job.last_agent_heartbeat_at ?? job.started_running_at ?? job.terminal_at ?? undefined)
   } else if (failedAtPhase === 'provisioning') {
     out.provisioning = { status: 'error' }
-  } else if (heartbeat || runStart) {
+  } else if (reachedRunning || heartbeat) {
+    // hasLogs covers the case where Spark's job-record clock lags behind the
+    // container actually running — if we're seeing stdout, provisioning is
+    // long done, regardless of timestamps.
     out.provisioning = phaseDone('provisioning',
       job.last_agent_heartbeat_at ?? job.started_running_at ?? undefined)
   } else if (provStart && !terminal) {
@@ -275,11 +290,10 @@ function derivePhases(job: SparkJob, hasLogs: boolean): Record<string, PhaseStat
 
   // Phase 3: pulling image
   if (failedAtPhase === 'running') {
-    // We must have pulled (since container ran)
     out.pulling = phaseDone('pulling', job.started_running_at ?? undefined)
   } else if (failedAtPhase === 'pulling') {
     out.pulling = { status: 'error' }
-  } else if (runStart) {
+  } else if (reachedRunning) {
     out.pulling = phaseDone('pulling', job.started_running_at ?? undefined)
   } else if (heartbeat && !terminal) {
     out.pulling = { status: 'active', elapsedMs: now - heartbeat }
@@ -289,7 +303,7 @@ function derivePhases(job: SparkJob, hasLogs: boolean): Record<string, PhaseStat
 
   // Phase 4: starting container — collapse with running. Done iff we have
   // strong evidence the container actually started.
-  if (failedAtPhase === 'running' || runStart) {
+  if (failedAtPhase === 'running' || reachedRunning) {
     out.starting = phaseDone('starting', job.started_running_at ?? undefined)
   } else {
     out.starting = { status: 'pending' }
@@ -298,14 +312,14 @@ function derivePhases(job: SparkJob, hasLogs: boolean): Record<string, PhaseStat
   // Phase 5: running
   if (failedAtPhase === 'running') {
     out.running = { status: 'error', completedAt: job.terminal_at ?? undefined }
-  } else if (job.status === 'running' && hasLogs) {
-    out.running = phaseDone('running', job.started_running_at ?? undefined)
-  } else if (job.status === 'running') {
-    out.running = { status: 'active', elapsedMs: runStart ? now - runStart : undefined }
   } else if (isTerminalSuccess && reachedRunning) {
     out.running = phaseDone('running', job.terminal_at ?? undefined)
   } else if (isCancelled && reachedRunning) {
     out.running = phaseDone('running', job.terminal_at ?? undefined)
+  } else if (reachedRunning && !terminal) {
+    // Active/running. Once we have logs the container is definitely up,
+    // even if Spark's job.status hasn't transitioned out of "provisioning".
+    out.running = { status: 'active', elapsedMs: runStart ? now - runStart : undefined }
   } else {
     out.running = { status: 'pending' }
   }

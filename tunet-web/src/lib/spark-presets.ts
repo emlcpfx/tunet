@@ -102,14 +102,91 @@ export const PRESETS: Record<PresetKey, Preset> = {
 
 // ── User-facing options layered on top of presets ────────────────────────────
 
+/**
+ * Mirrors the full shape of `gather_config_from_ui()` in tunet.py so the web
+ * form reaches parity with the desktop. Most fields are optional — when a
+ * field is `undefined`, buildConfig() falls back to the preset default (or
+ * the base/base.yaml default).
+ */
 export interface AdvancedOverrides {
-  model_size_dims?: number
-  resolution?:      number
-  batch_size?:      number
-  max_steps?:       number
-  loss?:            Preset['training']['loss']
-  lr?:              number
-  progressive_resolution?: boolean
+  // Model
+  model_size_dims?:  number
+  model_type?:       'unet' | 'msrn'
+  recurrence_steps?: number
+
+  // Patches
+  resolution?:       number
+  overlap_factor?:   number
+  // 'auto' resolves at submit time based on the picked sample's file extension
+  // (.exr → linear; everything else → sRGB). buildConfig() expects this to be
+  // resolved by the caller; passing 'auto' through unchanged would let it
+  // leak into the YAML config that tunet doesn't understand.
+  color_space?:      'auto' | 'srgb' | 'linear'
+
+  // Optim
+  loss?:             Preset['training']['loss']
+  lr?:               number
+  lr_scheduler?:     'none' | 'cosine' | 'plateau'
+  lambda_lpips?:     number
+  l1_weight?:        number
+  l2_weight?:        number
+  lpips_weight?:     number
+  use_amp?:          boolean
+
+  // Schedule
+  batch_size?:                number   // 0 = auto-batch
+  iterations_per_epoch?:      number
+  max_steps?:                 number
+  progressive_resolution?:    boolean
+
+  // Mask
+  use_mask_loss?:        boolean
+  mask_weight?:          number
+  use_mask_input?:       boolean
+  use_auto_mask?:        boolean
+  auto_mask_gamma?:      number
+  skip_empty_patches?:   boolean
+  skip_empty_threshold?: number
+
+  // Saving
+  keep_last_checkpoints?: number
+
+  // Logging
+  log_interval?:          number
+  preview_batch_interval?: number
+  preview_refresh_rate?:   number
+
+  // Early stopping
+  es_enabled?:  boolean
+  es_patience?: number
+  es_stop?:     boolean
+
+  // Auto export
+  auto_export_interval?: number
+  auto_export_flame?:    boolean
+  auto_export_nuke?:     boolean
+
+  // Augmentations — each is null/undefined when disabled, an object when enabled
+  augs?: AugConfig
+}
+
+export interface AugConfig {
+  hflip?:  { p: number }
+  affine?: {
+    p: number
+    scale_min: number; scale_max: number
+    translate_min: number; translate_max: number
+    rotate_min: number; rotate_max: number
+    shear_min: number; shear_max: number
+    keep_ratio: boolean
+  }
+  gamma?: { p: number; gamma_min: number; gamma_max: number }
+  color?: {
+    p: number
+    brightness_min: number; brightness_max: number
+    contrast_min: number; contrast_max: number
+    saturation_min: number; saturation_max: number
+  }
 }
 
 export interface JobInputs {
@@ -119,6 +196,27 @@ export interface JobInputs {
   val_src_dir?:   string | null
   val_dst_dir?:   string | null
   finetune_from?: string | null  // path to .pth (relative to /input)
+}
+
+/**
+ * Resolve the user's color-space choice to a concrete 'srgb' | 'linear'.
+ * tunet only branches on `is_linear = (color_space == 'linear')` (see
+ * inference.py:132 and train.py:152), so any non-linear value collapses to
+ * sRGB at the training side anyway. We pick explicitly here so the YAML
+ * config is honest about what got selected.
+ *
+ * 'auto' picks based on the picked sample's file extension when known; if
+ * `sampleExt` is null/undefined (e.g. user supplied manual ShareSync paths),
+ * we fall back to sRGB since we can't see what's on disk.
+ */
+export function resolveColorSpace(
+  choice: 'auto' | 'srgb' | 'linear' | undefined,
+  sampleExt: string | null | undefined,
+): 'srgb' | 'linear' {
+  if (choice === 'srgb' || choice === 'linear') return choice
+  // 'auto' or undefined falls through here.
+  if (sampleExt && sampleExt.toLowerCase() === '.exr') return 'linear'
+  return 'srgb'
 }
 
 /**
@@ -132,55 +230,144 @@ export function buildConfig(
   inputs:    JobInputs,
   overrides: AdvancedOverrides = {},
 ): Record<string, unknown> {
+  // Resolve common values with fallbacks
+  const useAutoMask = overrides.use_auto_mask ?? preset.mask.use_auto_mask
+  const loss        = overrides.loss          ?? preset.training.loss
+  const useMaskLoss     = overrides.use_mask_loss     ?? false
+  const useMaskInput    = overrides.use_mask_input    ?? false
+  const skipEmptyPatch  = overrides.skip_empty_patches ?? preset.skip_empty_patches
+  const progressiveRes  = overrides.progressive_resolution ?? preset.progressive_resolution
+
   return {
     data: {
       src_dir:        inputs.src_dir,
       dst_dir:        inputs.dst_dir,
       output_dir:     inputs.output_dir,
-      resolution:     overrides.resolution ?? preset.data.resolution,
-      overlap_factor: preset.data.overlap_factor,
-      color_space:    'srgb',
+      resolution:     overrides.resolution     ?? preset.data.resolution,
+      overlap_factor: overrides.overlap_factor ?? preset.data.overlap_factor,
+      color_space:    resolveColorSpace(overrides.color_space, undefined),
       mask_dir:       null,
       val_src_dir:    inputs.val_src_dir ?? null,
       val_dst_dir:    inputs.val_dst_dir ?? null,
     },
     mask: {
-      use_mask_loss:   false,
-      mask_weight:     10.0,
-      use_mask_input:  false,
-      use_auto_mask:   preset.mask.use_auto_mask,
-      auto_mask_gamma: preset.mask.auto_mask_gamma ?? 1.0,
+      use_mask_loss:        useMaskLoss,
+      mask_weight:          overrides.mask_weight ?? 10.0,
+      use_mask_input:       useMaskInput,
+      use_auto_mask:        useAutoMask,
+      auto_mask_gamma:      overrides.auto_mask_gamma ?? preset.mask.auto_mask_gamma ?? 1.0,
+      skip_empty_patches:   skipEmptyPatch,
+      skip_empty_threshold: overrides.skip_empty_threshold ?? 3.0,
     },
     model: {
       model_size_dims:  overrides.model_size_dims ?? preset.model.model_size_dims,
-      model_type:       preset.model.model_type,
-      ...(preset.model.recurrence_steps !== undefined ? {
-        recurrence_steps: preset.model.recurrence_steps,
-      } : {}),
+      model_type:       overrides.model_type      ?? preset.model.model_type,
+      ...(overrides.recurrence_steps !== undefined
+          ? { recurrence_steps: overrides.recurrence_steps }
+          : preset.model.recurrence_steps !== undefined
+          ? { recurrence_steps: preset.model.recurrence_steps }
+          : {}),
     },
     training: {
       finetune_from:        inputs.finetune_from ?? null,
-      iterations_per_epoch: preset.training.iterations_per_epoch,
-      batch_size:           overrides.batch_size ?? 2,
+      iterations_per_epoch: overrides.iterations_per_epoch ?? preset.training.iterations_per_epoch,
+      batch_size:           overrides.batch_size ?? 2,   // 0 = auto in train.py
       lr:                   overrides.lr ?? preset.training.lr,
-      lr_scheduler:         'none',
-      loss:                 overrides.loss ?? preset.training.loss,
-      lambda_lpips:         preset.training.lambda_lpips,
-      use_amp:              false,
-      ...(preset.training.l1_weight   !== undefined ? { l1_weight:   preset.training.l1_weight   } : {}),
-      ...(preset.training.l2_weight   !== undefined ? { l2_weight:   preset.training.l2_weight   } : {}),
-      ...(preset.training.lpips_weight !== undefined ? { lpips_weight: preset.training.lpips_weight } : {}),
-      ...(overrides.max_steps !== undefined && overrides.max_steps > 0 ? { max_steps: overrides.max_steps } : {}),
-      ...(overrides.progressive_resolution !== undefined
-        ? { progressive_resolution: overrides.progressive_resolution }
-        : preset.progressive_resolution
-        ? { progressive_resolution: true }
-        : {}),
+      lr_scheduler:         overrides.lr_scheduler ?? 'none',
+      loss,
+      lambda_lpips:         overrides.lambda_lpips ?? preset.training.lambda_lpips,
+      // AMP defaults to on — matches base/base.yaml and the desktop app
+      // (training_tab.py:293). Almost no quality impact and ~2× faster on
+      // any Tensor-core GPU (T4 / A10 / L4 / L40S / RTX PRO). Users on
+      // ancient cards without TC support won't see the speedup but won't
+      // see harm either; AMP gracefully degrades.
+      use_amp:              overrides.use_amp ?? true,
+      ...(loss === 'weighted' ? {
+        l1_weight:    overrides.l1_weight   ?? preset.training.l1_weight   ?? 1.0,
+        l2_weight:    overrides.l2_weight   ?? preset.training.l2_weight   ?? 0.0,
+        lpips_weight: overrides.lpips_weight ?? preset.training.lpips_weight ?? 0.1,
+      } : {}),
+      ...(overrides.max_steps !== undefined && overrides.max_steps > 0
+          ? { max_steps: overrides.max_steps } : {}),
+      ...(progressiveRes ? { progressive_resolution: true } : {}),
     },
     logging: {
-      preview_batch_interval: 0,   // disabled by default; presets can re-enable later
+      log_interval:           overrides.log_interval           ?? 5,
+      // Default 50: low enough that the first preview lands within ~10-30s of
+      // training starting (vs. 6+ min at the train.py default of 500). The
+      // desktop app uses 35 — slightly more eager since the user is *watching*
+      // there. We pick 50 because every preview save also runs forward
+      // inference on the model, which costs real money on cloud GPUs.
+      // Users who want fewer (or none) can override in Advanced.
+      preview_batch_interval: overrides.preview_batch_interval ?? 50,
+      preview_refresh_rate:   overrides.preview_refresh_rate   ?? 5,
+    },
+    saving: {
+      keep_last_checkpoints: overrides.keep_last_checkpoints ?? 4,
+    },
+    early_stopping: {
+      enabled:  overrides.es_enabled  ?? false,
+      patience: overrides.es_patience ?? 30,
+      stop:     overrides.es_stop     ?? false,
+    },
+    auto_export: {
+      interval: overrides.auto_export_interval ?? 0,
+      flame:    overrides.auto_export_flame    ?? false,
+      nuke:     overrides.auto_export_nuke     ?? false,
+    },
+    dataloader: {
+      num_workers: -1,
+      datasets: {
+        shared_augs: buildAugList(overrides.augs ?? {}),
+      },
     },
   }
+}
+
+/**
+ * Build the albumentations shared_augs list from the form's Aug toggles.
+ * Mirrors gather_config_from_ui()'s aug-construction logic in tunet.py.
+ */
+function buildAugList(augs: AugConfig): unknown[] {
+  const out: unknown[] = []
+  if (augs.hflip) {
+    out.push({ _target_: 'albumentations.HorizontalFlip', p: augs.hflip.p })
+  }
+  if (augs.affine) {
+    out.push({
+      _target_:           'albumentations.Affine',
+      scale:              [augs.affine.scale_min, augs.affine.scale_max],
+      translate_percent:  [augs.affine.translate_min, augs.affine.translate_max],
+      rotate:             [augs.affine.rotate_min, augs.affine.rotate_max],
+      shear:              [augs.affine.shear_min, augs.affine.shear_max],
+      interpolation:      2,
+      keep_ratio:         augs.affine.keep_ratio,
+      p:                  augs.affine.p,
+    })
+  }
+  if (augs.gamma) {
+    out.push({
+      _target_:    'albumentations.RandomGamma',
+      gamma_limit: [augs.gamma.gamma_min, augs.gamma.gamma_max],
+      p:           augs.gamma.p,
+    })
+  }
+  if (augs.color) {
+    out.push({
+      _target_:         'albumentations.RandomBrightnessContrast',
+      brightness_limit: [augs.color.brightness_min, augs.color.brightness_max],
+      contrast_limit:   [augs.color.contrast_min,   augs.color.contrast_max],
+      p:                augs.color.p,
+    })
+    out.push({
+      _target_:         'albumentations.HueSaturationValue',
+      hue_shift_limit:  0,
+      sat_shift_limit:  [augs.color.saturation_min, augs.color.saturation_max],
+      val_shift_limit:  0,
+      p:                augs.color.p,
+    })
+  }
+  return out
 }
 
 // ── Cost estimate ────────────────────────────────────────────────────────────
@@ -219,34 +406,160 @@ export function pricePerHour(sku: string): number {
 }
 
 /**
- * Rough wall-clock estimate for a training run. Uses crude T/Step assumptions
- * by GPU. The user can override `estimated_hours` in the form.
+ * Steps recommendation based on dataset size, calibrated against Foundry
+ * CopyCat's published examples and practitioner guides:
  *
- * Returns hours.
+ *   - learn.foundry.com `cc-train.html`: their canonical example is 10,000
+ *     epochs over 6 frames with batch 4 → 15,000 steps. That's the
+ *     small-shot sweet spot.
+ *   - aitorecheveste.com (CopyCat practitioner guide): 15,000–30,000 steps
+ *     from-scratch on small datasets; 5,000–15,000 with pretrained weights.
+ *   - keheka.com: 10,000 epochs is the suggested "good starting point"
+ *     baseline; higher for larger datasets.
+ *
+ * Translating those into per-frame-count tiers — most users converge before
+ * the upper tiers; this is the "would not be surprised if it ran this long"
+ * number, not a target. tunet's `max_steps=0` (run until stopped) is the
+ * usual mode, so this is purely for estimating a *typical* converged run
+ * for the cost preview.
+ */
+export function recommendedStepsForPairs(pairs: number): number {
+  if (pairs <= 15)   return 15_000   // matches Foundry's 6-frame example
+  if (pairs <= 60)   return 30_000   // small/medium shot
+  if (pairs <= 200)  return 50_000   // typical shot
+  return 80_000                      // long shot / dataset
+}
+
+/**
+ * Per-step time-multiplier from training settings. 1.0 = baseline UNet at
+ * model_size 64, batch 2, plain L1 loss. Values are educated guesses, not
+ * benchmarked — flagged in the UI as approximate. The shape comes from:
+ *
+ *   - model_size: roughly quadratic in channels for UNet (channels² scales
+ *     conv FLOPs); we cap the curve at 4× since memory pressure flattens
+ *     practical throughput.
+ *   - model_type=msrn: recurrent forward passes ~1.5× UNet at same size.
+ *   - loss=l1+lpips: extra VGG forward each step ~1.25×.
+ *   - loss=weighted: L1 + L2 + LPIPS forwards ~1.30×.
+ *   - batch_size: bigger batch packs more samples per step but the step
+ *     itself is longer; we charge √(bs/2) so the user sees *some* effect
+ *     of changing batch but not the full linear term (training-wise the
+ *     larger batch reaches convergence in fewer total samples).
+ */
+function settingsMultiplier(opts: {
+  model_size_dims?: number
+  model_type?:      'unet' | 'msrn'
+  loss?:            Preset['training']['loss']
+  batch_size?:      number
+}): number {
+  const dims = opts.model_size_dims ?? 64
+  const sizeMult = Math.min(4, (dims / 64) ** 2)
+
+  let mult = sizeMult
+  if (opts.model_type === 'msrn') mult *= 1.5
+  if (opts.loss === 'l1+lpips')   mult *= 1.25
+  if (opts.loss === 'weighted')   mult *= 1.30
+  // bce+dice is mask-only and cheap — no penalty.
+
+  const bs = opts.batch_size && opts.batch_size > 0 ? opts.batch_size : 2
+  mult *= Math.sqrt(bs / 2)
+
+  return mult
+}
+
+/**
+ * Baseline steps/sec for a GPU at the reference settings (UNet, model_size
+ * 64, 512px, batch 2, L1 loss). These numbers are NOT benchmarked — they
+ * sit on the optimistic end of throughput so the cost estimate doesn't
+ * underbid reality too badly. The estimate UI flags them as approximate.
+ *
+ * If you later get real benchmark data, replace these and tighten the
+ * confidence band in EstimateRange below.
+ */
+function baselineStepsPerSec(sku: string): number {
+  if (sku.startsWith('g4dn'))      return 2     // T4
+  if (sku.startsWith('g5'))        return 4     // A10
+  if (sku.startsWith('g6e'))       return 8     // L40S
+  if (sku.startsWith('g6.'))       return 5     // L4
+  if (sku.startsWith('g7e'))       return 12    // RTX PRO 6000
+  return 4
+}
+
+export interface EstimateRange {
+  /** Most-likely runtime in hours (central point). */
+  hours:            number
+  /** Lower-bound (optimistic — well-tuned/converges early). */
+  lowHours:         number
+  /** Upper-bound (pessimistic — heavy augmentation, contention, etc.). */
+  highHours:        number
+  /** Steps the estimate is based on. Either user-supplied or recommended. */
+  steps:            number
+  /** True iff the user left max_steps=0 and we filled in a recommendation. */
+  stepsAreRecommended: boolean
+  /** stepsPerSec used at the central estimate. */
+  centralStepsPerSec:  number
+  /** Free-text breakdown shown under the "why this estimate?" disclosure. */
+  basis:            string[]
+}
+
+/**
+ * Bigger-lift training-time estimator. Returns a *range* with explanation,
+ * not a single number, so the UI can be honest about uncertainty.
+ *
+ * The central point uses baselineStepsPerSec × settingsMultiplier × resPenalty;
+ * low/high are 0.6×/1.7× the central. Those bounds bracket what real runs
+ * actually do — convergence-driven early stops on one end, augmentation
+ * heavy / data-loader-bound runs on the other.
+ */
+export function estimateTraining(opts: {
+  sku:               string
+  pairs:             number
+  resolution:        number
+  maxSteps?:         number
+  model_size_dims?:  number
+  model_type?:       'unet' | 'msrn'
+  loss?:             Preset['training']['loss']
+  batch_size?:       number
+}): EstimateRange {
+  const userSteps = opts.maxSteps && opts.maxSteps > 0 ? opts.maxSteps : 0
+  const steps = userSteps > 0 ? userSteps : recommendedStepsForPairs(opts.pairs)
+  const stepsAreRecommended = userSteps === 0
+
+  const baseline = baselineStepsPerSec(opts.sku)
+  const settings = settingsMultiplier(opts)
+  const resPenalty = (opts.resolution / 512) ** 2
+
+  // Central: throughput / settings / resolution
+  const centralStepsPerSec = baseline / (settings * resPenalty)
+  const centralSeconds = steps / centralStepsPerSec
+  const hours = centralSeconds / 3600
+
+  // ±band: keep wide. Real runs hit 0.5–2× of any heuristic prediction.
+  const lowHours  = hours * 0.6
+  const highHours = hours * 1.7
+
+  const basis: string[] = [
+    `${steps.toLocaleString()} steps${stepsAreRecommended ? ` (typical for ${opts.pairs} frames; max_steps=0)` : ` (max_steps cap)`}`,
+    `~${centralStepsPerSec.toFixed(1)} step/sec at these settings`,
+    `${opts.resolution}px (${resPenalty.toFixed(2)}× vs 512px)`,
+  ]
+  if (settings > 1.05) basis.push(`settings cost ${settings.toFixed(2)}×`)
+
+  return { hours, lowHours, highHours, steps, stepsAreRecommended, centralStepsPerSec, basis }
+}
+
+/**
+ * Back-compat: existing callers that just want a single hours number get
+ * the central estimate of estimateTraining(). Prefer estimateTraining()
+ * for new code so the UI can show the range.
  */
 export function estimateRuntimeHours(opts: {
   sku:        string
-  pairs:      number       // training pairs (frame count)
-  resolution: number       // 256/512/768/1024
-  maxSteps?:  number       // 0/undefined = run until stopped
+  pairs:      number
+  resolution: number
+  maxSteps?:  number
 }): number {
-  // Assume ~1500 steps per epoch (rough), 3-8 step/sec depending on GPU.
-  // Without max_steps, default to 15k steps for the estimate.
-  const steps = opts.maxSteps && opts.maxSteps > 0 ? opts.maxSteps : 15000
-
-  // step/sec heuristic by GPU class (very rough)
-  let stepsPerSec = 4
-  if (opts.sku.startsWith('g4dn'))      stepsPerSec = 2     // T4
-  else if (opts.sku.startsWith('g5'))   stepsPerSec = 4     // A10
-  else if (opts.sku.startsWith('g6.'))  stepsPerSec = 5     // L4
-  else if (opts.sku.startsWith('g6e'))  stepsPerSec = 8     // L40S
-  else if (opts.sku.startsWith('g7e'))  stepsPerSec = 12    // RTX PRO 6000
-
-  // Resolution penalty (512 → 1.0×, 1024 → 4.0×)
-  const resPenalty = (opts.resolution / 512) ** 2
-
-  const seconds = (steps * resPenalty) / stepsPerSec
-  return seconds / 3600
+  return estimateTraining(opts).hours
 }
 
 export function estimateCostUSD(opts: {
