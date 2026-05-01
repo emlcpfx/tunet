@@ -24,12 +24,13 @@ import { uploadStage } from '@/lib/upload-stage'
 
 interface GpuOption { key: string; sku: string; label: string; vram: string }
 
+// Same order as the new-job page (cheapest → fastest, A10 = recommended).
 const BENCH_GPUS: GpuOption[] = [
   { key: 't4',         sku: 'g4dn.xlarge', label: 'T4',           vram: '16GB' },
   { key: 'l4',         sku: 'g6.2xlarge',  label: 'L4',           vram: '24GB' },
   { key: 'a10',        sku: 'g5.xlarge',   label: 'A10',          vram: '24GB' },
-  { key: 'l40s',       sku: 'g6e.8xlarge', label: 'L40S',         vram: '48GB' },
   { key: 'rtxpro6000', sku: 'g7e.2xlarge', label: 'RTX PRO 6000', vram: '96GB' },
+  { key: 'l40s',       sku: 'g6e.8xlarge', label: 'L40S',         vram: '48GB' },
 ]
 
 interface RunState {

@@ -49,12 +49,20 @@ interface GpuOption {
 // `torchrun`), so DDP never engages — multi-GPU SKUs would just charge 4×/8×
 // for the same wall-clock as 1×. Re-add once we wire torchrun + benchmark
 // the actual scaling factor.
+// Order: cheapest → fastest. Badges reflect 2026-05-01 calibration:
+//   - T4   = cheapest hourly, but slow → only wins for tiny test runs
+//   - L4   = best $/k-step among the cheap tier; sweet spot for low budget
+//   - A10  = ~3× faster than T4 at 2.2× the price → best $-vs-time balance
+//   - L40S = no longer recommended; current eligible host (g6e.8xlarge) is
+//            +67% $/hr without a proportional speedup → ~3× $/k-step of A10
+//   - RTX PRO 6000 = absolute fastest, also pricey but cheaper per-step than L40S
+// See benchmark.md for the underlying numbers.
 const GPU_OPTIONS: GpuOption[] = [
   { key: 't4',         sku: 'g4dn.xlarge', label: 'T4',           vram: '16GB', badge: 'cheap'       },
   { key: 'l4',         sku: 'g6.2xlarge',  label: 'L4',           vram: '24GB'                       },
-  { key: 'a10',        sku: 'g5.xlarge',   label: 'A10',          vram: '24GB'                       },
-  { key: 'l40s',       sku: 'g6e.8xlarge', label: 'L40S',         vram: '48GB', badge: 'recommended' },
+  { key: 'a10',        sku: 'g5.xlarge',   label: 'A10',          vram: '24GB', badge: 'recommended' },
   { key: 'rtxpro6000', sku: 'g7e.2xlarge', label: 'RTX PRO 6000', vram: '96GB', badge: 'fastest'     },
+  { key: 'l40s',       sku: 'g6e.8xlarge', label: 'L40S',         vram: '48GB'                       },
 ]
 
 const RESOLUTIONS = [256, 384, 512, 768, 1024]
@@ -93,7 +101,7 @@ function NewJobPageInner() {
   const [valSrcDir, setValSrcDir] = useState<string>('')
   const [valDstDir, setValDstDir] = useState<string>('')
   const [preset,  setPreset]  = useState<PresetKey>('beauty')
-  const [gpuKey,  setGpuKey]  = useState<string>('l40s')
+  const [gpuKey,  setGpuKey]  = useState<string>('a10')
   const [advanced, setAdvanced] = useState<AdvancedOverrides>({})
   const [showAdvanced, setShowAdvanced] = useState(false)
   // Default to 0 (unlimited) — match the desktop app's "run until you stop
@@ -252,7 +260,9 @@ function NewJobPageInner() {
 
   // Derived
   const selectedPreset = PRESETS[preset]
-  const selectedGpu = GPU_OPTIONS.find(g => g.key === gpuKey) ?? GPU_OPTIONS[3]
+  // Fallback to A10 (the 2026-05-01 recommended pick) if the saved gpuKey
+  // doesn't match any current option (e.g. cloned from an old multi-GPU job).
+  const selectedGpu = GPU_OPTIONS.find(g => g.key === gpuKey) ?? GPU_OPTIONS.find(g => g.key === 'a10') ?? GPU_OPTIONS[0]
   const effectiveResolution = advanced.resolution ?? selectedPreset.data.resolution
   const effectiveModelSize  = advanced.model_size_dims ?? selectedPreset.model.model_size_dims
 

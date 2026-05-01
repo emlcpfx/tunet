@@ -461,8 +461,16 @@ function settingsMultiplier(opts: {
   loss?:            Preset['training']['loss']
   batch_size?:      number
 }): number {
+  // Model-size scaling: theoretical UNet conv FLOPs grow ~quadratic in
+  // channel count, but in practice fixed-size pieces (input conv, output
+  // conv, lpips backbone) dampen this. The 3090 reference run with dim=128
+  // measured 1.6 step/sec — back-fitting from a hypothetical baseline of
+  // ~6–8 step/sec suggests the effective penalty is closer to 1.7× per 2×
+  // dim, not the 4× a pure quadratic would predict. We use 1.7^log2(dims/64)
+  // which gives sizeMult(64)=1.0, sizeMult(128)≈1.7, sizeMult(256)≈2.9.
+  // See benchmark.md for the back-fit. Cap at 4× for absurdly large dims.
   const dims = opts.model_size_dims ?? 64
-  const sizeMult = Math.min(4, (dims / 64) ** 2)
+  const sizeMult = Math.min(4, Math.pow(1.7, Math.log2(dims / 64)))
 
   let mult = sizeMult
   if (opts.model_type === 'msrn') mult *= 1.5
@@ -478,22 +486,27 @@ function settingsMultiplier(opts: {
 
 /**
  * Baseline steps/sec for a GPU at the reference settings (UNet, model_size
- * 64, 512px, batch 2, L1 loss).
+ * 64, 512px, batch 2, L1 loss). Calibration data lives in benchmark.md.
  *
- * Calibration status:
- *   - T4   → measured 4.09 step/sec via /demo/benchmark on 2026-05-01
- *   - L4   → measured 6.23 step/sec via /demo/benchmark on 2026-05-01
- *   - A10, L40S, RTX PRO → still hardcoded guesses; benchmark cancelled or
- *     not yet run. These will be replaced by the matrix calibration page's
- *     "Calibrated baseline" block once measured.
+ * Calibration status (2026-05-01):
+ *   - T4   → 4.09 step/sec  (measured, synthetic PNG dataset)
+ *   - L4   → 6.79 step/sec  (measured, real EXR dataset — Porter_0408_REDO)
+ *   - A10  → 8.51 step/sec  (measured, real EXR dataset)
+ *   - L40S → guess          (not measured — Spark allow-list dropped the
+ *                              cheaper g6e.4xlarge variant; the eligible
+ *                              g6e.8xlarge is +67% $/hr but same GPU)
+ *   - RTX PRO 6000 → guess  (not measured for the same reason — only
+ *                              g7e.2xlarge available, +31% $/hr)
+ *
+ * Methodology + raw data: see ./benchmark.md
  */
 function baselineStepsPerSec(sku: string): number {
   if (sku.startsWith('g4dn'))      return 4.09  // T4 (measured 2026-05-01)
-  if (sku.startsWith('g6.'))       return 6.23  // L4 (measured 2026-05-01)
-  if (sku.startsWith('g5'))        return 5     // A10 (guess; measure soon)
-  if (sku.startsWith('g6e'))       return 9     // L40S (guess)
-  if (sku.startsWith('g7e'))       return 14    // RTX PRO 6000 (guess)
-  return 5
+  if (sku.startsWith('g6.'))       return 6.79  // L4 (measured 2026-05-01, real EXR)
+  if (sku.startsWith('g5'))        return 8.51  // A10 (measured 2026-05-01, real EXR)
+  if (sku.startsWith('g6e'))       return 12    // L40S (guess: A10 × ~1.4 based on TFLOPS ratio)
+  if (sku.startsWith('g7e'))       return 18    // RTX PRO 6000 Blackwell (guess: L40S × ~1.5)
+  return 6
 }
 
 export interface EstimateRange {
