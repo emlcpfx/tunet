@@ -41,7 +41,10 @@ import { packInputTarball } from '@/lib/spark-packer'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
-export const maxDuration = 120  // five sequential submits + five tarball packs
+// 45 sequential (pack + submit + upload) cycles. Tarball pack alone for a
+// 350 MB dataset takes ~5 s; submit ~2 s; upload to Spark ~10–30 s depending
+// on bandwidth. Budget ~30 s/cell so 45 cells fit under 800 s.
+export const maxDuration = 800
 
 // ── Reference benchmark settings ─────────────────────────────────────────────
 // resolution + batch_size are now per-job axes (cartesian-product across the
@@ -178,68 +181,85 @@ export async function POST(req: Request) {
   }
 
   // ── 2. Submit one job per (gpu × resolution × batch) cell ─────────────────
-  // Sequential submits keep the rate-limit happy and let us bail early on a
-  // bad token without leaving half the runs orphaned. Each cell gets a
-  // unique config (resolution + batch are baked into the YAML) and a
-  // descriptive job name like `bench-l40s-512px-bs4-<stamp>`.
+  // Each cell needs a unique tarball (config has the cell's res + batch
+  // baked in), but the staged dataset is shared. With 45 cells and a
+  // ~350 MB dataset, doing this serially blows past any reasonable HTTP
+  // timeout (~25 min wall). We pipeline with bounded concurrency so the
+  // server can pack one tarball while it uploads another.
   const runs: Run[] = []
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
   const filesBase = process.env.SPARK_FILES_BASE_URL?.replace(/\/+$/, '')
 
-  try {
-    for (const gpuKey of gpuKeys) {
-      const sku = GPU_TYPES[gpuKey].sku
-      for (const resolution of resolutions) {
-        for (const batchSize of batchSizes) {
-          const jobName = `bench-${gpuKey}-${resolution}px-bs${batchSize}-${stamp}`
-          const outputDir = `/output/${jobName}`
-
-          // Per-cell config: resolution + batch are the only varying axes.
-          const cfg = buildBenchmarkConfig(resolution, batchSize)
-          const data = cfg.data as Record<string, unknown>
-          const pack = await packInputTarball({
-            config:   { ...cfg, data: { ...data, output_dir: outputDir } },
-            stageDir,
-          })
-
-          const submitResp = await submitJob({
-            name:            jobName,
-            instanceType:    sku,
-            image:           DEFAULT_IMAGE,
-            command:         ['bash', '/input/spark_start.sh', outputDir, '/input/config.yaml'],
-            idleHoldSeconds: 0,
-            env: {
-              TUNET_JOB_NAME:   jobName,
-              TUNET_PRESET:     'benchmark',
-              TUNET_GPU:        gpuKey,
-              // Stash the cell coordinates so the dashboard / future tooling
-              // can pivot results without re-parsing the job name.
-              TUNET_BENCH_RES:   String(resolution),
-              TUNET_BENCH_BATCH: String(batchSize),
-              BENCHMARK_STEPS:  String(benchmarkSteps),
-              BENCHMARK_WARMUP: String(benchmarkWarmup),
-              ...(filesBase ? { TUNET_FILES_BASE: filesBase } : {}),
-            },
-          })
-
-          await uploadInputTarball(submitResp.input.uploadUrl, pack.buffer)
-
-          if (submitResp.output?.shareSyncBaseUrl) {
-            try {
-              writeDiscoveredFilesBase(submitResp.output.shareSyncBaseUrl, submitResp.output.shareSyncPath)
-            } catch { /* ignore */ }
-          }
-
-          runs.push({
-            gpuKey,
-            sku,
-            jobId: submitResp.jobId,
-            label: GPU_TYPES[gpuKey].label,
-            resolution,
-            batchSize,
-          })
-        }
+  // Build the full work list first so we can iterate it in a worker pool.
+  const cells: { gpuKey: GpuKey; sku: string; resolution: number; batchSize: number }[] = []
+  for (const gpuKey of gpuKeys) {
+    const sku = GPU_TYPES[gpuKey].sku
+    for (const resolution of resolutions) {
+      for (const batchSize of batchSizes) {
+        cells.push({ gpuKey, sku, resolution, batchSize })
       }
+    }
+  }
+
+  async function submitOne(cell: typeof cells[0]): Promise<Run> {
+    const jobName = `bench-${cell.gpuKey}-${cell.resolution}px-bs${cell.batchSize}-${stamp}`
+    const outputDir = `/output/${jobName}`
+
+    const cfg = buildBenchmarkConfig(cell.resolution, cell.batchSize)
+    const data = cfg.data as Record<string, unknown>
+    const pack = await packInputTarball({
+      config:   { ...cfg, data: { ...data, output_dir: outputDir } },
+      stageDir,
+    })
+
+    const submitResp = await submitJob({
+      name:            jobName,
+      instanceType:    cell.sku,
+      image:           DEFAULT_IMAGE,
+      command:         ['bash', '/input/spark_start.sh', outputDir, '/input/config.yaml'],
+      idleHoldSeconds: 0,
+      env: {
+        TUNET_JOB_NAME:    jobName,
+        TUNET_PRESET:      'benchmark',
+        TUNET_GPU:         cell.gpuKey,
+        TUNET_BENCH_RES:   String(cell.resolution),
+        TUNET_BENCH_BATCH: String(cell.batchSize),
+        BENCHMARK_STEPS:   String(benchmarkSteps),
+        BENCHMARK_WARMUP:  String(benchmarkWarmup),
+        ...(filesBase ? { TUNET_FILES_BASE: filesBase } : {}),
+      },
+    })
+
+    await uploadInputTarball(submitResp.input.uploadUrl, pack.buffer)
+
+    if (submitResp.output?.shareSyncBaseUrl) {
+      try {
+        writeDiscoveredFilesBase(submitResp.output.shareSyncBaseUrl, submitResp.output.shareSyncPath)
+      } catch { /* ignore */ }
+    }
+
+    return {
+      gpuKey:     cell.gpuKey,
+      sku:        cell.sku,
+      jobId:      submitResp.jobId,
+      label:      GPU_TYPES[cell.gpuKey].label,
+      resolution: cell.resolution,
+      batchSize:  cell.batchSize,
+    }
+  }
+
+  // Sequential submits. We tried concurrency=4 but it tripped Windows
+  // EBUSY: parallel tarball packs all `copyFile` from the same tunet repo
+  // source files, and Windows locks the source for the duration of the
+  // copy. Serial keeps things simple and the wall-clock penalty is small
+  // compared to Spark's submit + tarball upload time anyway.
+  //
+  // (If this becomes a bottleneck: build a single `tunet/` mirror up
+  // front, then do per-cell pack from that mirror in parallel.)
+  try {
+    for (const cell of cells) {
+      const r = await submitOne(cell)
+      runs.push(r)
     }
   } catch (e) {
     return new Response(
