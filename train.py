@@ -1151,6 +1151,21 @@ def train(config):
 
     # --- Training Loop Variables ---
     max_steps = getattr(config.training, 'max_steps', 0)
+    # Benchmark mode (cost-estimator calibration). When >0: run for
+    # `bench_warmup + bench_steps`, log a STEP_RATE line, and exit cleanly so
+    # tunet-web/spark-presets.ts can be re-baselined with real numbers.
+    bench_steps  = int(getattr(config, '_benchmark_steps',  0) or 0)
+    bench_warmup = int(getattr(config, '_benchmark_warmup', 20) or 20)
+    bench_t0 = None       # set when warmup completes
+    bench_step_t0 = None  # global_step value when warmup completes
+    # Normal-mode auto step-rate log: fire once per run after a short warmup
+    # so the dashboard / cost estimator can record real throughput without
+    # the user opting into --benchmark-steps. Set to True after we emit it.
+    auto_step_rate_logged = False
+    auto_step_rate_t0 = None
+    auto_step_rate_step0 = None
+    AUTO_STEP_RATE_WARMUP = 30   # discard first N steps (cold cache, JIT)
+    AUTO_STEP_RATE_WINDOW = 50   # then time the next M steps
     global_step = start_step; iter_epoch = config.training.iterations_per_epoch
     fixed_src, fixed_dst, fixed_mask = None, None, None; preview_count = 0
     val_fixed_src, val_fixed_dst = None, None; val_preview_count = 0
@@ -1325,6 +1340,76 @@ def train(config):
             avg_time = sum(batch_times) / len(batch_times) if batch_times else 0.0
 
             global_step += 1; final_global_step = global_step
+
+            # ── Benchmark mode: time the post-warmup window and exit. ──
+            # We measure wall-clock from the moment warmup ends (so cold-cache,
+            # JIT, autotune, lpips load all wash out) to the moment we hit
+            # `bench_warmup + bench_steps`. The reported STEP_RATE is what the
+            # tunet-web estimator should consume.
+            if bench_steps > 0:
+                steps_done = global_step - start_step
+                if steps_done == bench_warmup and bench_t0 is None:
+                    # Sync GPU work before starting the clock so we don't bake
+                    # queued kernels into the timed window.
+                    if device_type == 'cuda':
+                        try: torch.cuda.synchronize()
+                        except Exception: pass
+                    bench_t0 = time.time()
+                    bench_step_t0 = global_step
+                    if is_main_process():
+                        logging.info(f"[BENCH] warmup complete @ step {global_step}; timing next {bench_steps} steps")
+                if bench_t0 is not None and (global_step - bench_step_t0) >= bench_steps:
+                    if device_type == 'cuda':
+                        try: torch.cuda.synchronize()
+                        except Exception: pass
+                    elapsed = max(1e-6, time.time() - bench_t0)
+                    rate = (global_step - bench_step_t0) / elapsed
+                    if is_main_process():
+                        # Single-line, machine-greppable: dashboards / scripts
+                        # can grep `^STEP_RATE:` to pull this without parsing
+                        # the full log line.
+                        gpu_name = torch.cuda.get_device_name(0) if device_type == 'cuda' else 'cpu'
+                        bs = config.training.batch_size
+                        res = current_training_res
+                        logging.info(
+                            f"STEP_RATE: {rate:.3f} step/sec  "
+                            f"(steps={global_step - bench_step_t0}, elapsed={elapsed:.1f}s, "
+                            f"gpu={gpu_name!r}, model={config.model.model_type}, "
+                            f"size={config.model.model_size_dims}, res={res}, "
+                            f"batch={bs}, loss={config.training.loss})"
+                        )
+                        logging.info("[BENCH] complete — exiting.")
+                    training_successful = True
+                    break
+
+            # ── Normal-mode auto STEP_RATE log (fires once per run) ──
+            # Time the AUTO_STEP_RATE_WINDOW steps after AUTO_STEP_RATE_WARMUP
+            # and emit a single STEP_RATE line with the same shape as the
+            # explicit benchmark mode. This way every real run auto-feeds the
+            # calibration set without the user doing anything.
+            if not auto_step_rate_logged and bench_steps == 0 and is_main_process():
+                steps_done = global_step - start_step
+                if steps_done == AUTO_STEP_RATE_WARMUP and auto_step_rate_t0 is None:
+                    if device_type == 'cuda':
+                        try: torch.cuda.synchronize()
+                        except Exception: pass
+                    auto_step_rate_t0 = time.time()
+                    auto_step_rate_step0 = global_step
+                elif auto_step_rate_t0 is not None and (global_step - auto_step_rate_step0) >= AUTO_STEP_RATE_WINDOW:
+                    if device_type == 'cuda':
+                        try: torch.cuda.synchronize()
+                        except Exception: pass
+                    elapsed = max(1e-6, time.time() - auto_step_rate_t0)
+                    rate = (global_step - auto_step_rate_step0) / elapsed
+                    gpu_name = torch.cuda.get_device_name(0) if device_type == 'cuda' else 'cpu'
+                    logging.info(
+                        f"STEP_RATE: {rate:.3f} step/sec  "
+                        f"(steps={global_step - auto_step_rate_step0}, elapsed={elapsed:.1f}s, "
+                        f"gpu={gpu_name!r}, model={config.model.model_type}, "
+                        f"size={config.model.model_size_dims}, res={current_training_res}, "
+                        f"batch={config.training.batch_size}, loss={config.training.loss})"
+                    )
+                    auto_step_rate_logged = True
 
             if is_main_process() and global_step % config.logging.log_interval == 0:
                 current_lr = optimizer.param_groups[0]['lr']
@@ -1537,6 +1622,11 @@ if __name__ == "__main__":
     parser.add_argument('--training.lr', type=float, dest='training_lr', default=None, help='Override training learning_rate')
     parser.add_argument('--data.output_dir', type=str, dest='data_output_dir', default=None, help='Override data output_dir')
     parser.add_argument('--stop-file', type=str, default=None, help='Path to a stop-signal file; training exits gracefully when this file appears')
+    parser.add_argument('--benchmark-steps', type=int, default=0,
+        help='Run only N steps (after warmup), log STEP_RATE, and exit. Used to calibrate '
+             'the cost estimator in tunet-web. 0 = normal training. Typical: 200.')
+    parser.add_argument('--benchmark-warmup', type=int, default=20,
+        help='Warmup steps to discard before timing in --benchmark-steps mode (default 20).')
     cli_args = parser.parse_args()
 
     # --- Initial Config Loading Logging (Simple Console) ---
@@ -1698,6 +1788,12 @@ if __name__ == "__main__":
     # --- Store config file stem for checkpoint naming ---
     config._config_stem = os.path.splitext(os.path.basename(cli_args.config))[0]
     config._stop_file = cli_args.stop_file
+    # Benchmark mode: tunet-web's cost estimator currently uses unbenchmarked
+    # step/sec guesses by GPU class. --benchmark-steps short-circuits training
+    # after `warmup + N` steps and logs `STEP_RATE: X.Y step/sec` so we can
+    # calibrate baselineStepsPerSec() in spark-presets.ts with real data.
+    config._benchmark_steps = cli_args.benchmark_steps
+    config._benchmark_warmup = cli_args.benchmark_warmup
 
     # --- Start Training ---
     try: train(config)
