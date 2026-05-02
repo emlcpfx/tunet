@@ -1293,6 +1293,9 @@ def train(config):
     # --- Main Training Loop ---
     model.train()
     _pending_ckpt_thread: threading.Thread | None = None
+    # Bail-out counter for the safety hatch in the dataloader-next try/except
+    # below. Reset to 0 on every successful batch.
+    _consecutive_batch_errors = 0
     try:
         while True:
             _check_stop_file()
@@ -1338,8 +1341,28 @@ def train(config):
                             logging.error(f"Progressive: failed to recreate dataset at {current_training_res}px: {e}", exc_info=True)
 
             data_load_start = time.time()
+            # Safety hatch: if we keep getting empty batches / StopIterations,
+            # the dataloader is broken (dataset went empty mid-run, all-skipped
+            # patches, EBUSY on Windows, etc.). Rather than spin forever burning
+            # GPU minutes producing zero progress, count consecutive failures
+            # and bail out cleanly. (Real incident 2026-05-01: a stuck job
+            # logged StopIteration every step at ~100/sec for hours.)
             try: batch = next(dataloader_iter)
-            except Exception as e: logging.error(f"S{global_step}: Batch load error: {e}, skipping.", exc_info=True); global_step += 1; continue
+            except StopIteration:
+                logging.error(f"S{global_step}: dataloader exhausted permanently (StopIteration "
+                              f"escaped cycle() — likely dataset has zero usable slices). "
+                              f"Exiting to avoid an infinite zero-work loop.", exc_info=True)
+                break
+            except Exception as e:
+                _consecutive_batch_errors += 1
+                logging.error(f"S{global_step}: Batch load error #{_consecutive_batch_errors}: {e}, "
+                              f"skipping.", exc_info=True)
+                if _consecutive_batch_errors >= 100:
+                    logging.error(f"S{global_step}: 100 consecutive batch errors — bailing out "
+                                  f"to avoid burning compute on a broken dataloader.")
+                    break
+                global_step += 1; continue
+            _consecutive_batch_errors = 0  # reset on success
             if batch is None: logging.warning(f"S{global_step}: Skipped batch (collation error)."); global_step += 1; continue
             # Unpack batch (2-tuple or 3-tuple with mask/auto_mask)
             auto_mask_raw = None
