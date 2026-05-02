@@ -506,23 +506,29 @@ function resolutionPenalty(res: number): number {
  * benchmark.md.
  *
  * Calibration status (2026-05-02):
- *   - T4   → 4.46 step/sec  (cloud bench, real EXR dataset — Porter_0408_REDO)
- *   - L4   → 6.79 step/sec  (cloud bench, real EXR)
- *   - A10  → 8.51 step/sec  (cloud bench, real EXR — A10G silicon)
- *   - L40S → guess          (Spark allow-list dropped the cheaper
- *                              g6e.4xlarge variant; the eligible
- *                              g6e.8xlarge is +67% $/hr but same GPU)
- *   - RTX PRO 6000 → guess  (Blackwell — only g7e.2xlarge eligible, +31% $/hr)
+ *   - T4   → 4.46 step/sec  (cloud bench, real EXR — pre-torch.compile)
+ *   - L4   → 7.23 step/sec  (cloud bench, real EXR — torch.compile ENABLED;
+ *                              measured 6.39 with compile off, +13% with on)
+ *   - A10  → 8.51 step/sec  (cloud bench, real EXR — pre-torch.compile)
+ *   - L40S → guess          (g6e.8xlarge eligible, same GPU)
+ *   - RTX PRO 6000 → guess  (Blackwell, g7e.2xlarge eligible)
+ *
+ * NOTE: torch.compile (enabled by default on cloud since commit b1ed932,
+ * gated by Triton availability) gives ~13% per-step on L4. T4/A10
+ * baselines were measured *before* compile was wired in and have not
+ * been re-measured — production runs on those GPUs are likely 5–15%
+ * faster than the numbers below. The estimator therefore over-bids
+ * a bit on T4/A10/L40S/RTX PRO. Re-measure those when capacity allows.
  *
  * Local-only reference: RTX 3090 → 8.17 step/sec (matches business partner's
  * 1.62 step/s @ porter/512/bs2 to within 2% — calibration is reproducible).
  */
 function baselineStepsPerSec(sku: string): number {
-  if (sku.startsWith('g4dn'))      return 4.46  // T4 (measured 2026-05-02)
-  if (sku.startsWith('g6.'))       return 6.79  // L4 (measured 2026-05-02)
-  if (sku.startsWith('g5'))        return 8.51  // A10 (measured 2026-05-02; A10G variant)
+  if (sku.startsWith('g4dn'))      return 4.46  // T4 (measured 2026-05-02, pre-compile)
+  if (sku.startsWith('g6.'))       return 7.23  // L4 (measured 2026-05-02, compile-on)
+  if (sku.startsWith('g5'))        return 8.51  // A10 (measured 2026-05-02, pre-compile)
   if (sku.startsWith('g6e'))       return 12    // L40S (guess; A10 × ~1.4 from TFLOPS ratio)
-  if (sku.startsWith('g7e'))       return 18    // RTX PRO 6000 Blackwell (guess; L40S × ~1.5)
+  if (sku.startsWith('g7e'))       return 18    // RTX PRO 6000 Blackwell (guess)
   return 6
 }
 

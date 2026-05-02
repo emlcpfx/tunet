@@ -262,8 +262,11 @@ Priority order:
 3. **Resolution sweep at 1024px** to validate the empirical
    `0.13 + 0.87 × (res/512)²` fit at the high end. Need a shot
    ≥ 1024×1024 (Porter is 1000×1000, so it's invalid for 1024 patches).
-4. **`torch.compile` validation on cloud Linux Spark agents** — code
-   is in place (commit `b1ed932`), measurement still TBD.
+4. **~~`torch.compile` validation on cloud Linux Spark agents~~** — done
+   2026-05-02. L4/512/bs2 compile-on=7.23, compile-off=6.39 → **+13%**.
+   Re-measure T4/A10 baselines (their numbers in `baselineStepsPerSec`
+   predate the compile commit) so the estimator gets the production
+   speedup credited too.
 5. **Loss multipliers** — submit one cell at `l1+lpips`, one at
    `weighted`, compare to L1 baseline at the same GPU/res/batch. Right
    now those multipliers are theoretical (1.25× and 1.30×), couldn't
@@ -338,6 +341,22 @@ on these GPUs.
 Note: the A10G in the cloud is the AWS variant of the A10, slightly
 different silicon. Treat as A10 for cost-model purposes.
 
+### 2026-05-02 — torch.compile A/B on Spark (L4 / 512px / bs=2 / Porter EXR)
+
+Same cell, run twice with `TUNET_DISABLE_COMPILE` env var differing.
+50-step warmup (extra-long to absorb torch.compile's ~1–3 min compile-
+on-first-step cost), 400 timed steps.
+
+| Variant | step/sec | samples/sec | Δ vs eager |
+|---|---|---|---|
+| compile-off (eager) | 6.39 | 12.8 | baseline |
+| **compile-on (compiled)** | **7.23** | **14.5** | **+13.1%** |
+
+L4 baseline in `baselineStepsPerSec` updated to 7.23 (was 6.79). T4
+and A10 baselines were measured pre-compile and have not yet been
+re-measured — production runs on those will be ~5–15% faster than the
+estimator credits, until we re-benchmark.
+
 ### 2026-04-09 — RTX 3090 (consumer, Windows), Porter_0408_REDO converged run
 - Config: `model_size_dims=128`, `model_type=msrn`, `resolution=512`,
   `batch_size=2`, `loss=l1+lpips`, `use_auto_mask=true`,
@@ -364,7 +383,7 @@ individually with `git revert`.
 |---|---|---|---|---|
 | 1 | Dataloader workers + prefetch | **N/A locally** | — | `train.py:635` forces `num_workers=0` on Windows (spawn-multiprocessing hang fix). Linux Spark agents already auto-detect optimal worker count via `auto_detect_num_workers()`. No commit. |
 | 2 | Fused AdamW (CUDA) | **+1.5 to +3.3%** | `97de4d7` | `optim.AdamW(..., fused=True)`. Free win, no risk. Biggest at small workloads where the optimizer step is a bigger fraction of iter time. |
-| 3 | `torch.compile(mode='reduce-overhead')` | **Not validated locally** | `b1ed932` | Can't run on Windows — Triton has no wheel. Implementation probes for `import triton` and skips cleanly when absent. Should help on cloud Linux Spark agents (Triton is included in their PyTorch wheel). Published estimates: 5–25% at small workloads. |
+| 3 | `torch.compile(mode='reduce-overhead')` | **+13.1% on cloud L4** (validated 2026-05-02) | `b1ed932` | Can't run locally on Windows — Triton has no wheel. On cloud, L4/512/bs2 measured 6.39 step/s eager, 7.23 step/s compiled. Cost estimator's L4 baseline updated to reflect this. T4/A10 not yet re-measured. |
 | 4 | `channels_last` memory format | **REGRESSION −40 to −64%** | reverted | UNet has GroupNorm + skip-connection `cat` ops that don't have NHWC kernels. PyTorch falls back to NCHW at every such op, paying memory-layout conversion cost on every layer. Mixed-format graphs are strictly worse. |
 
 ### Opt 2 measured impact (RTX 3090, ref scenario, Porter EXR)

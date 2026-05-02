@@ -65,13 +65,33 @@ fallback in case of corrupted resume).
 
 **Commit `97de4d7`.**
 
-### Opt 3 — `torch.compile(mode='reduce-overhead')` — APPLIED but UNVALIDATED ⚠️
+### Opt 3 — `torch.compile(mode='reduce-overhead')` — APPLIED and VALIDATED on cloud ✅ +13.1%
 
 The biggest potential win — published torch docs claim 5–25% on small
 models where kernel-launch overhead dominates. Our calibration data
 showed exactly that profile (resolution penalty has a ~13% fixed
 overhead floor; the small-res benchmark over-predicted by 1.6×, classic
 kernel-launch-bound symptom).
+
+**Cloud A/B (2026-05-02, L4 / 512px / bs=2 / Porter EXR / 50-step
+warmup, 400 timed steps):**
+
+| variant | step/sec | Δ |
+|---|---|---|
+| compile-off (eager) | 6.39 | baseline |
+| compile-on (compiled) | **7.23** | **+13.1%** |
+
+Right in the middle of the published expectation range. At smaller
+resolutions and dim sizes the speedup should be larger (more kernel-
+launch overhead to fuse away); at 1024px or larger models it'll shrink
+toward 5%. The L4 baseline in `baselineStepsPerSec` was bumped from 6.79
+to 7.23 to reflect that cloud production runs default to compile-on.
+
+T4/A10/L40S/RTX PRO baselines were measured *before* the
+`b1ed932` commit landed and have not yet been re-measured. They will
+likely benefit by 5–15% in production but the cost estimator currently
+doesn't credit that — over-bidding by a similar margin until we
+re-benchmark each.
 
 **Cannot validate locally:** Windows + standard CUDA PyTorch wheel
 doesn't ship Triton (no Triton wheel exists for Windows). Without

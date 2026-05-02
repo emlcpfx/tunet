@@ -20,9 +20,11 @@ from statistics import median
 
 REPO = Path(__file__).resolve().parent.parent
 JSONL = REPO / "scripts" / "bench_results.jsonl"
-# Committed cloud snapshot — survives across machines (the per-machine
-# bench_results.jsonl is gitignored). Loaded automatically.
-CLOUD_SNAPSHOT = REPO / "scripts" / "bench_cloud_2026-05-01.jsonl"
+# Committed cloud snapshots — survive across machines (the per-machine
+# bench_results.jsonl is gitignored). All matching scripts/bench_cloud_*.jsonl
+# files load automatically. Add a new file when capturing new measurements
+# instead of editing prior ones.
+CLOUD_SNAPSHOT_GLOB = "bench_cloud_*.jsonl"
 
 # Cloud measurements live in scripts/bench_cloud_2026-05-01.jsonl —
 # committed alongside this script so they're available across machines
@@ -48,17 +50,61 @@ def main():
                     help="Append cloud measurements into bench_results.jsonl too")
     args = ap.parse_args()
 
-    rows = filter_valid(load_jsonl(JSONL))
-    print(f"Loaded {len(rows)} valid local cells from {JSONL.name}")
-    snapshot_rows = filter_valid(load_jsonl(CLOUD_SNAPSHOT))
-    if snapshot_rows:
-        # De-dupe in case bench_results.jsonl already had the cloud rows
-        # appended (older invocations of --include-cloud).
-        seen = {(r["gpu"], r["resolution"], r["batch"], r["scenario"]) for r in rows}
-        for r in snapshot_rows:
+    # Local jsonl: per-machine, accumulates over time. Includes A/B labels
+    # that we want to filter — only keep the unlabeled / "baseline-pre-opt"
+    # cells when fitting the current cost model. opt2/opt3/opt4 sweeps all
+    # share the same (gpu, res, batch, scenario) keys but reflect *changes*
+    # to train.py we want to A/B against the baseline, not feed into the fit.
+    raw_local = filter_valid(load_jsonl(JSONL))
+    skip_labels = {'opt2-fused-adamw', 'opt3-torch-compile', 'opt3-test1', 'opt3-no-triton-fallback', 'opt4-test', 'opt4-test-512'}
+    local_rows = [r for r in raw_local if r.get('label') not in skip_labels]
+    if len(raw_local) != len(local_rows):
+        print(f"Filtered {len(raw_local) - len(local_rows)} A/B-labeled rows from {JSONL.name} (kept {len(local_rows)})")
+
+    # Per-key keep the latest timestamp so opt-experiment rows that snuck
+    # past the label filter (or runs of the same cell at different times)
+    # don't double-count the GPU.
+    by_key: dict = {}
+    for r in local_rows:
+        k = (r["gpu"], r["resolution"], r["batch"], r["scenario"])
+        if k not in by_key or (r.get("ts", "") > by_key[k].get("ts", "")):
+            by_key[k] = r
+    rows = list(by_key.values())
+    print(f"Loaded {len(rows)} dedup'd cells from {JSONL.name}")
+
+    # Cloud snapshots: committed, authoritative. Newer files override older
+    # for the same key (e.g. if we re-measure L4/512/bs2 with torch.compile
+    # enabled, the 05-02 entry replaces the 05-01 one since current code
+    # has compile on by default).
+    seen = set(by_key.keys())
+    snapshot_files = sorted((REPO / "scripts").glob(CLOUD_SNAPSHOT_GLOB))
+    for f in snapshot_files:
+        snap_rows = filter_valid(load_jsonl(f))
+        # Within a single snapshot file, prefer torch_compile=true rows over
+        # compile=false (since cloud now defaults to compile-on); also prefer
+        # later timestamps. Build the snapshot's own per-key map first.
+        snap_by_key: dict = {}
+        for r in snap_rows:
             k = (r["gpu"], r["resolution"], r["batch"], r["scenario"])
-            if k not in seen: rows.append(r); seen.add(k)
-        print(f"Loaded {len(snapshot_rows)} cloud cells from {CLOUD_SNAPSHOT.name}")
+            existing = snap_by_key.get(k)
+            if not existing:
+                snap_by_key[k] = r
+            else:
+                # Prefer compile-on
+                if r.get("torch_compile") and not existing.get("torch_compile"):
+                    snap_by_key[k] = r
+                elif r.get("ts", "") > existing.get("ts", ""):
+                    snap_by_key[k] = r
+        added = 0
+        for k, r in snap_by_key.items():
+            if k not in seen:
+                rows.append(r); seen.add(k); added += 1
+            else:
+                # Replace
+                for i, existing in enumerate(rows):
+                    if (existing["gpu"], existing["resolution"], existing["batch"], existing["scenario"]) == k:
+                        rows[i] = r; break
+        print(f"Loaded {len(snap_by_key)} cells from {f.name} ({added} new, {len(snap_by_key)-added} updates)")
 
     if args.include_cloud:
         # Legacy: was for piping CLOUD literal into JSONL. The snapshot
