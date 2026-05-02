@@ -65,6 +65,13 @@ export function derivedStatus(j: SparkJob): string {
   if (j.status !== 'provisioning') return j.status
   if (j.started_running_at) return 'running'
 
+  // Cancel-pending should never display as 'running' — the user asked for
+  // it to stop, surfacing it as running is dishonest. Real incident
+  // 2026-05-02: a job sat in provisioning for 14h with cancel_requested_at
+  // set, but the >8min "assume running" fallback below promoted it on the
+  // dashboard. Force the underlying status through.
+  if (j.cancel_requested_at) return j.status
+
   const heartbeat = j.last_agent_heartbeat_at ? Date.parse(j.last_agent_heartbeat_at) : 0
   const provStart = j.started_provisioning_at ? Date.parse(j.started_provisioning_at) : 0
   const now = Date.now()
@@ -80,9 +87,12 @@ export function derivedStatus(j: SparkJob): string {
     // Spark sometimes never sets `last_agent_heartbeat_at` even after the
     // container is up and emitting logs. The provisioning phase tops out at
     // ~3-4 min in practice (image pull is the slow part); past 8 min with no
-    // explicit heartbeat we assume it's running. Conservative threshold so
-    // genuinely-stuck jobs still show provisioning.
-    if (provisioningFor > 8 * 60_000) {
+    // explicit heartbeat we infer it's running — unless we've been
+    // "provisioning without a heartbeat" so long that the container almost
+    // certainly never came up. The Spark watchdog reaps stuck-in-provisioning
+    // jobs around 30 min, so 25 min is a safe upper bound: past that, the
+    // job is more likely AWS-capacity-stuck than agent-without-heartbeat.
+    if (provisioningFor > 8 * 60_000 && provisioningFor < 25 * 60_000) {
       return 'running'
     }
   }
