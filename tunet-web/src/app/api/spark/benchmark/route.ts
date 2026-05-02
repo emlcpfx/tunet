@@ -86,6 +86,19 @@ interface Body {
    * what production runs see. Must contain at least src/ and dst/.
    */
   stageId?:         string
+  /**
+   * Extra env vars to set on every submitted cell. Used for A/B-style
+   * experiments — e.g. submit one cell with `{TUNET_DISABLE_COMPILE: '1'}`
+   * and one without to measure torch.compile's impact. We deliberately
+   * keep this opaque (no allow-list) since it's an admin/dev surface.
+   */
+  extraEnv?:        Record<string, string>
+  /**
+   * Optional name suffix appended to the per-cell job name. Lets A/B
+   * runs distinguish the same (gpu, res, batch) cell run twice with
+   * different env. e.g. nameSuffix='compile-on' → bench-l4-512px-bs2-compile-on-{stamp}
+   */
+  nameSuffix?:      string
 }
 
 interface Run {
@@ -202,7 +215,8 @@ export async function POST(req: Request) {
   }
 
   async function submitOne(cell: typeof cells[0]): Promise<Run> {
-    const jobName = `bench-${cell.gpuKey}-${cell.resolution}px-bs${cell.batchSize}-${stamp}`
+    const suffix = body.nameSuffix ? `-${body.nameSuffix}` : ''
+    const jobName = `bench-${cell.gpuKey}-${cell.resolution}px-bs${cell.batchSize}${suffix}-${stamp}`
     const outputDir = `/output/${jobName}`
 
     const cfg = buildBenchmarkConfig(cell.resolution, cell.batchSize)
@@ -227,6 +241,9 @@ export async function POST(req: Request) {
         BENCHMARK_STEPS:   String(benchmarkSteps),
         BENCHMARK_WARMUP:  String(benchmarkWarmup),
         ...(filesBase ? { TUNET_FILES_BASE: filesBase } : {}),
+        // Caller-supplied extras spread last so they can override anything
+        // above if needed (e.g. tweak BENCHMARK_STEPS per-cell).
+        ...(body.extraEnv ?? {}),
       },
     })
 
