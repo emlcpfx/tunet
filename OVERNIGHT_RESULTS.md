@@ -177,8 +177,10 @@ the cross-machine snapshot.
    allow-list dropped `g6e.4xlarge` and `g7e.xlarge`; the eligible
    replacements (`g6e.8xlarge`, `g7e.2xlarge`) are +67% / +31% per hour
    for the same GPU. Numbers in `baselineStepsPerSec` for these are still
-   educated guesses. Re-run the cloud benchmark once Spark capacity is
-   loose enough to actually schedule them.
+   educated guesses. Re-run the cloud benchmark once we have a free node
+   slot (this account is capped at 2 concurrent nodes — a stuck job in
+   `provisioning` will eat one slot until Spark's watchdog reaps it,
+   effectively halving capacity).
 
 2. **1024px row of the matrix.** Porter dataset is 1000×1000 so 1024px
    patches can't be sampled (every file rejected). Need a ≥1024px shot to

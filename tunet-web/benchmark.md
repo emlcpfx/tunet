@@ -138,11 +138,17 @@ not loss plateau, so they underreport converged-run length.
    L40S (`g6e.4xlarge`) and RTX PRO 6000 (`g7e.xlarge`) were dropped;
    `g6e.8xlarge` and `g7e.2xlarge` are the eligible single-GPU equivalents
    but cost +67% / +31% per hour respectively.
-2. **Check your account concurrency limit.** Spark has a hard
-   provisioning timeout (~5 min). If you submit 45 jobs at once and the
-   account can only run ~3 concurrently, the rest will time out. Throttle
-   to ≤ 3 in flight at any time, or spread across resolutions/batches
-   serially.
+2. **Check your account concurrency limit.** Spark accounts have a
+   per-account node cap (this account: **2 concurrent nodes** as of
+   2026-05-02 — confirmed with Walt). If you submit N jobs at once,
+   only the first 2 get provisioning slots; the rest sit in `queued`
+   until Spark's `compute_provisioning_timeout_seconds` (~30 min) fires
+   and reaps them as "Provisioning timed out". This error message
+   *sounds* like AWS-out-of-capacity but is almost always the account
+   cap. Throttle to ≤ 2 in flight, or wait for one to finish before
+   sending the next. Stuck jobs (cancelled but still showing
+   `provisioning`) hold a slot until Spark's watchdog reaps them, so
+   one stuck job effectively halves your capacity.
 3. **Pick a dataset.** EXRs at the resolution you actually train at.
    `/demo/benchmark` defaults to a synthetic 1280×1280 PNG dataset;
    prefer real data for I/O realism.
@@ -266,9 +272,11 @@ Priority order:
    fit, never measured directly.
 
 The infrastructure is ready (`/demo/benchmark` does all of this); we just
-need to actually run it without tripping Spark's provisioning timeout.
-Submit ≤ 3 cells at a time, wait for them to finish, then submit the next
-batch.
+need to actually run it within the **account's 2-node concurrency cap**
+so jobs don't waitlist past Spark's provisioning timeout. Submit ≤ 2
+cells at a time, wait for the first batch to finish, then submit the
+next. Watch out for stuck/cancelled jobs holding slots — those eat one
+of the 2 concurrent allocations until Spark's watchdog reaps them.
 
 ---
 

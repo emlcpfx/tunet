@@ -91,7 +91,10 @@ export function derivedStatus(j: SparkJob): string {
     // "provisioning without a heartbeat" so long that the container almost
     // certainly never came up. The Spark watchdog reaps stuck-in-provisioning
     // jobs around 30 min, so 25 min is a safe upper bound: past that, the
-    // job is more likely AWS-capacity-stuck than agent-without-heartbeat.
+    // job is more likely waitlisted on the account's node-concurrency cap
+    // (Spark accounts have a per-account limit; if a stuck job is holding
+    // a slot, new jobs sit in `provisioning` until they time out) than
+    // an agent that came up but never reported a heartbeat.
     if (provisioningFor > 8 * 60_000 && provisioningFor < 25 * 60_000) {
       return 'running'
     }
