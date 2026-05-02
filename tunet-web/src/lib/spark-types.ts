@@ -102,6 +102,53 @@ export function derivedStatus(j: SparkJob): string {
   return j.status
 }
 
+/**
+ * Reasons a job is "stuck" — meaning it's holding an account-cap node slot
+ * without making progress, and the user probably wants to know about it.
+ *
+ * On this account (per Walt 2026-05-02): hard cap of 2 concurrent nodes.
+ * A stuck job effectively halves capacity until Spark's watchdog reaps it,
+ * which can take 30+ min. Surface these prominently so the user can
+ * decide whether to wait or email support.
+ */
+export type StuckReason =
+  | 'cancel-pending'      // cancel_requested_at set but not terminal after >5 min
+  | 'provisioning-stall'  // no started_running_at, no heartbeat, >15 min in provisioning
+
+/**
+ * Returns a stuck reason if the job is in a problematic holding state, or
+ * null if it's healthy/terminal/young-enough-to-be-fine.
+ */
+export function jobStuckReason(j: SparkJob, now: number = Date.now()): StuckReason | null {
+  // Terminal jobs are never stuck — they're done, slot is free.
+  if (['succeeded', 'completed', 'failed', 'cancelled'].includes(j.status)) return null
+
+  // Cancel pending too long: user asked to stop, slot still occupied.
+  if (j.cancel_requested_at && !j.terminal_at) {
+    const cancelMs = Date.parse(j.cancel_requested_at)
+    if (!Number.isNaN(cancelMs) && (now - cancelMs) > 5 * 60_000) {
+      return 'cancel-pending'
+    }
+  }
+
+  // Provisioning stall: image pull caps at ~3-4 min, our derivedStatus
+  // gives the benefit of the doubt up to 25 min. Past 15 min in
+  // provisioning with no heartbeat AND no started_running_at, the job
+  // is genuinely waitlisted (account cap or AWS capacity) and not
+  // making progress.
+  if (j.status === 'provisioning'
+      && !j.started_running_at
+      && !j.last_agent_heartbeat_at
+      && j.started_provisioning_at) {
+    const provMs = Date.parse(j.started_provisioning_at)
+    if (!Number.isNaN(provMs) && (now - provMs) > 15 * 60_000) {
+      return 'provisioning-stall'
+    }
+  }
+
+  return null
+}
+
 export function jobLabel(j: SparkJob): string {
   // Spark API doesn't persist or return the submit `name`, so we resolve it
   // from a few fallbacks in priority order:

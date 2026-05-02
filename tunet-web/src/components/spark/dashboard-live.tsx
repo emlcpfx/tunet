@@ -13,7 +13,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
 import {
-  type SparkJob, ACTIVE_STATUSES, jobLabel, jobRuntimeMs, formatRuntime, derivedStatus,
+  type SparkJob, type StuckReason,
+  ACTIVE_STATUSES, jobLabel, jobRuntimeMs, formatRuntime, derivedStatus, jobStuckReason,
 } from '@/lib/spark-types'
 import { SparkStatusBadge } from '@/components/spark/status-badge'
 import { JobsTable } from '@/components/spark/jobs-table'
@@ -61,6 +62,16 @@ export function DashboardLive({ initialJobs }: DashboardLiveProps) {
   const totalRun  = jobs.length
   const completed = jobs.filter(j => j.status === 'completed').length
 
+  // Stuck-job detection: jobs that are holding an account-cap slot without
+  // making progress. Surfaced prominently because (1) they can block new
+  // submits via the 2-node concurrency cap, and (2) the cancel API is
+  // soft — it sets a flag the agent reads, but if the agent hasn't booted
+  // (provisioning-stall) there's no agent to read it. User has to wait
+  // for Spark's watchdog or email support. Either way they need to know.
+  const stuck = active
+    .map(j => ({ job: j, reason: jobStuckReason(j) }))
+    .filter((x): x is { job: SparkJob; reason: StuckReason } => x.reason !== null)
+
   return (
     <div className="space-y-6" data-tick={tick}>
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
@@ -86,6 +97,10 @@ export function DashboardLive({ initialJobs }: DashboardLiveProps) {
         <div className="px-3 py-2 bg-[#FFFBEB] border border-[#fde68a] rounded text-xs text-[#92400E]">
           Refresh failed: {pollError}
         </div>
+      )}
+
+      {stuck.length > 0 && (
+        <StuckJobsBanner stuck={stuck} onAfterAction={refresh} />
       )}
 
       {active.length > 0 && (
@@ -142,6 +157,99 @@ function ActiveJobCard({ job }: { job: SparkJob }) {
       </div>
     </Link>
   )
+}
+
+/**
+ * Warning banner for jobs that are holding an account-cap slot without
+ * progress (cancel-pending past 5 min, or in provisioning past 15 min
+ * without a heartbeat). Each entry shows the job, the reason, the elapsed
+ * time, and a "request cancel" button. The cancel API is soft (just sets
+ * a flag), so the button can be smashed multiple times and we surface
+ * how recently the request was made.
+ */
+function StuckJobsBanner({
+  stuck, onAfterAction,
+}: {
+  stuck: { job: SparkJob; reason: StuckReason }[]
+  onAfterAction: () => void
+}) {
+  const [busy, setBusy] = useState<string | null>(null)
+
+  async function requestCancel(jobId: string) {
+    setBusy(jobId)
+    try {
+      await fetch(`/api/spark/jobs/${jobId}/cancel`, { method: 'POST' })
+      onAfterAction()
+    } catch {
+      // Silent — cancel is idempotent and the user can click again.
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <section
+      className="bg-[#FEF3C7] border border-[#fcd34d] rounded-xl p-4"
+      role="alert"
+    >
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="min-w-0">
+          <p className="font-semibold text-[#78350F] text-sm">
+            ⚠ {stuck.length} stuck job{stuck.length === 1 ? '' : 's'} holding capacity
+          </p>
+          <p className="text-xs text-[#92400E] mt-0.5">
+            This account is capped at 2 concurrent nodes. Stuck jobs occupy a slot
+            until Spark&apos;s watchdog reaps them — new submits will wait. The cancel
+            API is a soft request; if the agent never booted there&apos;s nothing to
+            receive it. If a job stays stuck more than 30 min, email Spark support.
+          </p>
+        </div>
+      </div>
+      <ul className="space-y-2">
+        {stuck.map(({ job, reason }) => (
+          <li
+            key={job.id}
+            className="flex items-center justify-between gap-3 bg-white/50 rounded px-3 py-2 border border-[#fcd34d]"
+          >
+            <div className="min-w-0 flex-1">
+              <Link
+                href={`/demo/jobs/${job.id}`}
+                className="font-mono text-xs text-[#78350F] hover:underline truncate block"
+              >
+                {jobLabel(job)}
+              </Link>
+              <p className="text-[11px] text-[#92400E] mt-0.5">
+                {stuckLabel(job, reason)}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => requestCancel(job.id)}
+              disabled={busy === job.id}
+              className="text-xs px-3 py-1.5 rounded bg-[#92400E] hover:bg-[#78350F] text-white disabled:opacity-50 flex-shrink-0"
+            >
+              {busy === job.id
+                ? 'Sending…'
+                : job.cancel_requested_at ? 'Re-send cancel' : 'Request cancel'}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+/** Human-readable description of why a job is stuck. */
+function stuckLabel(job: SparkJob, reason: StuckReason): string {
+  if (reason === 'cancel-pending') {
+    const cancelMs = job.cancel_requested_at ? Date.parse(job.cancel_requested_at) : NaN
+    const elapsedMin = Number.isNaN(cancelMs) ? null : Math.floor((Date.now() - cancelMs) / 60_000)
+    return `cancel requested ${elapsedMin ?? '?'}m ago, still ${job.status}`
+  }
+  // provisioning-stall
+  const provMs = job.started_provisioning_at ? Date.parse(job.started_provisioning_at) : NaN
+  const elapsedMin = Number.isNaN(provMs) ? null : Math.floor((Date.now() - provMs) / 60_000)
+  return `provisioning ${elapsedMin ?? '?'}m, no heartbeat — likely waitlisted on account cap`
 }
 
 function formatStartedRel(job: SparkJob): string {
