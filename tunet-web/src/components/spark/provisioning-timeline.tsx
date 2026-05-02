@@ -89,7 +89,7 @@ export function ProvisioningTimeline({ jobId, initialJob, onLogsStart, hasLogs }
   }, [hasLogs, onLogsStart])
 
   const phaseStates = derivePhases(job, hasLogs)
-  const isTerminal = ['completed', 'failed', 'cancelled'].includes(job.status)
+  const isTerminal = ['succeeded', 'completed', 'failed', 'cancelled'].includes(job.status)
 
   return (
     <div className="bg-white border border-[#e5e7eb] rounded-lg p-4">
@@ -206,7 +206,7 @@ function derivePhases(job: SparkJob, hasLogs: boolean): Record<string, PhaseStat
   const cancelReq = job.cancel_requested_at     ? Date.parse(job.cancel_requested_at)     : null
 
   const isFailed = job.status === 'failed' || (job.status === 'cancelled' && !cancelReq)
-  const isTerminalSuccess = job.status === 'completed'
+  const isTerminalSuccess = job.status === 'succeeded' || job.status === 'completed'
   const isCancelled = job.status === 'cancelled' && !!cancelReq
 
   // ── Failure-phase classification ──────────────────────────────────────────

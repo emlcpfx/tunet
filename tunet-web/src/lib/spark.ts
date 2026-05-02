@@ -136,7 +136,7 @@ export interface SparkJob {
   output_share_sync_path?:     string
   instance_type_sku_id?:       number
   instance_type_name?:         string
-  status:                      'queued' | 'provisioning' | 'running' | 'completed' | 'failed' | 'cancelled' | string
+  status:                      'queued' | 'provisioning' | 'running' | 'succeeded' | 'completed' | 'failed' | 'cancelled' | string
   error_code?:                 string | null
   error_message?:              string | null
   exit_code?:                  number | null

@@ -45,6 +45,15 @@ export function JobsListLive({ initialJobs, statusFilter }: JobsListLiveProps) {
   const filtered = (() => {
     if (statusFilter === 'all')    return jobs
     if (statusFilter === 'active') return jobs.filter(j => ACTIVE_STATUSES.has(j.status))
+    // 'completed' is our display label for what Spark calls 'succeeded'
+    // (older API docs say 'completed'; in practice we always see 'succeeded').
+    // Match either so the filter UI doesn't return 0 jobs.
+    if (statusFilter === 'completed') {
+      return jobs.filter(j => {
+        const s = derivedStatus(j)
+        return s === 'succeeded' || s === 'completed'
+      })
+    }
     return jobs.filter(j => derivedStatus(j) === statusFilter)
   })()
 

@@ -60,7 +60,8 @@ export function DashboardLive({ initialJobs }: DashboardLiveProps) {
   const active    = jobs.filter(j => ACTIVE_STATUSES.has(j.status))
   const recent    = jobs.slice(0, 8)
   const totalRun  = jobs.length
-  const completed = jobs.filter(j => j.status === 'completed').length
+  // Spark uses 'succeeded' in the wild; some docs say 'completed'. Both count.
+  const completed = jobs.filter(j => j.status === 'succeeded' || j.status === 'completed').length
 
   // Stuck-job detection: jobs that are holding an account-cap slot without
   // making progress. Surfaced prominently because (1) they can block new
