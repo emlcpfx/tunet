@@ -128,7 +128,9 @@ def src_dims(src_dir: Path) -> tuple[int, int] | None:
 
 def run_cell(src_dir: Path, dst_dir: Path,
              resolution: int, batch_size: int, scenario_name: str, scenario: dict,
-             warmup: int, steps: int) -> dict:
+             warmup: int, steps: int,
+             label: str | None = None,
+             cell_timeout: int = 300) -> dict:
     """Invoke train.py once for a single benchmark cell."""
     import yaml
     work = Path(tempfile.mkdtemp(prefix="bench-local-"))
@@ -136,10 +138,6 @@ def run_cell(src_dir: Path, dst_dir: Path,
         out_dir = work / "output"
         out_dir.mkdir()
         cfg = build_config(src_dir, dst_dir, out_dir, resolution, batch_size, scenario)
-        # tunet expects a "base" config sibling — easiest is to drop it next
-        # to the user config and write a no-op base. base/base.yaml already
-        # exists in repo; train.py looks for it relative to the user config
-        # dir AND the repo root, so the repo-root copy is fine.
         cfg_path = work / "bench.yaml"
         with open(cfg_path, "w") as f:
             yaml.safe_dump(cfg, f, sort_keys=False)
@@ -154,22 +152,34 @@ def run_cell(src_dir: Path, dst_dir: Path,
             "--benchmark-warmup", str(warmup),
         ]
         t0 = time.time()
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              env=env, cwd=str(REPO_ROOT))
+        timed_out = False
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  env=env, cwd=str(REPO_ROOT),
+                                  timeout=cell_timeout)
+            stdout, stderr, rc = proc.stdout, proc.stderr, proc.returncode
+        except subprocess.TimeoutExpired as ex:
+            timed_out = True
+            stdout = ex.stdout.decode("utf-8", "replace") if ex.stdout else ""
+            stderr = ex.stderr.decode("utf-8", "replace") if ex.stderr else ""
+            rc = -1
         elapsed = time.time() - t0
 
         # train.py logs through `logging`, which goes to stderr.
-        combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        combined = (stdout or "") + "\n" + (stderr or "")
         m = STEP_RATE_RE.search(combined)
         rate = float(m.group(1)) if m else None
 
         # capture a small error blurb so failed cells are useful
         err_tail = ""
         if rate is None:
-            tail_lines = [l for l in combined.splitlines()
-                          if l.strip() and ("error" in l.lower() or "traceback" in l.lower()
-                                             or "valueerror" in l.lower() or "runtimeerror" in l.lower())]
-            err_tail = " | ".join(tail_lines[-3:])[:300]
+            if timed_out:
+                err_tail = f"timed out after {cell_timeout}s"
+            else:
+                tail_lines = [l for l in combined.splitlines()
+                              if l.strip() and ("error" in l.lower() or "traceback" in l.lower()
+                                                 or "valueerror" in l.lower() or "runtimeerror" in l.lower())]
+                err_tail = " | ".join(tail_lines[-3:])[:300]
 
         return {
             "ts":        datetime.now().isoformat(timespec="seconds"),
@@ -180,8 +190,10 @@ def run_cell(src_dir: Path, dst_dir: Path,
             "config":    scenario,
             "step_rate": rate,
             "elapsed_s": round(elapsed, 1),
-            "rc":        proc.returncode,
+            "rc":        rc,
             "error":     err_tail or None,
+            "label":     label,
+            "timed_out": timed_out,
         }
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -203,6 +215,13 @@ def main():
                    help="warmup steps to discard (default 20)")
     p.add_argument("--results", default=str(RESULTS_PATH),
                    help="JSONL file to append results to")
+    p.add_argument("--label", default=None,
+                   help="Optional label stored on each result row. Used by overnight "
+                        "optimization-comparison runs (e.g. 'baseline', 'opt1-workers').")
+    p.add_argument("--cell-timeout", type=int, default=300,
+                   help="Hard wall-clock cap per cell in seconds (default 300). "
+                        "Cells that exceed this are killed and recorded as failed — "
+                        "protects against torch.compile hangs and VRAM thrash.")
     args = p.parse_args()
 
     src_dir = Path(args.src).resolve()
@@ -234,7 +253,8 @@ def main():
         tag = f"[{i:2d}/{len(cells)}] {scen:<10}  {res:>4}px  bs{bs}"
         print(f"{tag}  …", end=" ", flush=True)
         result = run_cell(src_dir, dst_dir, res, bs, scen, SCENARIOS[scen],
-                          args.warmup, args.steps)
+                          args.warmup, args.steps,
+                          label=args.label, cell_timeout=args.cell_timeout)
         f.write(json.dumps(result) + "\n")
         f.flush()
         if result["step_rate"] is not None:
