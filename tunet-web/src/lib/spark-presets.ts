@@ -441,19 +441,21 @@ export function recommendedStepsForPairs(pairs: number): number {
 
 /**
  * Per-step time-multiplier from training settings. 1.0 = baseline UNet at
- * model_size 64, batch 2, plain L1 loss. Values are educated guesses, not
- * benchmarked — flagged in the UI as approximate. The shape comes from:
+ * model_size 64, batch 2, plain L1 loss.
  *
- *   - model_size: roughly quadratic in channels for UNet (channels² scales
- *     conv FLOPs); we cap the curve at 4× since memory pressure flattens
- *     practical throughput.
- *   - model_type=msrn: recurrent forward passes ~1.5× UNet at same size.
- *   - loss=l1+lpips: extra VGG forward each step ~1.25×.
- *   - loss=weighted: L1 + L2 + LPIPS forwards ~1.30×.
- *   - batch_size: bigger batch packs more samples per step but the step
- *     itself is longer; we charge √(bs/2) so the user sees *some* effect
- *     of changing batch but not the full linear term (training-wise the
- *     larger batch reaches convergence in fewer total samples).
+ * **Empirically calibrated 2026-05-02** from 9 local-RTX-3090 + 8 cloud
+ * cells (T4/L4/A10) at the porter and ref scenarios. See benchmark.md.
+ *
+ * Calibrated parameters:
+ *   - sizeMult: (dims/64)^1.34   (was 1.7^log2(dims/64) = ^0.77)
+ *     fitted from porter (dim=128) running 4.76× slower than ref —
+ *     dividing out msrn=1.5× and lpips=1.25× gives dim=128 ≈ 2.54×,
+ *     implying exponent log₂(2.54)=1.34. dim=128 → 2.54×, dim=256 → 6.5×.
+ *   - msrn:   1.5×    (still theoretical — couldn't isolate from porter)
+ *   - lpips:  1.25×   (still theoretical)
+ *   - batch:  (bs/2)^0.61   (was √(bs/2) = ^0.5)
+ *     fitted from bs=4/8 measurements: real penalty is steeper than √.
+ *     bs=4 → 1.51×, bs=8 → 2.32× per-step time vs bs=2.
  */
 function settingsMultiplier(opts: {
   model_size_dims?: number
@@ -461,16 +463,10 @@ function settingsMultiplier(opts: {
   loss?:            Preset['training']['loss']
   batch_size?:      number
 }): number {
-  // Model-size scaling: theoretical UNet conv FLOPs grow ~quadratic in
-  // channel count, but in practice fixed-size pieces (input conv, output
-  // conv, lpips backbone) dampen this. The 3090 reference run with dim=128
-  // measured 1.6 step/sec — back-fitting from a hypothetical baseline of
-  // ~6–8 step/sec suggests the effective penalty is closer to 1.7× per 2×
-  // dim, not the 4× a pure quadratic would predict. We use 1.7^log2(dims/64)
-  // which gives sizeMult(64)=1.0, sizeMult(128)≈1.7, sizeMult(256)≈2.9.
-  // See benchmark.md for the back-fit. Cap at 4× for absurdly large dims.
+  // Empirical: dim=128 → 2.54× per-step on 3090. cap at 8× for absurd dims
+  // (dim=512 would predict 16×, but probably OOMs first).
   const dims = opts.model_size_dims ?? 64
-  const sizeMult = Math.min(4, Math.pow(1.7, Math.log2(dims / 64)))
+  const sizeMult = Math.min(8, Math.pow(dims / 64, 1.34))
 
   let mult = sizeMult
   if (opts.model_type === 'msrn') mult *= 1.5
@@ -478,34 +474,55 @@ function settingsMultiplier(opts: {
   if (opts.loss === 'weighted')   mult *= 1.30
   // bce+dice is mask-only and cheap — no penalty.
 
+  // Empirical: bs=4 → 1.51×, bs=8 → 2.32× per-step
   const bs = opts.batch_size && opts.batch_size > 0 ? opts.batch_size : 2
-  mult *= Math.sqrt(bs / 2)
+  mult *= Math.pow(bs / 2, 0.61)
 
   return mult
 }
 
 /**
+ * Per-step time-multiplier from resolution. 1.0 = 512px reference.
+ *
+ * **Empirically calibrated 2026-05-02.** The naive `(res/512)²` model
+ * over-predicted speedup at small res by ~1.6×. Real measurements show
+ * ~13% of step time is fixed overhead (kernel launches, Python loop,
+ * dataloader baseline) regardless of pixel count — only the remaining
+ * ~87% scales quadratically with resolution.
+ *
+ * Fit (12 cells across T4/L4/A10/3090):
+ *   penalty(res) = 0.13 + 0.87 × (res/512)²
+ *   256  → 0.35  (was 0.25)
+ *   512  → 1.00
+ *   1024 → 3.61  (was 4.00) — not yet measured, predicted only
+ */
+function resolutionPenalty(res: number): number {
+  return 0.13 + 0.87 * Math.pow(res / 512, 2)
+}
+
+/**
  * Baseline steps/sec for a GPU at the reference settings (UNet, model_size
- * 64, 512px, batch 2, L1 loss). Calibration data lives in benchmark.md.
+ * 64, 512px, batch 2, L1 loss). Calibration data + methodology lives in
+ * benchmark.md.
  *
- * Calibration status (2026-05-01):
- *   - T4   → 4.09 step/sec  (measured, synthetic PNG dataset)
- *   - L4   → 6.79 step/sec  (measured, real EXR dataset — Porter_0408_REDO)
- *   - A10  → 8.51 step/sec  (measured, real EXR dataset)
- *   - L40S → guess          (not measured — Spark allow-list dropped the
- *                              cheaper g6e.4xlarge variant; the eligible
+ * Calibration status (2026-05-02):
+ *   - T4   → 4.46 step/sec  (cloud bench, real EXR dataset — Porter_0408_REDO)
+ *   - L4   → 6.79 step/sec  (cloud bench, real EXR)
+ *   - A10  → 8.51 step/sec  (cloud bench, real EXR — A10G silicon)
+ *   - L40S → guess          (Spark allow-list dropped the cheaper
+ *                              g6e.4xlarge variant; the eligible
  *                              g6e.8xlarge is +67% $/hr but same GPU)
- *   - RTX PRO 6000 → guess  (not measured for the same reason — only
- *                              g7e.2xlarge available, +31% $/hr)
+ *   - RTX PRO 6000 → guess  (Blackwell — only g7e.2xlarge eligible, +31% $/hr)
  *
- * Methodology + raw data: see ./benchmark.md
+ * Local-only reference: RTX 3090 → 8.17 step/sec (matches business partner's
+ * 1.62 step/s @ porter/512/bs2 to within 2% — calibration is reproducible).
  */
 function baselineStepsPerSec(sku: string): number {
-  if (sku.startsWith('g4dn'))      return 4.09  // T4 (measured 2026-05-01)
-  if (sku.startsWith('g6.'))       return 6.79  // L4 (measured 2026-05-01, real EXR)
-  if (sku.startsWith('g5'))        return 8.51  // A10 (measured 2026-05-01, real EXR)
-  if (sku.startsWith('g6e'))       return 12    // L40S (guess: A10 × ~1.4 based on TFLOPS ratio)
-  if (sku.startsWith('g7e'))       return 18    // RTX PRO 6000 Blackwell (guess: L40S × ~1.5)
+  if (sku.startsWith('g4dn'))      return 4.46  // T4 (measured 2026-05-02)
+  if (sku.startsWith('g6.'))       return 6.79  // L4 (measured 2026-05-02)
+  if (sku.startsWith('g5'))        return 8.51  // A10 (measured 2026-05-02; A10G variant)
+  if (sku.startsWith('g6e'))       return 12    // L40S (guess; A10 × ~1.4 from TFLOPS ratio)
+  if (sku.startsWith('g7e'))       return 18    // RTX PRO 6000 Blackwell (guess; L40S × ~1.5)
   return 6
 }
 
@@ -551,7 +568,7 @@ export function estimateTraining(opts: {
 
   const baseline = baselineStepsPerSec(opts.sku)
   const settings = settingsMultiplier(opts)
-  const resPenalty = (opts.resolution / 512) ** 2
+  const resPenalty = resolutionPenalty(opts.resolution)
 
   // Central: throughput / settings / resolution
   const centralStepsPerSec = baseline / (settings * resPenalty)
