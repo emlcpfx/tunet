@@ -443,19 +443,20 @@ export function recommendedStepsForPairs(pairs: number): number {
  * Per-step time-multiplier from training settings. 1.0 = baseline UNet at
  * model_size 64, batch 2, plain L1 loss.
  *
- * **Empirically calibrated 2026-05-02** from 9 local-RTX-3090 + 8 cloud
- * cells (T4/L4/A10) at the porter and ref scenarios. See benchmark.md.
+ * **Empirically calibrated 2026-05-02** from 9 local-RTX-3090 + 9 cloud
+ * cells (T4/L4/A10 at ref; L4 with torch.compile A/B). See benchmark.md.
  *
  * Calibrated parameters:
- *   - sizeMult: (dims/64)^1.34   (was 1.7^log2(dims/64) = ^0.77)
- *     fitted from porter (dim=128) running 4.76× slower than ref —
- *     dividing out msrn=1.5× and lpips=1.25× gives dim=128 ≈ 2.54×,
- *     implying exponent log₂(2.54)=1.34. dim=128 → 2.54×, dim=256 → 6.5×.
+ *   - sizeMult: (dims/64)^1.47   (was 1.7^log2(dims/64) = ^0.77)
+ *     fitted from porter (dim=128) running ~5.19× slower than ref on
+ *     RTX 3090 — dividing out msrn=1.5× and lpips=1.25× gives dim=128
+ *     ≈ 2.77×, implying exponent log₂(2.77)=1.47. dim=128 → 2.77×,
+ *     dim=256 → 7.7× (capped at 8×).
  *   - msrn:   1.5×    (still theoretical — couldn't isolate from porter)
  *   - lpips:  1.25×   (still theoretical)
- *   - batch:  (bs/2)^0.61   (was √(bs/2) = ^0.5)
+ *   - batch:  (bs/2)^0.59   (was √(bs/2) = ^0.5)
  *     fitted from bs=4/8 measurements: real penalty is steeper than √.
- *     bs=4 → 1.51×, bs=8 → 2.32× per-step time vs bs=2.
+ *     bs=4 → 1.47×, bs=8 → 2.39× per-step time vs bs=2.
  */
 function settingsMultiplier(opts: {
   model_size_dims?: number
@@ -463,10 +464,10 @@ function settingsMultiplier(opts: {
   loss?:            Preset['training']['loss']
   batch_size?:      number
 }): number {
-  // Empirical: dim=128 → 2.54× per-step on 3090. cap at 8× for absurd dims
-  // (dim=512 would predict 16×, but probably OOMs first).
+  // Empirical: dim=128 → 2.77× per-step on 3090. cap at 8× for absurd dims
+  // (dim=512 would predict ~22×, but probably OOMs first).
   const dims = opts.model_size_dims ?? 64
-  const sizeMult = Math.min(8, Math.pow(dims / 64, 1.34))
+  const sizeMult = Math.min(8, Math.pow(dims / 64, 1.47))
 
   let mult = sizeMult
   if (opts.model_type === 'msrn') mult *= 1.5
@@ -474,9 +475,9 @@ function settingsMultiplier(opts: {
   if (opts.loss === 'weighted')   mult *= 1.30
   // bce+dice is mask-only and cheap — no penalty.
 
-  // Empirical: bs=4 → 1.51×, bs=8 → 2.32× per-step
+  // Empirical: bs=4 → 1.47×, bs=8 → 2.39× per-step
   const bs = opts.batch_size && opts.batch_size > 0 ? opts.batch_size : 2
-  mult *= Math.pow(bs / 2, 0.61)
+  mult *= Math.pow(bs / 2, 0.59)
 
   return mult
 }
