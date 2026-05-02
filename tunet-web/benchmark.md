@@ -22,9 +22,15 @@ If you're updating the calibration: edit this file in the same commit.
 hours = steps / (baselineStepsPerSec(sku) / settingsMultiplier(opts) / resolutionPenalty)
 
 steps              = user's max_steps cap, OR recommendedStepsForPairs(pairs) if 0
-resolutionPenalty  = (resolution / 512)²
+resolutionPenalty  = 0.13 + 0.87 × (res/512)²       ← empirical (was (res/512)²)
 settingsMultiplier = sizeMult × modelTypeMult × lossMult × batchMult
+sizeMult           = (dims/64)^1.34, capped at 8×   ← empirical (was 1.7^log2(dims/64))
+batchMult          = (bs/2)^0.61                    ← empirical (was √(bs/2))
 ```
+
+All formulas were re-fitted 2026-05-02 from 17 benchmark cells across
+RTX 3090 / T4 / L4 / A10. Old multipliers were mostly theoretical and
+turned out to be 30–60% off in various directions.
 
 Three pieces in `tunet-web/src/lib/spark-presets.ts`:
 
@@ -41,17 +47,21 @@ useless.
 
 ---
 
-## Calibration status — 2026-05-01
+## Calibration status — 2026-05-02
 
 ### `baselineStepsPerSec(sku)`
 
 | GPU | SKU | step/sec | Source | Confidence |
 |---|---|---|---|---|
-| T4 | `g4dn.xlarge` | **4.09** | Measured via `/demo/benchmark` (synthetic PNG dataset) | Medium — synth data, real EXR I/O may be ~10% slower |
-| L4 | `g6.2xlarge` | **6.79** | Measured (Porter_0408_REDO real EXR dataset) | High |
-| A10 | `g5.xlarge` | **8.51** | Measured (Porter_0408_REDO real EXR dataset) | High |
+| T4 | `g4dn.xlarge` | **4.46** | Measured (Porter_0408_REDO real EXR) | High |
+| L4 | `g6.2xlarge` | **6.79** | Measured (Porter_0408_REDO real EXR) | High |
+| A10 | `g5.xlarge` | **8.51** | Measured (Porter_0408_REDO real EXR — A10G silicon) | High |
 | L40S | `g6e.8xlarge` | 12 (guess) | Not measured — see "L40S/RTX PRO availability" below | Low |
 | RTX PRO 6000 (Blackwell) | `g7e.2xlarge` | 18 (guess) | Not measured — same reason | Low |
+| RTX 3090 | (local only) | **8.17** | Measured locally — anchor for cross-machine reproducibility | High |
+
+The local 3090 reproduces the business partner's converged-run rate
+(1.62 step/s @ porter/512/bs2) within 2% — calibration is reproducible.
 
 **Reference settings** (must match `BENCH_FIXED` in
 `src/app/api/spark/benchmark/route.ts` and what `settingsMultiplier`
@@ -66,16 +76,37 @@ treats as 1.0×):
 - `progressive_resolution: false`
 - No augmentation
 
-### `settingsMultiplier(opts)` — back-fitted, not directly measured
+### `settingsMultiplier(opts)` — empirical fits 2026-05-02
+
+Re-fitted from 9 RTX-3090 cells running both `ref` (UNet/dim=64/L1) and
+`porter` (MSRN/dim=128/L1+LPIPS). The data + fit code: `scripts/calibrate_cost_model.py`.
 
 | Factor | Multiplier | Justification |
 |---|---|---|
-| `model_size_dims` | `1.7^log2(dims/64)` capped at 4× | Empirical: 3090 reference run (dim=128) measured 1.6 step/sec; pure quadratic (4×) over-predicts by ~2.5×, this curve fits much better. dim=128 → 1.7×, dim=256 → 2.9×, dim=32 → 0.59× |
-| `model_type=msrn` | × 1.5 | Theoretical: recurrent forward passes (`recurrence_steps=2` default) cost ~1.5× UNet. Untested. |
-| `loss=l1+lpips` | × 1.25 | Theoretical: extra VGG forward + backward through frozen LPIPS. Untested. |
-| `loss=weighted` | × 1.30 | Theoretical: L1 + L2 + LPIPS. Untested. |
+| `model_size_dims` | `(dims/64)^1.34`, cap 8× | **Empirical.** porter/3090 measured 4.76× slower than ref at the same cell. Dividing out msrn=1.5× and lpips=1.25× → dim=128 ≈ 2.54×, implying exponent log₂(2.54)=1.34. dim=128 → 2.54×, dim=256 → 6.5×, dim=32 → 0.39×. Old curve (1.7^log2) was 50% too low. |
+| `model_type=msrn` | × 1.5 | Theoretical. Couldn't isolate from porter measurements (porter is msrn AND dim=128 AND lpips). Held fixed during the fit; if msrn is actually 2× rather than 1.5×, the fitted dim exponent compensates. |
+| `loss=l1+lpips` | × 1.25 | Theoretical. Same reason as msrn — couldn't isolate. |
+| `loss=weighted` | × 1.30 | Theoretical. |
 | `loss=bce+dice` | × 1.00 | Mask-only, no penalty. |
-| `batch_size` | × √(bs/2) | Sublinear. Bigger batch = longer step but more parallelism amortizes. Untested directly. |
+| `batch_size` | × `(bs/2)^0.61` | **Empirical.** Implied exponents from bs=4 (k=0.59) and bs=8 (k=0.63) measurements; using median k=0.61. Old `√(bs/2)` (k=0.5) under-predicted batch slowdown. bs=4 → 1.51×, bs=8 → 2.32×. |
+
+### `resolutionPenalty(res)` — empirical fit 2026-05-02
+
+```
+penalty(res) = 0.13 + 0.87 × (res/512)²
+```
+
+12 cells fed the fit (T4 / L4 / A10 / 3090 cross-product). The
+constant 0.13 captures fixed per-step overhead (kernel launches,
+Python loop, dataloader baseline) that doesn't scale with pixel count;
+the 0.87 captures the part that does. The pure `(res/512)²` model
+over-predicted the 256px speedup by ~1.6×.
+
+| res | New penalty | Old (res/512)² | Notes |
+|---|---|---|---|
+| 256 | 0.35 | 0.25 | Reality: only 2.0× speedup vs 512, not 4× |
+| 512 | 1.00 | 1.00 | Reference |
+| 1024 | 3.61 | 4.00 | Predicted only — not yet measured |
 
 ### `recommendedStepsForPairs(pairs)` — calibrated to 1 reference run
 
@@ -218,14 +249,21 @@ more data.
 
 Priority order:
 
-1. **L40S** (`g6e.8xlarge`) at reference settings. Highest-impact since
-   it's the "RECOMMENDED" pick in the new-job UI.
-2. **RTX PRO 6000** (`g7e.2xlarge`) at reference settings.
-3. **Resolution sweep** on T4/L4/A10 at 256/1024 to validate
-   `(res/512)²`. Need a shot ≥ 1024×1024 for the 1024 row.
-4. **Batch sweep** at 4 and 8 to validate the `√(bs/2)` curve.
+1. **L40S** (`g6e.8xlarge`) at reference settings. Note A10 is now the
+   "RECOMMENDED" pick in the new-job UI (was L40S, before the SKU
+   change made it +67% $/hr for the same silicon).
+2. **RTX PRO 6000 Blackwell** (`g7e.2xlarge`) at reference settings.
+3. **Resolution sweep at 1024px** to validate the empirical
+   `0.13 + 0.87 × (res/512)²` fit at the high end. Need a shot
+   ≥ 1024×1024 (Porter is 1000×1000, so it's invalid for 1024 patches).
+4. **`torch.compile` validation on cloud Linux Spark agents** — code
+   is in place (commit `b1ed932`), measurement still TBD.
 5. **Loss multipliers** — submit one cell at `l1+lpips`, one at
-   `weighted`, compare to L1 baseline at the same GPU/res/batch.
+   `weighted`, compare to L1 baseline at the same GPU/res/batch. Right
+   now those multipliers are theoretical (1.25× and 1.30×), couldn't
+   isolate from porter.
+6. **MSRN multiplier** — same: held fixed at 1.5× during the porter
+   fit, never measured directly.
 
 The infrastructure is ready (`/demo/benchmark` does all of this); we just
 need to actually run it without tripping Spark's provisioning timeout.
@@ -236,11 +274,51 @@ batch.
 
 ## Reference data points
 
-### 2026-05-01 — Synthetic PNG dataset, /demo/benchmark
+### 2026-05-02 — RTX 3090 local sweep, ref scenario (UNet, dim=64, L1)
+
+`scripts/bench_local.py --src ...Porter_0408_REDO/input --dst ...output`
+
+| res | bs=2 | bs=4 | bs=8 |
+|---|---|---|---|
+| 256 | 16.69 step/s | 14.28 | 9.91 |
+| 512 | 8.17 | 5.00 | 2.94 |
+
+### 2026-05-02 — RTX 3090 local sweep, porter scenario (MSRN, dim=128, L1+LPIPS)
+
+| res | bs=2 | bs=4 | bs=8 |
+|---|---|---|---|
+| 256 | 4.73 | 3.00 | ⚠️ 0.04 (VRAM swap) |
+| 512 | 1.62 | ⚠️ 0.04 (VRAM swap) | not run |
+
+**The 3090 has 24 GB and porter (MSRN/128/LPIPS) is at the ceiling.**
+Anything past 256/bs4 or 512/bs2 silently swaps to system RAM (PyTorch
+falls back to unified memory, ~100–500× slower than VRAM-resident).
+The same will happen on cloud A10/L4 (also 24 GB). L40S 48 GB and
+RTX PRO 96 GB are the only cloud GPUs that can run porter past those
+points.
+
+### 2026-05-01 — T4 cloud sweep, ref scenario (Porter EXR via `/demo/benchmark`)
+
+| res | bs=2 | bs=4 | bs=8 |
+|---|---|---|---|
+| 256 | 10.36 | 7.41 | 4.33 |
+| 512 | 4.46 | 2.10 | (cancelled, queue timeout) |
+
+The T4/512/bs4 → bs=4 is *slower in samples/sec* than bs=2 (8.4 vs 8.9),
+i.e. T4 is past its compute saturation point at 512px even at the
+smallest batch. Suggests T4 isn't worth picking past 512px even at
+batch=2 — better to drop to L4 or up the GPU class.
+
+### 2026-05-01 — Synthetic PNG dataset, /demo/benchmark (legacy, for context)
 | GPU | resolution | batch | step/sec |
 |---|---|---|---|
 | T4 (Tesla T4) | 512 | 2 | 4.09 |
 | L4 (NVIDIA L4) | 512 | 2 | 6.23 |
+
+These were superseded by the real-EXR runs above. Kept for reference —
+synthetic vs real-EXR shows ~9% difference for L4 (6.23 → 6.79), which
+is run-to-run noise, suggesting our ref scenario isn't dataloader-bound
+on these GPUs.
 
 ### 2026-05-01 — Porter_0408_REDO real EXR dataset (1000×1000), /demo/benchmark
 | GPU | resolution | batch | step/sec | samples/sec |
@@ -265,3 +343,52 @@ different silicon. Treat as A10 for cost-model purposes.
 
 This is the **only converged-run data point** we have, and it's what
 anchors `recommendedStepsForPairs`.
+
+---
+
+## train.py optimization attempts (2026-05-02)
+
+Tested four optimizations against the baseline 3090 ref-scenario sweep
+(256/512 × bs2/bs4). Each was its own commit so they can be reverted
+individually with `git revert`.
+
+| # | Optimization | Result | Commit | Notes |
+|---|---|---|---|---|
+| 1 | Dataloader workers + prefetch | **N/A locally** | — | `train.py:635` forces `num_workers=0` on Windows (spawn-multiprocessing hang fix). Linux Spark agents already auto-detect optimal worker count via `auto_detect_num_workers()`. No commit. |
+| 2 | Fused AdamW (CUDA) | **+1.5 to +3.3%** | `97de4d7` | `optim.AdamW(..., fused=True)`. Free win, no risk. Biggest at small workloads where the optimizer step is a bigger fraction of iter time. |
+| 3 | `torch.compile(mode='reduce-overhead')` | **Not validated locally** | `b1ed932` | Can't run on Windows — Triton has no wheel. Implementation probes for `import triton` and skips cleanly when absent. Should help on cloud Linux Spark agents (Triton is included in their PyTorch wheel). Published estimates: 5–25% at small workloads. |
+| 4 | `channels_last` memory format | **REGRESSION −40 to −64%** | reverted | UNet has GroupNorm + skip-connection `cat` ops that don't have NHWC kernels. PyTorch falls back to NCHW at every such op, paying memory-layout conversion cost on every layer. Mixed-format graphs are strictly worse. |
+
+### Opt 2 measured impact (RTX 3090, ref scenario, Porter EXR)
+
+| cell | baseline | fused AdamW | delta |
+|---|---|---|---|
+| 256/bs2 | 16.73 step/s | 17.29 | +3.3% |
+| 256/bs4 | 15.59 | 16.04 | +2.9% |
+| 512/bs2 | 8.46 | 8.60 | +1.7% |
+| 512/bs4 | 5.45 | 5.53 | +1.5% |
+
+### Latent bugs uncovered while implementing torch.compile (also fixed in `b1ed932`)
+
+- **Truthiness on torch.compile-wrapped models raised TypeError.** The
+  pattern `if model and optimizer and scaler:` in `train.py` falls
+  through to `__len__` for `nn.Module`s, and torch.compile's
+  `OptimizedModule` defines `__len__` to raise. Switched to explicit
+  `is not None`. This bug existed but was latent before this work.
+- **Checkpoint saves now unwrap both DDP and torch.compile.** Saved
+  state_dict is a plain UNet/MSRN — loadable from any wrapper combo.
+  Previously the DDP unwrap was conditional on `isinstance(model, DDP)`
+  but didn't account for torch.compile's `_orig_mod`.
+
+### Things to try next time
+
+1. **CUDA Graphs** (`torch.cuda.CUDAGraph`) — explicit graph capture
+   without inductor/Triton. Should work on Windows. Requires fixed input
+   shapes (we have that after warmup). Bigger surgery than the others —
+   needs separate graph per resolution if progressive_resolution is on.
+2. **NVTX profile** — would tell us where the *actual* per-step time
+   goes (kernel launch vs compute vs memcpy). Could reveal a single
+   bottleneck worth attacking.
+3. **`apex.optimizers.FusedAdam`** — sometimes faster than PyTorch's
+   built-in fused. Adds a dependency though, only worth it if PyTorch's
+   gives <2% (it gave 1.5–3.3% here, so probably not).
