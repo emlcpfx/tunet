@@ -897,6 +897,45 @@ def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_
         else:
             if is_main_process(): logging.info("No checkpoint found. Starting fresh.")
 
+    # --- torch.compile (optional, opt-out via TUNET_DISABLE_COMPILE=1) ---
+    # Wraps the model so the forward/backward run as fused CUDA graphs after
+    # the first iteration (1–3 min compile cost on first step, then ~5–25%
+    # faster steady-state). Skipped on:
+    #   - non-CUDA devices (no benefit, often worse)
+    #   - PyTorch < 2.0 (compile API absent)
+    #   - Windows or any host without Triton (the inductor backend's codegen
+    #     dependency; Triton on Windows is experimental and not in the
+    #     stock PyTorch wheel — without it, torch.compile crashes on the
+    #     first forward pass).
+    #   - if TUNET_DISABLE_COMPILE=1 in env (escape hatch)
+    # Apply BEFORE DDP — compiling a DDP-wrapped model triggers warnings
+    # and can break.
+    compile_disabled = os.environ.get('TUNET_DISABLE_COMPILE', '0') == '1'
+    can_compile = device_type == 'cuda' and hasattr(torch, 'compile') and not compile_disabled
+    if can_compile:
+        # Probe for Triton — torch.compile defers all errors to first
+        # forward, which makes them hard to recover from. Importing here
+        # lets us skip cleanly with a friendly log message.
+        try:
+            import triton  # noqa: F401
+        except ImportError:
+            can_compile = False
+            if is_main_process():
+                logging.info("torch.compile: skipped (Triton not available — common on Windows). "
+                             "Set up Triton or run on Linux to enable. To suppress this message "
+                             "set TUNET_DISABLE_COMPILE=1.")
+    if can_compile:
+        try:
+            t_compile_setup = time.time()
+            model = torch.compile(model, mode='reduce-overhead', fullgraph=False)
+            if is_main_process():
+                logging.info(f"Model wrapped with torch.compile(mode='reduce-overhead') "
+                             f"in {time.time() - t_compile_setup:.2f}s "
+                             f"(actual compile happens on first step, ~1–3 min)")
+        except Exception as e:
+            if is_main_process():
+                logging.warning(f"torch.compile failed: {e}. Continuing without it.")
+
     # --- DDP Wrap ---
     if world_size > 1:
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -1463,7 +1502,11 @@ def train(config):
                      _pending_ckpt_thread.join()
                  ckpt_ep = global_step // iter_epoch; ep_ckpt_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_epoch_{ckpt_ep:09d}.pth') if epoch_end_now else None
                  latest_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth'); cfg_dict = config_to_dict(config)
-                 m_state = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
+                 # Unwrap DDP and torch.compile so the checkpoint saves the
+                 # plain UNet/MSRN state_dict — loadable in any wrapper combo.
+                 base_model = (model.module if isinstance(model, DDP)
+                               else getattr(model, '_orig_mod', model))
+                 m_state = base_model.state_dict()
                  # Save scaler state only if AMP was effectively used
                  scaler_state = scaler.state_dict() if use_amp_eff else None
                  scheduler_state = scheduler.state_dict() if scheduler is not None else None
@@ -1564,7 +1607,9 @@ def train(config):
                         # Save plateau checkpoint
                         plateau_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_plateau.pth')
                         try:
-                            m_state_p = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
+                            base_model_p = (model.module if isinstance(model, DDP)
+                                            else getattr(model, '_orig_mod', model))
+                            m_state_p = base_model_p.state_dict()
                             scaler_state_p = scaler.state_dict() if use_amp_eff else None
                             cfg_dict_p = config_to_dict(config)
                             plateau_data = {'epoch': completed_epoch, 'global_step': global_step, 'model_state_dict': m_state_p, 'optimizer_state_dict': optimizer.state_dict(),
@@ -1604,8 +1649,16 @@ def train(config):
             logging.info(f"Performing final checkpoint save (State @ Step {final_global_step})...")
             try:
                  final_ep = final_global_step // iter_epoch; latest_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth'); cfg_dict = config_to_dict(config)
-                 if model and optimizer and scaler:
-                     m_state = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
+                 # Explicit `is not None` because torch.compile-wrapped models
+                 # raise TypeError on len(), and Python's truthiness check
+                 # falls through to __len__ for nn.Module subclasses.
+                 if model is not None and optimizer is not None and scaler is not None:
+                     # torch.compile-wrapped models keep the original under
+                     # _orig_mod; use that for state_dict so the saved
+                     # checkpoint is loadable from a non-compiled run.
+                     base_model = (model.module if isinstance(model, DDP)
+                                   else getattr(model, '_orig_mod', model))
+                     m_state = base_model.state_dict()
                      scaler_state = scaler.state_dict() if use_amp_eff else None # Check effective use
                      scheduler_state = scheduler.state_dict() if scheduler is not None else None
                      final_data = {'epoch': final_ep, 'global_step': final_global_step, 'model_state_dict': m_state, 'optimizer_state_dict': optimizer.state_dict(),
