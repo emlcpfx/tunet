@@ -99,6 +99,15 @@ interface Body {
    * different env. e.g. nameSuffix='compile-on' → bench-l4-512px-bs2-compile-on-{stamp}
    */
   nameSuffix?:      string
+  /**
+   * Optional per-GpuKey SKU override — lets the caller substitute a
+   * larger same-GPU variant when the default cheapest variant has no
+   * capacity. e.g. {l4: 'g6.4xlarge'} to use the bigger L4 host instead
+   * of g6.2xlarge. Only the SKU changes; the gpuKey label and our
+   * baselineStepsPerSec lookup still apply since the GPU silicon is
+   * identical between size variants in the same family.
+   */
+  skuOverride?:     Record<string, string>
 }
 
 interface Run {
@@ -206,7 +215,20 @@ export async function POST(req: Request) {
   // Build the full work list first so we can iterate it in a worker pool.
   const cells: { gpuKey: GpuKey; sku: string; resolution: number; batchSize: number }[] = []
   for (const gpuKey of gpuKeys) {
-    const sku = GPU_TYPES[gpuKey].sku
+    // Allow per-GpuKey SKU substitution for capacity workarounds. Same
+    // silicon, different host size — the GPU performance characteristics
+    // we baseline against are identical, but AWS may have stock of one
+    // variant and not another. Override only takes effect if the SKU is
+    // also in the eligible list (allowedSkus).
+    const overrideSku = body.skuOverride?.[gpuKey]
+    if (overrideSku && !allowedSkus.has(overrideSku)) {
+      return jsonError(
+        `skuOverride[${gpuKey}]='${overrideSku}' is not in the eligible list. ` +
+        `Eligible: ${[...allowedSkus].sort().join(', ')}`,
+        400,
+      )
+    }
+    const sku = overrideSku ?? GPU_TYPES[gpuKey].sku
     for (const resolution of resolutions) {
       for (const batchSize of batchSizes) {
         cells.push({ gpuKey, sku, resolution, batchSize })
