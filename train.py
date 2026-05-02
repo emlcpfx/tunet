@@ -689,7 +689,16 @@ def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_
             if is_main_process(): logging.debug("MSRNet uses GroupNorm; skipping SyncBatchNorm conversion.")
         dist.barrier()
 
-    optimizer = optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=1e-5)
+    # fused=True merges the per-parameter update kernels into a single CUDA
+    # kernel — measurable speedup on small models where the optimizer step
+    # is a non-trivial fraction of the iter time. Only available on CUDA;
+    # falls back to the regular implementation on CPU/MPS.
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=config.training.lr,
+        weight_decay=1e-5,
+        fused=(device_type == 'cuda'),
+    )
 
     # --- LR Scheduler ---
     lr_scheduler_type = getattr(config.training, 'lr_scheduler', 'none')
@@ -823,7 +832,13 @@ def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_
         except Exception as e:
             logging.error(f"Checkpoint load failed: {e}. Starting fresh.", exc_info=True)
             start_epoch, start_step = 0, 0
-            optimizer = optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=1e-5)
+            # fused=True for CUDA, see comment at the primary AdamW above
+            optimizer = optim.AdamW(
+                model.parameters(),
+                lr=config.training.lr,
+                weight_decay=1e-5,
+                fused=(device_type == 'cuda'),
+            )
             scaler = GradScaler(enabled=use_amp_eff)
             # Fall through to finetune_from if available
             finetune_path = getattr(config.training, 'finetune_from', None)
