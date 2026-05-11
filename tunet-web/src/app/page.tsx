@@ -1,8 +1,8 @@
 import { redirect } from 'next/navigation'
-import { auth } from '@clerk/nextjs/server'
+import { auth } from '@/auth'
 
 export default async function RootPage() {
-  const { userId } = await auth()
-  if (userId) redirect('/dashboard')
-  else redirect('/sign-in')
+  const session = await auth()
+  if (session?.user?.id) redirect('/dashboard')
+  redirect('/sign-in')
 }

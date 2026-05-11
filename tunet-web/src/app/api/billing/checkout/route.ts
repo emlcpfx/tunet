@@ -1,12 +1,13 @@
 export const dynamic = 'force-dynamic'
 
-import { auth, currentUser } from '@clerk/nextjs/server'
+import { auth } from '@/auth'
 import { NextResponse } from 'next/server'
 import { createCheckoutSession } from '@/lib/stripe'
 import { CREDIT_PACKS } from '@/types'
 
 export async function POST(req: Request) {
-  const { userId } = await auth()
+  const session = await auth()
+  const userId = session?.user?.id
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { packId, priceCents, balanceCents } = await req.json() as {
@@ -21,8 +22,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Invalid pack' }, { status: 400 })
   }
 
-  const user = await currentUser()
-  const email = user?.emailAddresses[0]?.emailAddress ?? ''
+  const email = session.user?.email ?? ''
 
   const url = await createCheckoutSession({
     userId,

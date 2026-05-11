@@ -1,10 +1,11 @@
-import { auth } from '@clerk/nextjs/server'
+import { auth } from '@/auth'
 import { redirect } from 'next/navigation'
 import { createServiceClient } from '@/lib/supabase'
 import { Sidebar } from '@/components/layout/sidebar'
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const { userId } = await auth()
+  const session = await auth()
+  const userId = session?.user?.id
   if (!userId) redirect('/sign-in')
 
   // Fetch credit balance

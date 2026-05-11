@@ -1,37 +1,32 @@
-import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'
+import { auth } from '@/auth'
 import { NextResponse } from 'next/server'
-import type { NextRequest } from 'next/server'
 
-const clerkKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY ?? ''
-const DEMO_MODE = !clerkKey || !clerkKey.startsWith('pk_') || clerkKey.includes('placeholder')
-
-// Public paths that never require auth
-const isPublicRoute = createRouteMatcher([
-  '/sign-in(.*)',
-  '/sign-up(.*)',
-  '/demo(.*)',
-  '/api/webhooks/(.*)',
-  '/api/billing/webhook',
-])
-
-// In demo mode: plain passthrough, no Clerk involved
-function demoMiddleware(_req: NextRequest) {
-  return NextResponse.next()
+function isPublicPath(pathname: string): boolean {
+  return (
+    pathname.startsWith('/api/auth') ||
+    pathname.startsWith('/sign-in') ||
+    pathname.startsWith('/sign-up') ||
+    pathname.startsWith('/api/webhooks') ||
+    pathname === '/api/billing/webhook'
+  )
 }
 
-// In production: full Clerk auth enforcement
-const prodMiddleware = clerkMiddleware(async (auth, req: NextRequest) => {
-  if (!isPublicRoute(req)) {
-    const { userId } = await auth()
-    if (!userId) {
-      const signInUrl = new URL('/sign-in', req.url)
-      signInUrl.searchParams.set('redirect_url', req.url)
-      return NextResponse.redirect(signInUrl)
-    }
+export default auth((req) => {
+  const pathname = req.nextUrl.pathname
+  if (isPublicPath(pathname)) {
+    return NextResponse.next()
   }
-})
 
-export default DEMO_MODE ? demoMiddleware : prodMiddleware
+  const userId = req.auth?.user?.id
+  if (!userId) {
+    const signIn = new URL('/sign-in', req.url)
+    const callback = `${pathname}${req.nextUrl.search}`
+    signIn.searchParams.set('callbackUrl', callback || '/dashboard')
+    return NextResponse.redirect(signIn)
+  }
+
+  return NextResponse.next()
+})
 
 export const config = {
   matcher: [

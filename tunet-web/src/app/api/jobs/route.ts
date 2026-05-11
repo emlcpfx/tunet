@@ -1,4 +1,4 @@
-import { auth } from '@clerk/nextjs/server'
+import { auth } from '@/auth'
 import { NextResponse } from 'next/server'
 import { createServiceClient, getBootstrapSignedUrl, getCodeBundleUrl } from '@/lib/supabase'
 import { createPod, buildBootstrapScript } from '@/lib/runpod'
@@ -6,7 +6,8 @@ import { requiredCreditsToLaunch } from '@/lib/pricing'
 import type { JobCreatePayload } from '@/types'
 
 export async function GET() {
-  const { userId } = await auth()
+  const session = await auth()
+  const userId = session?.user?.id
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const svc = createServiceClient()
@@ -21,7 +22,8 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const { userId } = await auth()
+  const session = await auth()
+  const userId = session?.user?.id
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const body = await req.json() as JobCreatePayload & { id?: string }

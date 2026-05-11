@@ -1,7 +1,7 @@
 'use client'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { useUser, useClerk } from '@clerk/nextjs'
+import { useSession, signOut } from 'next-auth/react'
 import { formatCredits } from '@/types'
 
 interface NavItem {
@@ -71,8 +71,8 @@ interface SidebarProps {
 
 export function Sidebar({ creditBalance }: SidebarProps) {
   const pathname = usePathname()
-  const { user } = useUser()
-  const { signOut } = useClerk()
+  const { data: session } = useSession()
+  const user = session?.user
 
   function isActive(item: NavItem) {
     if (item.exact) return pathname === item.href
@@ -121,14 +121,15 @@ export function Sidebar({ creditBalance }: SidebarProps) {
       <div className="border-t border-[#e5e7eb] px-3 py-3 space-y-1">
         <div className="flex items-center gap-2.5 px-2 py-1.5">
           <div className="w-7 h-7 rounded-full bg-[#ae69f4] flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">
-            {user?.firstName?.[0] ?? user?.emailAddresses[0]?.emailAddress[0]?.toUpperCase() ?? '?'}
+            {user?.name?.[0]?.toUpperCase() ?? user?.email?.[0]?.toUpperCase() ?? '?'}
           </div>
           <span className="text-sm text-[#374151] truncate flex-1">
-            {user?.firstName ?? user?.emailAddresses[0]?.emailAddress ?? 'User'}
+            {user?.name ?? user?.email ?? 'User'}
           </span>
         </div>
         <button
-          onClick={() => signOut({ redirectUrl: '/sign-in' })}
+          type="button"
+          onClick={() => void signOut({ callbackUrl: '/sign-in' })}
           className="w-full text-left px-2 py-1.5 text-xs text-[#6b7280] hover:text-[#374151] hover:bg-[#F9FAFB] rounded-md transition-colors"
         >
           Log out

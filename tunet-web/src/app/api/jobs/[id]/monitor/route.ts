@@ -1,4 +1,4 @@
-import { auth } from '@clerk/nextjs/server'
+import { auth } from '@/auth'
 import { NextResponse } from 'next/server'
 import { createServiceClient } from '@/lib/supabase'
 import { proxyMonitor, monitorBaseUrl } from '@/lib/runpod'
@@ -12,7 +12,8 @@ type Params = { params: Promise<{ id: string }> }
 //   3. Keep pod IDs off the client
 
 export async function GET(req: Request, { params }: Params) {
-  const { userId } = await auth()
+  const session = await auth()
+  const userId = session?.user?.id
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { id } = await params
@@ -68,7 +69,8 @@ export async function GET(req: Request, { params }: Params) {
 
 // POST proxy for /api/stop
 export async function POST(req: Request, { params }: Params) {
-  const { userId } = await auth()
+  const session = await auth()
+  const userId = session?.user?.id
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { id } = await params

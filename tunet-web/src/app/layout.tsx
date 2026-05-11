@@ -1,6 +1,6 @@
 import type { Metadata } from 'next'
-import { ClerkProvider } from '@clerk/nextjs'
 import './globals.css'
+import { AuthSessionProvider } from '@/components/providers/session-provider'
 
 export const metadata: Metadata = {
   title: 'TuNet Cloud',
@@ -18,25 +18,13 @@ const FONTS = (
   </>
 )
 
-const clerkKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
-
 export default function RootLayout({ children }: { children: React.ReactNode }) {
-  // Skip ClerkProvider when no real key is set (demo / local UI preview)
-  if (!clerkKey || clerkKey.includes('placeholder')) {
-    return (
-      <html lang="en">
-        <head>{FONTS}</head>
-        <body>{children}</body>
-      </html>
-    )
-  }
-
   return (
-    <ClerkProvider>
-      <html lang="en">
-        <head>{FONTS}</head>
-        <body>{children}</body>
-      </html>
-    </ClerkProvider>
+    <html lang="en">
+      <head>{FONTS}</head>
+      <body>
+        <AuthSessionProvider>{children}</AuthSessionProvider>
+      </body>
+    </html>
   )
 }

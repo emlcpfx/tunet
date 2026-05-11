@@ -1,4 +1,4 @@
-import { auth } from '@clerk/nextjs/server'
+import { auth } from '@/auth'
 import Link from 'next/link'
 import { createServiceClient } from '@/lib/supabase'
 import { MetricCard } from '@/components/ui/card'
@@ -9,7 +9,8 @@ import { formatCredits, formatDuration, type DbJob, type DbBillingEvent } from '
 export const revalidate = 0
 
 export default async function DashboardPage() {
-  const { userId } = await auth()
+  const session = await auth()
+  const userId = session!.user!.id
   const svc = createServiceClient()
 
   const [{ data: user }, { data: jobs }, { data: events }] = await Promise.all([

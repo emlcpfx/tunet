@@ -1,4 +1,4 @@
-import { auth } from '@clerk/nextjs/server'
+import { auth } from '@/auth'
 import Link from 'next/link'
 import { createServiceClient } from '@/lib/supabase'
 import { Button } from '@/components/ui/button'
@@ -20,7 +20,8 @@ export default async function JobsPage({
 }: {
   searchParams: Promise<{ status?: string; page?: string }>
 }) {
-  const { userId } = await auth()
+  const session = await auth()
+  const userId = session!.user!.id
   const params = await searchParams
   const statusFilter = (params.status ?? 'all') as JobStatus | 'all'
   const page = parseInt(params.page ?? '1', 10)

@@ -1,4 +1,4 @@
-import { auth } from '@clerk/nextjs/server'
+import { auth } from '@/auth'
 import { NextResponse } from 'next/server'
 import { createServiceClient, STORAGE_BUCKET } from '@/lib/supabase'
 
@@ -20,7 +20,8 @@ const ROLE_FILENAMES: Record<Role, string> = {
 }
 
 export async function POST(req: Request) {
-  const { userId } = await auth()
+  const session = await auth()
+  const userId = session?.user?.id
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { fileName, jobId, role } = await req.json() as {
