@@ -1,0 +1,40 @@
+# Force Unix line endings on files that must be readable by Linux containers
+# even when checked out on Windows. Without this, Windows clones with the
+# default core.autocrlf=true ship CRLF-tainted shell scripts to Spark, where
+# bash chokes on every line with `$'\r': command not found`.
+*.sh           text eol=lf
+*.bash         text eol=lf
+Dockerfile     text eol=lf
+*.dockerfile   text eol=lf
+
+# YAML/config files also benefit — some parsers are CRLF-aware, others aren't
+*.yaml         text eol=lf
+*.yml          text eol=lf
+
+# Python is tolerant of CRLF but normalize for consistency
+*.py           text eol=lf
+
+# Web app files — keep LF for cross-platform diffs
+*.ts           text eol=lf
+*.tsx          text eol=lf
+*.js           text eol=lf
+*.jsx          text eol=lf
+*.mjs          text eol=lf
+*.json         text eol=lf
+*.md           text eol=lf
+
+# Binary files — never touch
+*.png          binary
+*.jpg          binary
+*.jpeg         binary
+*.gif          binary
+*.webp         binary
+*.pdf          binary
+*.zip          binary
+*.tar          binary
+*.tar.gz       binary
+*.tgz          binary
+*.pth          binary
+*.safetensors  binary
+*.bin          binary
+*.exr          binary

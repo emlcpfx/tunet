@@ -176,9 +176,18 @@ export async function packInputTarball(input: PackInput): Promise<PackResult> {
     )
     fileCount += 1
 
-    // 3. Copy spark_start.sh at the root
+    // 3. Copy spark_start.sh at the root, force LF line endings so bash on
+    // the Linux container doesn't choke with `$'\r': command not found` if a
+    // Windows checkout left CRLFs in the working tree. The repo's
+    // .gitattributes also forces LF on .sh files; this is the belt-and-
+    // suspenders backstop for the case where it doesn't take effect (fresh
+    // contributor, broken autocrlf, .gitattributes stripped, etc.).
     const startDest = path.join(stageDir, input.startScriptName ?? 'spark_start.sh')
-    await fs.promises.copyFile(startScriptSrc, startDest)
+    const startBody = await fs.promises.readFile(startScriptSrc, 'utf8')
+    await fs.promises.writeFile(startDest, startBody.replace(/\r\n/g, '\n').replace(/\r/g, '\n'), {
+      encoding: 'utf8',
+      mode:     0o755,
+    })
     fileCount += 1
 
     // 3b. Bundle staged data if provided. Copy each role dir to data/<role>/
