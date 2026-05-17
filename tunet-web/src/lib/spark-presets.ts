@@ -35,6 +35,20 @@ export interface Preset {
   mask: {
     use_auto_mask:    boolean
     auto_mask_gamma?: number
+    /**
+     * Default for whether the preset turns on loss weighting by mask. For
+     * tasks with small regions of interest (smudges, dust, paint fixes) this
+     * needs to be true or the optimizer collapses to identity-function on
+     * the small affected area. The user can still override via advanced.
+     */
+    use_mask_loss?:   boolean
+    /**
+     * Default mask weight when use_mask_loss (or use_auto_mask) is on. The
+     * platform default is 10 which is too low for small ROIs — Beauty-class
+     * presets ship with 100 so the smudge-removal use case works out of the
+     * box without the user having to discover the knob.
+     */
+    mask_weight?:     number
   }
   // Optional behavior flags
   skip_empty_patches:    boolean
@@ -62,7 +76,20 @@ export const PRESETS: Record<PresetKey, Preset> = {
     model:    { model_type: 'msrn', model_size_dims: 64, recurrence_steps: 2 },
     data:     { resolution: 512, overlap_factor: 0.5 },
     training: { loss: 'l1+lpips', lambda_lpips: 0.2, lr: 1e-4, iterations_per_epoch: 500 },
-    mask:     { use_auto_mask: true, auto_mask_gamma: 0.5 },
+    // use_mask_loss + mask_weight=100 are the difference between this preset
+    // actually fixing small smudges and the optimizer collapsing to identity.
+    // With small ROIs (e.g. a lipstick smudge on a glass that's 0.3% of frame
+    // area) the platform default mask_weight=10 gives the masked region only
+    // ~3% of total loss — the model is rewarded more for matching the
+    // unchanged background pixel-perfect than for learning the smudge. At
+    // weight=100 the masked region contributes ~23% of loss, which is enough
+    // to break the identity-function trap.
+    mask: {
+      use_auto_mask: true,
+      auto_mask_gamma: 0.5,
+      use_mask_loss: true,
+      mask_weight: 100,
+    },
     skip_empty_patches: true,
     progressive_resolution: false,
   },
@@ -233,7 +260,12 @@ export function buildConfig(
   // Resolve common values with fallbacks
   const useAutoMask = overrides.use_auto_mask ?? preset.mask.use_auto_mask
   const loss        = overrides.loss          ?? preset.training.loss
-  const useMaskLoss     = overrides.use_mask_loss     ?? false
+  // Read mask settings from preset first, then override, then hardcoded
+  // default — so presets that ship with mask weighting enabled (e.g. Beauty)
+  // actually train with weighting on. Pre-presets-with-mask-defaults the
+  // chain was `overrides ?? false / 10`, which silently ignored what the
+  // preset declared.
+  const useMaskLoss     = overrides.use_mask_loss     ?? preset.mask.use_mask_loss     ?? false
   const useMaskInput    = overrides.use_mask_input    ?? false
   const skipEmptyPatch  = overrides.skip_empty_patches ?? preset.skip_empty_patches
   const progressiveRes  = overrides.progressive_resolution ?? preset.progressive_resolution
@@ -252,7 +284,9 @@ export function buildConfig(
     },
     mask: {
       use_mask_loss:        useMaskLoss,
-      mask_weight:          overrides.mask_weight ?? 10.0,
+      // Same fallback fix as use_mask_loss above — preset.mask.mask_weight
+      // wins over the hardcoded 10 when the user hasn't explicitly overridden.
+      mask_weight:          overrides.mask_weight ?? preset.mask.mask_weight ?? 10.0,
       use_mask_input:       useMaskInput,
       use_auto_mask:        useAutoMask,
       auto_mask_gamma:      overrides.auto_mask_gamma ?? preset.mask.auto_mask_gamma ?? 1.0,

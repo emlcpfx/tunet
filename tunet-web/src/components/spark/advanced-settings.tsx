@@ -233,16 +233,16 @@ export function AdvancedSettings({
         <Grid2>
           <FormRow label="Use mask loss" tip={TIPS.use_mask_loss}>
             <Toggle
-              checked={value.use_mask_loss ?? false}
+              checked={value.use_mask_loss ?? preset.mask.use_mask_loss ?? false}
               onChange={(c) => set('use_mask_loss', c)}
               label="Weight loss by mask (white = important)"
             />
           </FormRow>
-          {value.use_mask_loss && (
+          {(value.use_mask_loss ?? preset.mask.use_mask_loss ?? false) && (
             <FormRow label="Mask weight" tip={TIPS.mask_weight}>
               <Input
-                type="number" step="0.5" min={1} max={100}
-                value={value.mask_weight ?? 10.0}
+                type="number" step="0.5" min={1} max={1000}
+                value={value.mask_weight ?? preset.mask.mask_weight ?? 10.0}
                 onChange={(e) => set('mask_weight', parseFloat(e.target.value || '10'))}
               />
             </FormRow>

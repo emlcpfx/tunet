@@ -950,6 +950,12 @@ def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_
     return model, optimizer, scaler, scheduler, start_epoch, start_step, ckpt_prefix, use_amp_eff, criterion_l1, criterion_l2, criterion_bce
 
 
+# One-shot flag for diagnostic logging (so we print mask stats once at the
+# start of training instead of every step). Keyed dict so we can add more
+# diagnostics here without colliding namespaces.
+_DIAG_LOGGED: dict = {'mask': False}
+
+
 def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion_l1, criterion_l2,
                            loss_fn_lpips, criterion_bce, config, device, device_type, use_amp_eff,
                            use_bce_dice, use_lpips, use_weighted, use_l2, use_mask_loss, use_auto_mask,
@@ -988,6 +994,47 @@ def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion
             else:
                 weight_map = None
                 l1 = criterion_l1(out, dst)
+            # One-time diagnostics: prove the weight map is actually doing
+            # something. Print mask coverage, mean weight, and effective
+            # amplification (weighted L1 / raw L1) — if the ratio is ~1, the
+            # mask is empty or near-empty and the weighting has no effect,
+            # which means training will collapse to identity-function on
+            # small regions of interest. Only logged once per process.
+            if weight_map is not None and not _DIAG_LOGGED['mask']:
+                _DIAG_LOGGED['mask'] = True
+                try:
+                    with torch.no_grad():
+                        wm = weight_map.detach()
+                        # 'Coverage' = fraction of pixels weighted >1 (i.e. masked)
+                        coverage = (wm > 1.0).float().mean().item()
+                        raw_l1 = torch.abs(out.detach() - dst).mean().item()
+                        weighted = l1.detach().item()
+                        ratio = weighted / max(raw_l1, 1e-8)
+                        logging.info(
+                            f"[Mask diag] coverage={coverage*100:.2f}%  "
+                            f"mean_w={wm.mean().item():.2f}  max_w={wm.max().item():.2f}  "
+                            f"weighted_L1={weighted:.4f}  raw_L1={raw_l1:.4f}  "
+                            f"amplification={ratio:.1f}x"
+                        )
+                        if coverage < 0.001:
+                            logging.warning(
+                                "[Mask diag] mask coverage < 0.1% — the mask "
+                                "is essentially empty. Auto-mask may be too "
+                                "strict for this dataset (try a lower "
+                                "auto_mask_gamma) or the src/dst pairs may "
+                                "be too similar for auto-mask to find a "
+                                "signal. Mask weighting will have no effect."
+                            )
+                        elif ratio < 1.5:
+                            logging.warning(
+                                "[Mask diag] amplification < 1.5x — mask "
+                                "weighting is barely affecting loss. Consider "
+                                "raising mask_weight or widening auto-mask "
+                                "gamma. Without meaningful amplification, the "
+                                "optimizer is rewarded for identity output."
+                            )
+                except Exception as diag_err:
+                    logging.debug(f"[Mask diag] failed: {diag_err}")
             l2_val = torch.tensor(0.0, device=device)
             if use_l2 and criterion_l2 is not None:
                 if weight_map is not None:
@@ -1042,6 +1089,9 @@ def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion
 # --- Training Function ---
 def train(config):
     global shutdown_requested, scaler, _stop_file_path # Make scaler global for use in save_previews
+    # Reset one-shot diagnostic flags so a second train() call in the same
+    # process (rare, but happens in tests + REPL workflows) prints them again.
+    _DIAG_LOGGED['mask'] = False
     training_successful = False; final_global_step = 0
     # Separate from shutdown_requested (which means "user / max-time / stop-file
     # asked us to stop"). loop_crashed is for unhandled exceptions in the
