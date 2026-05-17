@@ -36,6 +36,7 @@ import {
 import { uploadStage } from '@/lib/upload-stage'
 import { jobLabel } from '@/lib/spark-types'
 import type { SparkJob } from '@/lib/spark-types'
+import type { PricingMap } from '@/app/api/spark/pricing/route'
 
 interface GpuOption {
   key:   string
@@ -285,7 +286,20 @@ function NewJobPageInner() {
     selectedPreset.model.model_type, selectedPreset.training.loss,
   ])
 
-  const hourlyRate     = pricePerHour(selectedGpu.sku)
+  // Live pricing from POST /api/compute/jobs/estimate, cached server-side for
+  // 5 min. Falls back to the hardcoded GPU_PRICING_USD_PER_HR table only if
+  // the fetch hasn't landed yet or Spark's estimate endpoint is unreachable.
+  const [livePricing, setLivePricing] = useState<PricingMap | null>(null)
+  useEffect(() => {
+    fetch('/api/spark/pricing', { cache: 'no-store' })
+      .then(r => (r.ok ? r.json() : null))
+      .then((data: PricingMap | null) => { if (data) setLivePricing(data) })
+      .catch(() => { /* fall back to hardcoded prices */ })
+  }, [])
+  const priceFor = (sku: string): number =>
+    livePricing?.[sku]?.instantUsdPerHr ?? pricePerHour(sku)
+
+  const hourlyRate     = priceFor(selectedGpu.sku)
   const estCostLowUSD  = estimate.lowHours  * hourlyRate
   const estCostHighUSD = estimate.highHours * hourlyRate
 
@@ -849,6 +863,7 @@ Letters, numbers, _ and - only — anything else is sanitized."
                 <GpuChip
                   key={g.key}
                   gpu={g}
+                  priceUsdPerHr={priceFor(g.sku)}
                   selected={g.key === gpuKey}
                   onClick={() => setGpuKey(g.key)}
                 />
@@ -1041,7 +1056,12 @@ function PresetCard({ preset, selected, onClick }: { preset: Preset; selected: b
   )
 }
 
-function GpuChip({ gpu, selected, onClick }: { gpu: GpuOption; selected: boolean; onClick: () => void }) {
+function GpuChip({ gpu, priceUsdPerHr, selected, onClick }: {
+  gpu: GpuOption
+  priceUsdPerHr: number
+  selected: boolean
+  onClick: () => void
+}) {
   const badgeColor = (
     gpu.badge === 'recommended' ? 'text-[#ae69f4]' :
     gpu.badge === 'expensive'   ? 'text-[#D97706]' :
@@ -1049,7 +1069,7 @@ function GpuChip({ gpu, selected, onClick }: { gpu: GpuOption; selected: boolean
     gpu.badge === 'fastest'     ? 'text-[#1c64f2]' :
                                   'text-[#9ca3af]'
   )
-  const hourly = pricePerHour(gpu.sku)
+  const hourly = priceUsdPerHr
   return (
     <button
       type="button"

@@ -209,6 +209,34 @@ export async function cancelJob(id: string): Promise<SparkJob> {
   return sparkFetch<SparkJob>('POST', `/api/compute/jobs/${id}/cancel`)
 }
 
+export interface SparkEstimateResponse {
+  instanceType:       string
+  availabilityRegion: string
+  mode:               'instant' | 'smart'
+  rate: {
+    costPerHourUsd:        string
+    markupMultiplier:      number
+    billedPerSecondCents:  string
+    billedPerHourUsd:      string
+  }
+  estimate?: {
+    billableSeconds: number
+    totalCents:      string
+    totalUsd:        string
+  }
+  notes?: string[]
+}
+
+export async function estimateJobCost(
+  instanceType: string,
+  mode: 'instant' | 'smart' = 'instant',
+): Promise<SparkEstimateResponse> {
+  return sparkFetch<SparkEstimateResponse>('POST', '/api/compute/jobs/estimate', {
+    instanceType,
+    mode,
+  })
+}
+
 export async function submitJob(input: SubmitJobInput): Promise<SubmitJobResponse> {
   return sparkFetch<SubmitJobResponse>('POST', '/api/compute/jobs', {
     name:            input.name,
