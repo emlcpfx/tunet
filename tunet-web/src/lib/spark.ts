@@ -182,6 +182,19 @@ export interface SubmitJobInput {
   command:          string[]                // argv inside the container
   idleHoldSeconds?: number                  // 0 = stop immediately on exit
   env?:             Record<string, string>
+  /**
+   * Compute mode. Defaults to 'instant' (warm-pool, guaranteed availability).
+   * 'smart' = preemptible spare capacity, ~60% cheaper but may be reclaimed
+   * mid-run (the platform re-queues onto fresh smart capacity up to the retry
+   * budget). See Spark Fuse API docs §13.
+   */
+  mode?: 'instant' | 'smart'
+  /**
+   * (smart-mode only) How many times the platform may re-launch this job on
+   * fresh smart-mode compute if the current attempt is preempted. Default 1,
+   * range [0, 5]. Ignored when mode='instant'.
+   */
+  maxRetriesOnInterrupt?: number
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -238,14 +251,21 @@ export async function estimateJobCost(
 }
 
 export async function submitJob(input: SubmitJobInput): Promise<SubmitJobResponse> {
+  const mode = input.mode ?? 'instant'
   return sparkFetch<SubmitJobResponse>('POST', '/api/compute/jobs', {
     name:            input.name,
     instanceType:    input.instanceType,
     image:           input.image ?? DEFAULT_IMAGE,
     command:         input.command,
     inputPushMode:   'auto-prepare',
-    idleHoldSeconds: input.idleHoldSeconds ?? 0,
+    // Idle-hold is InstantCompute-only (per docs §11.3); Spark ignores it on
+    // smart-mode jobs, but omit it anyway so the request body is honest.
+    ...(mode === 'instant' ? { idleHoldSeconds: input.idleHoldSeconds ?? 0 } : {}),
     env:             input.env ?? {},
+    mode,
+    ...(mode === 'smart' && input.maxRetriesOnInterrupt !== undefined
+      ? { maxRetriesOnInterrupt: input.maxRetriesOnInterrupt }
+      : {}),
   })
 }
 

@@ -14,9 +14,10 @@
 
 import type { AdvancedOverrides, PresetKey } from './spark-presets'
 
-export const FORM_STATE_VERSION = 2
+export const FORM_STATE_VERSION = 3
 
 export type TrainingMode = 'new' | 'resume' | 'finetune'
+export type ComputeMode  = 'instant' | 'smart'
 
 export interface SourceJobRef {
   /** Spark job id of the prior run we're resuming from / fine-tuning off of. */
@@ -38,6 +39,10 @@ export interface SerializedFormState {
   source?:           SourceJobRef
   preset:            PresetKey
   gpuKey:            string
+  /** Defaults to 'instant' for stashes older than v3. */
+  computeMode:       ComputeMode
+  /** Smart-mode retry budget. Defaults to 1 for older stashes / instant mode. */
+  maxRetriesOnInterrupt: number
   advanced:          AdvancedOverrides
   maxSteps:          number
   idleHoldSeconds:   number
@@ -66,6 +71,8 @@ export interface FormStateBuildInput {
   source?:         SourceJobRef
   preset:          PresetKey
   gpuKey:          string
+  computeMode:     ComputeMode
+  maxRetriesOnInterrupt: number
   advanced:        AdvancedOverrides
   maxSteps:        number
   idleHoldSeconds: number
@@ -112,12 +119,24 @@ export function parseFormState(raw: string | undefined | null): SerializedFormSt
           }
         : undefined
 
+    // v3 added computeMode + maxRetriesOnInterrupt. Older stashes get the
+    // back-compat defaults: instant mode (which is what every pre-v3 job
+    // was) and a retry budget of 1.
+    const computeMode: ComputeMode =
+      parsed.computeMode === 'smart' ? 'smart' : 'instant'
+    const maxRetriesOnInterrupt =
+      typeof parsed.maxRetriesOnInterrupt === 'number'
+        ? Math.max(0, Math.min(5, Math.floor(parsed.maxRetriesOnInterrupt)))
+        : 1
+
     return {
       version:         typeof parsed.version === 'number' ? parsed.version : 0,
       mode,
       ...(source ? { source } : {}),
       preset:          parsed.preset as PresetKey,
       gpuKey:          parsed.gpuKey,
+      computeMode,
+      maxRetriesOnInterrupt,
       advanced:        (parsed.advanced ?? {}) as AdvancedOverrides,
       maxSteps:        typeof parsed.maxSteps        === 'number' ? parsed.maxSteps        : 0,
       idleHoldSeconds: typeof parsed.idleHoldSeconds === 'number' ? parsed.idleHoldSeconds : 0,

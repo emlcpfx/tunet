@@ -31,7 +31,7 @@ import {
 } from '@/lib/spark-presets'
 import {
   buildFormState, parseFormState,
-  type TrainingMode, type SourceJobRef,
+  type TrainingMode, type SourceJobRef, type ComputeMode,
 } from '@/lib/spark-form-state'
 import { uploadStage } from '@/lib/upload-stage'
 import { jobLabel } from '@/lib/spark-types'
@@ -112,6 +112,12 @@ function NewJobPageInner() {
   const [pairs, setPairs] = useState<number>(200)   // user-supplied or auto-detected from folder pick
   const [pairsAutoDetected, setPairsAutoDetected] = useState(false)
   const [idleHold, setIdleHold] = useState(0)
+  // Compute mode — InstantCompute (default, guaranteed availability) vs
+  // SmartCompute (preemptible, ~60% cheaper, auto-retries on interrupt).
+  const [computeMode, setComputeMode] = useState<ComputeMode>('instant')
+  // SmartCompute retry budget. Default 2 (one above Spark's default 1). Range
+  // [0, 5] per docs. Ignored when computeMode='instant'.
+  const [maxRetriesOnInterrupt, setMaxRetriesOnInterrupt] = useState<number>(2)
   // Training-alert prefs — read by api/cron/training-alerts. Defaulting both
   // to ON because the whole point is to save the user money; opting out is
   // explicit. Email is empty by default to force a deliberate choice.
@@ -216,6 +222,10 @@ function NewJobPageInner() {
       // Full rehydration from the stash — most accurate.
       setPreset(stashed.preset in PRESETS ? stashed.preset : 'beauty')
       setGpuKey(stashed.gpuKey)
+      setComputeMode(stashed.computeMode === 'smart' ? 'smart' : 'instant')
+      setMaxRetriesOnInterrupt(
+        Math.max(0, Math.min(5, Math.floor(stashed.maxRetriesOnInterrupt ?? 2))),
+      )
       // Merge skipThreshold into advanced.skip_empty_threshold in one shot —
       // calling setSkipThreshold separately would race with setAdvanced
       // because both spread the same closure-captured `advanced`.
@@ -296,8 +306,22 @@ function NewJobPageInner() {
       .then((data: PricingMap | null) => { if (data) setLivePricing(data) })
       .catch(() => { /* fall back to hardcoded prices */ })
   }, [])
-  const priceFor = (sku: string): number =>
-    livePricing?.[sku]?.instantUsdPerHr ?? pricePerHour(sku)
+  // Look up the live rate for the user's selected compute mode. Smart-mode
+  // rates can fall back to instant if Spark hasn't yet observed smart pricing
+  // for the SKU (the estimate endpoint flags that case in `notes[]`). If the
+  // /api/spark/pricing call hasn't landed at all, fall back to the hardcoded
+  // table — which is instant-only, so a smart-mode selection will briefly
+  // show the instant rate until the live fetch completes.
+  const priceFor = (sku: string): number => {
+    const live = livePricing?.[sku]
+    if (live) {
+      if (computeMode === 'smart') {
+        return live.smartUsdPerHr ?? live.instantUsdPerHr ?? pricePerHour(sku)
+      }
+      return live.instantUsdPerHr ?? pricePerHour(sku)
+    }
+    return pricePerHour(sku)
+  }
 
   const hourlyRate     = priceFor(selectedGpu.sku)
   const estCostLowUSD  = estimate.lowHours  * hourlyRate
@@ -369,6 +393,8 @@ function NewJobPageInner() {
       ...(source ? { source } : {}),
       preset,
       gpuKey,
+      computeMode,
+      maxRetriesOnInterrupt,
       advanced,
       maxSteps,
       idleHoldSeconds: idleHold,
@@ -405,6 +431,8 @@ function NewJobPageInner() {
         color_space: resolveColorSpace(advanced.color_space, picked?.sampleExt),
       },
       idleHoldSeconds: idleHold,
+      computeMode,
+      ...(computeMode === 'smart' ? { maxRetriesOnInterrupt } : {}),
       alerts: alertEmail.trim() ? {
         email:     alertEmail.trim(),
         plateau:   alertPlateau,
@@ -857,6 +885,50 @@ Letters, numbers, _ and - only — anything else is sanitized."
 
         {/* ── Step 5: Review & Train ─────────────────────────── */}
         <Card step={5} title="Review & Train">
+          <FormRow
+            label="Compute mode"
+            hint={computeMode === 'smart'
+              ? `SmartCompute: cheaper but may be reclaimed mid-run. Auto-retries up to ${maxRetriesOnInterrupt}×.`
+              : 'InstantCompute: warm-pool GPU, starts in seconds, never interrupted.'}
+            tip={`InstantCompute (default)
+  Warm-pool GPU. Starts in seconds, never preempted, full hourly rate.
+  Best for interactive runs and anything you don't want to babysit.
+
+SmartCompute (~60% off)
+  Preemptible spare capacity. ~3 min cold start. The platform may reclaim
+  the GPU mid-run with a short warning — Spark auto-re-queues your job on
+  fresh smart capacity up to your retry budget.
+
+  v1.15 caveat: smart-mode capacity comes from only 2 data centers, so
+  some SKUs (especially RTX PRO 6000) can sit in queued for several
+  minutes before capacity is found. Spark Fuse v1.2 (target 2026-05-22)
+  expands this.
+
+  Spark Fuse pays the partial-attempt time on every retry, not you — but
+  if your container can't resume from /output/ checkpoints, each retry
+  re-runs from scratch.`}
+          >
+            <div className="flex items-center gap-2">
+              <ComputeModeToggle value={computeMode} onChange={setComputeMode} />
+              {computeMode === 'smart' && (
+                <label className="flex items-center gap-1.5 text-xs text-[#6b7280]">
+                  Retry budget
+                  <Input
+                    type="number"
+                    min={0}
+                    max={5}
+                    value={maxRetriesOnInterrupt}
+                    onChange={(e) => {
+                      const n = parseInt(e.target.value || '0', 10)
+                      setMaxRetriesOnInterrupt(Math.max(0, Math.min(5, n)))
+                    }}
+                    className="w-16"
+                  />
+                </label>
+              )}
+            </div>
+          </FormRow>
+
           <FormRow label="GPU">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
               {GPU_OPTIONS.map(g => (
@@ -864,6 +936,7 @@ Letters, numbers, _ and - only — anything else is sanitized."
                   key={g.key}
                   gpu={g}
                   priceUsdPerHr={priceFor(g.sku)}
+                  computeMode={computeMode}
                   selected={g.key === gpuKey}
                   onClick={() => setGpuKey(g.key)}
                 />
@@ -873,14 +946,19 @@ Letters, numbers, _ and - only — anything else is sanitized."
 
           <FormRow
             label="Idle hold (seconds)"
-            hint="0 = stop instance immediately on exit. 300+ keeps warm for resubmits."
+            hint={computeMode === 'smart'
+              ? 'Ignored on SmartCompute (warm-pool is InstantCompute-only).'
+              : '0 = stop instance immediately on exit. 300+ keeps warm for resubmits.'}
             tip="How long to keep the GPU instance warm after training exits.
 
   0    — Stop immediately. Cheapest. Re-submitting later cold-starts (~3-5 min).
   300  — 5 min hold. Good if you might re-submit with tweaks.
   3600 — 1 hour hold. Useful for iterating live.
 
-You're billed for idle time — keep this minimal unless you know you'll resubmit."
+You're billed for idle time — keep this minimal unless you know you'll resubmit.
+
+Note: idle-hold is InstantCompute-only. SmartCompute jobs always release the
+GPU on exit (no warm-pool affinity in smart mode)."
           >
             <Input
               type="number"
@@ -888,7 +966,8 @@ You're billed for idle time — keep this minimal unless you know you'll resubmi
               max={3600}
               value={idleHold}
               onChange={(e) => setIdleHold(parseInt(e.target.value || '0', 10))}
-              className="w-32"
+              className={`w-32 ${computeMode === 'smart' ? 'opacity-50' : ''}`}
+              disabled={computeMode === 'smart'}
             />
           </FormRow>
 
@@ -952,6 +1031,12 @@ Leave the email field empty to opt out for this job entirely."
                   mode === 'resume'   ? `Resume of ${source?.jobLabel ?? '—'}`   :
                                         `Fine-tune of ${source?.jobLabel ?? '—'}`
                 }
+              />
+              <CostRow
+                label="Compute"
+                value={computeMode === 'smart'
+                  ? `SmartCompute · retry budget ${maxRetriesOnInterrupt}`
+                  : 'InstantCompute (warm-pool)'}
               />
               <CostRow label="GPU" value={`${selectedGpu.label} ${selectedGpu.vram} · $${hourlyRate.toFixed(2)}/hr`} />
               <CostRow label="Data" value={`${pairs} frame pairs · ${effectiveResolution}px`} />
@@ -1056,9 +1141,10 @@ function PresetCard({ preset, selected, onClick }: { preset: Preset; selected: b
   )
 }
 
-function GpuChip({ gpu, priceUsdPerHr, selected, onClick }: {
+function GpuChip({ gpu, priceUsdPerHr, computeMode, selected, onClick }: {
   gpu: GpuOption
   priceUsdPerHr: number
+  computeMode: ComputeMode
   selected: boolean
   onClick: () => void
 }) {
@@ -1088,9 +1174,46 @@ function GpuChip({ gpu, priceUsdPerHr, selected, onClick }: {
         <span className={`text-[10px] uppercase tracking-wider font-bold ${badgeColor}`}>
           {gpu.badge ?? '·'}
         </span>
-        <span className="text-xs text-[#374151] font-mono">${hourly.toFixed(2)}/hr</span>
+        <span className="text-xs text-[#374151] font-mono">
+          ${hourly.toFixed(2)}/hr
+          {computeMode === 'smart' && (
+            <span className="ml-1 text-[9px] uppercase tracking-wider text-[#16A34A] font-bold">smart</span>
+          )}
+        </span>
       </div>
     </button>
+  )
+}
+
+function ComputeModeToggle({ value, onChange }: {
+  value: ComputeMode
+  onChange: (m: ComputeMode) => void
+}) {
+  return (
+    <div className="inline-flex rounded-lg border border-[#e5e7eb] bg-white p-0.5">
+      <button
+        type="button"
+        onClick={() => onChange('instant')}
+        className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+          value === 'instant'
+            ? 'bg-[#7E3AF2] text-white'
+            : 'text-[#6b7280] hover:bg-[#F9FAFB]'
+        }`}
+      >
+        ⚡ Instant
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange('smart')}
+        className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+          value === 'smart'
+            ? 'bg-[#16A34A] text-white'
+            : 'text-[#6b7280] hover:bg-[#F9FAFB]'
+        }`}
+      >
+        💰 Smart <span className="opacity-75">(~60% off)</span>
+      </button>
+    </div>
   )
 }
 

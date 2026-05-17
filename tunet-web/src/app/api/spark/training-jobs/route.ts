@@ -26,7 +26,7 @@ import { packInputTarball } from '@/lib/spark-packer'
 import {
   PRESETS, buildConfig, type PresetKey, type AdvancedOverrides, type JobInputs,
 } from '@/lib/spark-presets'
-import type { SerializedFormState, TrainingMode } from '@/lib/spark-form-state'
+import type { SerializedFormState, TrainingMode, ComputeMode } from '@/lib/spark-form-state'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -65,6 +65,18 @@ interface Body {
   }
   advanced?: AdvancedOverrides
   idleHoldSeconds?: number
+  /**
+   * Compute mode. 'instant' (default) = warm-pool guaranteed-availability.
+   * 'smart' = preemptible spare capacity, ~60% cheaper but the platform may
+   * reclaim the underlying compute mid-run (auto-retries up to the budget).
+   */
+  computeMode?: ComputeMode
+  /**
+   * (smart-mode only) How many auto-retries the platform may consume if the
+   * underlying compute is preempted. Default 1, range [0, 5]. Ignored on
+   * instant-mode jobs.
+   */
+  maxRetriesOnInterrupt?: number
   /**
    * Optional: a stageId from /api/spark/upload-stage. If present, the staged
    * data folders (src/, dst/, val_src/, val_dst/) are bundled into the
@@ -288,12 +300,19 @@ export async function POST(req: Request) {
         send({ phase: 'submit', status: 'start' })
         const tSubmit = Date.now()
         const filesBase = process.env.SPARK_FILES_BASE_URL?.replace(/\/+$/, '')
+        const computeMode: ComputeMode = body.computeMode === 'smart' ? 'smart' : 'instant'
+        const maxRetriesOnInterrupt = computeMode === 'smart'
+          ? Math.max(0, Math.min(5, Math.floor(body.maxRetriesOnInterrupt ?? 2)))
+          : undefined
+
         const submitResp = await submitJob({
           name,
           instanceType:    sku,
           image:           DEFAULT_IMAGE,
           command:         ['bash', '/input/spark_start.sh', outputDir, '/input/config.yaml'],
           idleHoldSeconds: body.idleHoldSeconds ?? 0,
+          mode:            computeMode,
+          ...(maxRetriesOnInterrupt !== undefined ? { maxRetriesOnInterrupt } : {}),
           // Spark doesn't echo the submit `name` back in list/detail responses,
           // so we stash the friendly name + preset/gpu in env. The container
           // ignores these (they're just metadata for our own UI to read back).
@@ -301,8 +320,12 @@ export async function POST(req: Request) {
             TUNET_JOB_NAME:  name,
             TUNET_PRESET:    preset.key,
             TUNET_GPU:       gpuKey,
-            // Mode + source — read by jobs-list / detail to show a "Resume of"
-            // or "Fine-tune of" badge. Trainer ignores these.
+            // Surface the compute mode in env so the job-detail UI can render
+            // a "SmartCompute" badge without re-fetching the full submit body.
+            ...(computeMode === 'smart' ? { TUNET_COMPUTE_MODE: 'smart' } : {}),
+            // Training-mode (new/resume/finetune) — distinct from compute mode.
+            // Read by jobs-list / detail to show a "Resume of" / "Fine-tune of"
+            // badge. Trainer ignores these.
             ...(mode !== 'new' ? { TUNET_MODE: mode } : {}),
             ...(body.source?.jobId          ? { TUNET_SOURCE_JOB_ID:    body.source.jobId          } : {}),
             ...(body.source?.checkpointName ? { TUNET_SOURCE_CHECKPOINT: body.source.checkpointName } : {}),
