@@ -10,6 +10,6 @@ export default async function RootPage() {
   }
 
   const session = await auth()
-  if (session?.user?.id) redirect('/dashboard')
+  if (session?.user?.id) redirect('/demo/dashboard')
   redirect('/sign-in')
 }
