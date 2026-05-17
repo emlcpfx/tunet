@@ -495,6 +495,10 @@ class TrainingTabMixin:
             "Speeds up training when only parts of the image have changes.\n\n"
             "Requires Auto Mask to be enabled.")
         self.use_auto_mask_input.toggled.connect(self.skip_empty_patches_input.setEnabled)
+        # Sync initial enabled state — same connect-after-setChecked trap as
+        # the auto_mask_gamma_input below. Without this, "Skip empty patches"
+        # is grey at startup even though Auto-mask is on.
+        self.skip_empty_patches_input.setEnabled(self.use_auto_mask_input.isChecked())
 
         self.skip_empty_threshold_input = QDoubleSpinBox()
         self.skip_empty_threshold_input.setRange(0.1, 20.0)
@@ -518,8 +522,13 @@ class TrainingTabMixin:
             "  < 1.0 — expands white coverage (e.g. 0.5 for subtle beauty work)\n"
             "  > 1.0 — contracts it (tighter focus)\n"
             "  1.0 — neutral, no adjustment")
-        self.auto_mask_gamma_input.setEnabled(False)
         self.use_auto_mask_input.toggled.connect(self.auto_mask_gamma_input.setEnabled)
+        # Sync initial enabled state to the checkbox's actual value. The
+        # toggled signal only fires on state *changes*, not on the connect
+        # itself — without this line, the gamma input stays disabled at startup
+        # if use_auto_mask was setChecked(True) before this connect (which it
+        # is at line 482). Same trap as skip_empty_patches_input below.
+        self.auto_mask_gamma_input.setEnabled(self.use_auto_mask_input.isChecked())
 
         mask_weight_row = QHBoxLayout()
         mask_weight_row.addWidget(self.use_mask_loss_input)
