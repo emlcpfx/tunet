@@ -1043,6 +1043,12 @@ def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion
 def train(config):
     global shutdown_requested, scaler, _stop_file_path # Make scaler global for use in save_previews
     training_successful = False; final_global_step = 0
+    # Separate from shutdown_requested (which means "user / max-time / stop-file
+    # asked us to stop"). loop_crashed is for unhandled exceptions in the
+    # training loop — OOM, CUDA errors, etc. — so the final-status logic can
+    # report them honestly and exit non-zero instead of pretending it was a
+    # graceful shutdown.
+    loop_crashed = False
 
     # --- Stop file setup (file-based stop signal from GUI) ---
     _stop_file_path = getattr(config, '_stop_file', None)
@@ -1668,13 +1674,16 @@ def train(config):
         if not shutdown_requested: handle_signal(signal.SIGINT, None)
     except Exception as loop_err:
         logging.error("FATAL Training loop error:", exc_info=True);
-        shutdown_requested = True
+        loop_crashed = True
     finally:
         # Flush any async checkpoint write before proceeding to final save
         if _pending_ckpt_thread is not None and _pending_ckpt_thread.is_alive():
             _pending_ckpt_thread.join()
         max_steps_reached = max_steps > 0 and final_global_step >= max_steps
-        if (shutdown_requested or max_steps_reached) and is_main_process():
+        # Save final checkpoint on any exit path that completed at least some
+        # work — graceful shutdown, hit max_steps, or crashed mid-run (so the
+        # user can resume from whatever step they reached before the OOM).
+        if (shutdown_requested or max_steps_reached or loop_crashed) and is_main_process():
             logging.info(f"Performing final checkpoint save (State @ Step {final_global_step})...")
             try:
                  final_ep = final_global_step // iter_epoch; latest_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth'); cfg_dict = config_to_dict(config)
@@ -1697,7 +1706,14 @@ def train(config):
             except Exception as e: logging.error(f"Final checkpoint save failed: {e}", exc_info=True)
 
         if is_main_process():
-            status = "successfully" if training_successful and not shutdown_requested else "gracefully" if shutdown_requested else "with errors"
+            if loop_crashed:
+                status = "with errors (training loop crashed — see traceback above)"
+            elif training_successful and not shutdown_requested:
+                status = "successfully"
+            elif shutdown_requested:
+                status = "gracefully"
+            else:
+                status = "with errors"
             logging.info(f"Training finished {status} at Step {final_global_step}.")
         cleanup_ddp();
         if is_main_process(): logging.info("Script finished.")
@@ -1706,8 +1722,15 @@ def train(config):
         # what happened. Spark Fuse maps container_nonzero_exit to job
         # status='failed' with the real exit_code on the row — without this,
         # a crash-at-step-0 would be reported as `succeeded` and silently
-        # billed. Graceful shutdowns (SIGINT, max-runtime) still exit 0.
-        if not training_successful and not shutdown_requested:
+        # billed. Three failure modes covered:
+        #   1. loop_crashed         — OOM, CUDA error, dataloader bus error.
+        #   2. final_global_step==0 — never completed a single batch (covers
+        #                             "graceful shutdown" before step 1, which
+        #                             is also a no-progress failure).
+        #   3. !training_successful — fell through with errors but no crash.
+        # Real graceful shutdown (Ctrl-C / max-time / stop-file) AFTER at
+        # least one successful step still exits 0.
+        if loop_crashed or final_global_step == 0 or (not training_successful and not shutdown_requested):
             exit(1)
 
 
