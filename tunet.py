@@ -202,8 +202,35 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         """Scan dataset patches and show a live grid of kept (green) vs skipped (red) patches."""
         import numpy as np
         from glob import glob as _glob
-        from PIL import Image as _Image, ImageDraw
+        from PIL import Image as _Image, ImageDraw, ImageFilter
         from PySide6.QtGui import QImage
+
+        def _refine_mask_np(diff_uint8, gamma=1.0):
+            """Numpy port of training/loss.py:refine_auto_mask, computed at the
+            thumbnail's resolution for fast preview. Input is a uint8 grayscale
+            diff (0-255); returns uint8 mask (0-255). Visual fidelity not
+            byte-exact with the runtime mask (PIL gaussian vs torch's, no
+            torch-style edge handling) — close enough for picking a gamma."""
+            diff = diff_uint8.astype(np.float32) / 255.0
+            res = diff.shape[-1]
+            # Match the runtime's kernel size scaling (max(31, 31*res/256)).
+            # PIL's GaussianBlur radius ≈ sigma; sigma ≈ kernel/6 is a fine
+            # approximation for visual purposes.
+            kernel = max(31, int(31 * res / 256) | 1)
+            pil = _Image.fromarray((diff * 255).astype(np.uint8), mode='L')
+            pil = pil.filter(ImageFilter.GaussianBlur(radius=kernel / 6.0))
+            diff = np.array(pil, dtype=np.float32) / 255.0
+            max_val = float(diff.max()) + 1e-8
+            if max_val < 0.01:
+                return np.zeros_like(diff_uint8)
+            diff = diff / max_val
+            diff = 1.0 / (1.0 + np.exp(-20.0 * (diff - 0.15)))
+            mn = float(diff.min())
+            mx = float(diff.max())
+            diff = (diff - mn) / (mx - mn + 1e-8)
+            if gamma != 1.0:
+                diff = np.power(diff, gamma)
+            return (diff * 255).clip(0, 255).astype(np.uint8)
 
         src_dir = self._get_path(self.src_dir_input).strip()
         dst_dir = self._get_path(self.dst_dir_input).strip()
@@ -243,15 +270,21 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         size_slider.setTickInterval(20)
 
         sort_check = QCheckBox("Sort skipped first")
-        # Show diff thumbnails instead of src — useful when the region of
-        # interest (smudge, artifact, etc.) is small and you want to see
-        # *where* each patch differs from the target.
-        show_diff_check = QCheckBox("Show diff (white = changed)")
-        show_diff_check.setToolTip(
-            "Display each patch as a grayscale difference map between src and dst "
-            "instead of the source image. Bright pixels = where src and dst differ. "
-            "Use this to find patches that contain the smudge / artifact / region "
-            "of interest, so you can set the skip threshold to include only those.")
+        # View selector: Source / Diff / Mask. Diff shows |src - dst| amplified
+        # by `amp`; Mask shows the auto-mask that training will actually weight
+        # the loss with, computed at the current `gamma`. Picking a gamma here
+        # before training is way cheaper than burning compute to find out the
+        # mask collapses to 100%-coverage.
+        view_label = QLabel("View:")
+        view_combo = QComboBox()
+        view_combo.addItems(["Source", "Diff", "Mask"])
+        view_combo.setToolTip(
+            "What each tile shows:\n\n"
+            "  Source — the src patch as-is.\n"
+            "  Diff   — |src - dst| as a grayscale map (use Amp to brighten).\n"
+            "  Mask   — the auto-mask weight map at the current gamma. This\n"
+            "           is the actual signal training will weight the loss by.\n"
+            "           Coverage / mean stats appear in the stats line.")
         # Multiplier applied to raw diff (0-255) before display. 1× shows the
         # raw signal; higher values make faint smudges glow. Re-render only —
         # doesn't affect the threshold math, which always uses raw max_diff.
@@ -272,6 +305,26 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             "Affects display only — the skip-empty threshold above still "
             "uses the raw diff values, so cranking amp doesn't change which "
             "patches are kept vs skipped.")
+        # Gamma applied to the auto-mask preview. Mirrors the actual training
+        # path (training/loss.py:refine_auto_mask) so you can pick a gamma
+        # that gives sensible coverage *before* committing to a run.
+        gamma_label = QLabel("Gamma:")
+        gamma_spin = QDoubleSpinBox()
+        gamma_spin.setRange(0.1, 3.0)
+        gamma_spin.setSingleStep(0.1)
+        gamma_spin.setDecimals(2)
+        gamma_spin.setValue(self.auto_mask_gamma_input.value() if hasattr(self, 'auto_mask_gamma_input') else 1.0)
+        gamma_spin.setFixedWidth(70)
+        gamma_spin.setToolTip(
+            "Gamma applied to the auto-mask weight map.\n\n"
+            "  < 1.0 — expands white (e.g. 0.5 makes weak signals louder).\n"
+            "          Watch out for coverage ≈ 100% — every pixel weighted.\n"
+            "  1.0   — no adjustment (raw normalized mask).\n"
+            "  > 1.0 — contracts the mask, focusing on strong signals.\n"
+            "          Good when src/dst pairs have noise everywhere.\n"
+            "  2.0+  — very tight, only the brightest diff regions stay white.\n\n"
+            "Changing here also updates the Auto Mask Gamma in the main form\n"
+            "so you can preview, find a good value, then close the dialog.")
 
         stats_label = QLabel("Scanning…")
         stats_label.setStyleSheet("font-weight: bold;")
@@ -283,14 +336,28 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         ctrl_row.addWidget(size_slider)
         ctrl_row.addSpacing(16)
         ctrl_row.addWidget(sort_check)
-        ctrl_row.addSpacing(8)
-        ctrl_row.addWidget(show_diff_check)
+        ctrl_row.addSpacing(12)
+        ctrl_row.addWidget(view_label)
+        ctrl_row.addWidget(view_combo)
         ctrl_row.addSpacing(4)
         ctrl_row.addWidget(amp_label)
         ctrl_row.addWidget(amp_spin)
+        ctrl_row.addWidget(gamma_label)
+        ctrl_row.addWidget(gamma_spin)
         ctrl_row.addStretch()
         ctrl_row.addWidget(stats_label)
         win_layout.addLayout(ctrl_row)
+
+        # Hide the per-view controls until they're relevant — the controls row
+        # would get crowded if Amp + Gamma were always visible side-by-side.
+        def _sync_view_controls():
+            v = view_combo.currentText()
+            for w in (amp_label, amp_spin):
+                w.setVisible(v == 'Diff')
+            for w in (gamma_label, gamma_spin):
+                w.setVisible(v == 'Mask')
+        _sync_view_controls()
+        view_combo.currentTextChanged.connect(lambda _: _sync_view_controls())
 
         # Scroll area for the grid
         scroll = QScrollArea()
@@ -386,8 +453,9 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             threshold = thresh_spin.value()
             thumb_size = size_slider.value()
             do_sort = sort_check.isChecked()
-            show_diff = show_diff_check.isChecked()
+            view = view_combo.currentText()
             amp = amp_spin.value()
+            gamma = gamma_spin.value()
 
             # Clear existing grid
             while grid_layout.count():
@@ -397,16 +465,53 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
 
             kept = sum(1 for d, _, _ in patch_data if d >= threshold)
             skipped = len(patch_data) - kept
-            stats_label.setText(
+            base_stats = (
                 f"Total: {len(patch_data)}   "
                 f"<span style='color:#16A34A'>Kept: {kept}</span>   "
                 f"<span style='color:#EF4444'>Skipped: {skipped}</span>   "
-                f"({100*skipped/max(1,len(patch_data)):.0f}% filtered)")
+                f"({100*skipped/max(1,len(patch_data)):.0f}% filtered)"
+            )
 
-            items = list(patch_data)
+            # Pre-compute mask thumbnails for Mask view + aggregate coverage
+            # so the stats line can show the same numbers training prints in
+            # the [Mask diag] log on the first step.
+            mask_thumbs = None
+            if view == 'Mask' and patch_data:
+                mask_thumbs = []
+                total_pixels = 0
+                covered_pixels = 0
+                weight_sum = 0.0
+                weight_max = 0.0
+                # mask_weight is read from the main form. weight_map is
+                # 1 + mask * (mask_weight - 1), matching training/loss.py.
+                try:
+                    mw = float(self.mask_weight_input.value())
+                except Exception:
+                    mw = 10.0
+                for _, _, diff_raw in patch_data:
+                    mask = _refine_mask_np(diff_raw, gamma=gamma)
+                    mask_thumbs.append(mask)
+                    weight_map = 1.0 + (mask.astype(np.float32) / 255.0) * (mw - 1.0)
+                    total_pixels += weight_map.size
+                    covered_pixels += int((weight_map > 1.0).sum())
+                    weight_sum += float(weight_map.sum())
+                    if weight_map.max() > weight_max:
+                        weight_max = float(weight_map.max())
+                if total_pixels > 0:
+                    coverage = 100.0 * covered_pixels / total_pixels
+                    mean_w   = weight_sum / total_pixels
+                    base_stats += (
+                        f"   |   <span style='color:#7E3AF2'>"
+                        f"coverage={coverage:.1f}%  mean_w={mean_w:.2f}  max_w={weight_max:.1f}"
+                        f"</span>"
+                    )
+
+            stats_label.setText(base_stats)
+
+            items = list(enumerate(patch_data))
             if do_sort:
                 # skipped (red) first, then kept (green), each group by ascending diff
-                items.sort(key=lambda x: (x[0] >= threshold, x[0]))
+                items.sort(key=lambda it: (it[1][0] >= threshold, it[1][0]))
             else:
                 # preserve original order but stable-sort red/green within original
                 pass
@@ -416,12 +521,15 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             row_layout = None
             col = 0
             border = max(2, thumb_size // 30)
-            for max_diff, src_thumb, diff_raw in items:
-                if show_diff:
+            for orig_idx, (max_diff, src_thumb, diff_raw) in items:
+                if view == 'Diff':
                     # Build diff thumbnail at current amp. uint8 multiply with
                     # np.clip handles overflow safely.
                     amped = np.clip(diff_raw.astype(np.float32) * amp, 0, 255).astype(np.uint8)
                     thumb = _Image.fromarray(amped, mode='L').convert('RGB')
+                elif view == 'Mask' and mask_thumbs is not None:
+                    mask = mask_thumbs[orig_idx]
+                    thumb = _Image.fromarray(mask, mode='L').convert('RGB')
                 else:
                     thumb = src_thumb
                 if col % COLS == 0:
@@ -453,11 +561,20 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         thresh_spin.valueChanged.connect(lambda v: (_render_grid(), self.skip_empty_threshold_input.setValue(v)) if patch_data else None)
         size_slider.valueChanged.connect(lambda _: _render_grid() if patch_data else None)
         sort_check.stateChanged.connect(lambda _: _render_grid() if patch_data else None)
-        show_diff_check.stateChanged.connect(lambda _: _render_grid() if patch_data else None)
-        # Only re-render on amp change when the diff view is actually on —
-        # cheap guard against thrashing the grid while the user is scrubbing
-        # values that have no visible effect.
-        amp_spin.valueChanged.connect(lambda _: _render_grid() if (patch_data and show_diff_check.isChecked()) else None)
+        view_combo.currentTextChanged.connect(lambda _: _render_grid() if patch_data else None)
+        # Only re-render on amp / gamma changes when the relevant view is
+        # actually selected — cheap guard against thrashing the grid while
+        # the user is scrubbing values that have no visible effect.
+        amp_spin.valueChanged.connect(lambda _: _render_grid() if (patch_data and view_combo.currentText() == 'Diff') else None)
+        # Gamma changes also propagate to the main form's gamma input so the
+        # user can preview, find a good value, and have it saved when they
+        # close the dialog (no need to re-type the number).
+        def _on_gamma_changed(v):
+            if hasattr(self, 'auto_mask_gamma_input'):
+                self.auto_mask_gamma_input.setValue(v)
+            if patch_data and view_combo.currentText() == 'Mask':
+                _render_grid()
+        gamma_spin.valueChanged.connect(_on_gamma_changed)
 
         QTimer.singleShot(50, _wait_for_scan)
 
