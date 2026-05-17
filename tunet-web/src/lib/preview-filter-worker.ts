@@ -42,11 +42,13 @@ export interface PairInput {
 }
 
 export interface PatchOut {
-  x:       number
-  y:       number
-  src:     string   // file basename
-  maxDiff: number
-  thumb:   string   // base64 PNG
+  x:        number
+  y:        number
+  src:      string   // file basename
+  maxDiff:  number
+  thumb:    string   // base64 PNG — src patch downscaled to SCAN_THUMB_SIZE
+  diffThumb: string  // base64 PNG — grayscale |src-dst| at 1× amp; dialog
+                     //              applies CSS filter brightness(amp) on render
 }
 
 interface ScanMsg   { type: 'scan'; pairs: PairInput[]; resolution: number; overlap: number }
@@ -116,18 +118,20 @@ async function runScan(msg: ScanMsg) {
       const maxDiff = patchMaxAbsDiff(sImg.data, dImg.data, sImg.width,
         plan.x, plan.y, plan.w, plan.h)
 
-      const thumb = await renderThumb(sImg, plan.x, plan.y, plan.w, plan.h)
+      const thumb     = await renderThumb(sImg, plan.x, plan.y, plan.w, plan.h)
+      const diffThumb = await renderDiffThumb(sImg, dImg, plan.x, plan.y, plan.w, plan.h)
 
       post({
         type: 'patch',
         index: i,
         total: sampledPlans.length,
         patch: {
-          x:       plan.x,
-          y:       plan.y,
-          src:     pairs[plan.fileIdx].name,
+          x:         plan.x,
+          y:         plan.y,
+          src:       pairs[plan.fileIdx].name,
           maxDiff,
           thumb,
+          diffThumb,
         },
       })
       emitted++
@@ -230,6 +234,55 @@ async function renderThumb(
       patch[outOff + 2] = img.data[inOff + 2]
       patch[outOff + 3] = 255
       inOff  += 3
+      outOff += 4
+    }
+  }
+  const patchData = new ImageData(patch, w, h)
+
+  const fullCanvas = new OffscreenCanvas(w, h)
+  const fullCtx = fullCanvas.getContext('2d')
+  if (!fullCtx) throw new Error('OffscreenCanvas 2D context unavailable')
+  fullCtx.putImageData(patchData, 0, 0)
+
+  const thumbCanvas = new OffscreenCanvas(SCAN_THUMB_SIZE, SCAN_THUMB_SIZE)
+  const thumbCtx = thumbCanvas.getContext('2d')
+  if (!thumbCtx) throw new Error('OffscreenCanvas 2D context unavailable')
+  thumbCtx.drawImage(fullCanvas, 0, 0, SCAN_THUMB_SIZE, SCAN_THUMB_SIZE)
+
+  const blob = await thumbCanvas.convertToBlob({ type: 'image/png' })
+  return arrayBufferToBase64(await blob.arrayBuffer())
+}
+
+/**
+ * Build a grayscale |src - dst| thumbnail at 1× amplification. Each pixel is
+ * the channel-mean absolute difference (matches the metric used for
+ * maxDiff / the skip-empty threshold). The dialog applies CSS
+ * `filter: brightness(amp)` on render to amplify without re-encoding —
+ * scrubbing the amp slider is a pure style change, no worker round-trip.
+ */
+async function renderDiffThumb(
+  sImg: DecodedRgb8, dImg: DecodedRgb8,
+  x: number, y: number, w: number, h: number,
+): Promise<string> {
+  const patch = new Uint8ClampedArray(w * h * 4)
+  for (let row = 0; row < h; row++) {
+    const yy = y + row
+    let sOff   = (yy * sImg.width + x) * 3
+    let dOff   = (yy * dImg.width + x) * 3
+    let outOff = row * w * 4
+    for (let col = 0; col < w; col++) {
+      // Channel-mean of |delta| — matches preview-filter-core.patchMaxAbsDiff
+      // so the visual map agrees with the threshold metric.
+      const dr = Math.abs(sImg.data[sOff]     - dImg.data[dOff])
+      const dg = Math.abs(sImg.data[sOff + 1] - dImg.data[dOff + 1])
+      const db = Math.abs(sImg.data[sOff + 2] - dImg.data[dOff + 2])
+      const g  = (dr + dg + db) / 3
+      patch[outOff]     = g
+      patch[outOff + 1] = g
+      patch[outOff + 2] = g
+      patch[outOff + 3] = 255
+      sOff   += 3
+      dOff   += 3
       outOff += 4
     }
   }

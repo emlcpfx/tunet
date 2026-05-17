@@ -20,11 +20,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 interface Patch {
-  x:       number
-  y:       number
-  src:     string
-  maxDiff: number
-  thumb:   string  // base64 PNG
+  x:         number
+  y:         number
+  src:       string
+  maxDiff:   number
+  thumb:     string  // base64 PNG — src patch
+  diffThumb: string  // base64 PNG — grayscale |src-dst|, CSS filter amps it
 }
 
 interface PairInput {
@@ -62,6 +63,14 @@ export function PreviewFilterDialog({
   const [threshold, setThreshold] = useState(initialThreshold)
   const [size, setSize]           = useState(80)
   const [sortSkipped, setSort]    = useState(false)
+  // Switch each tile from src thumbnail to a grayscale |src-dst| map. Useful
+  // when the region of interest is small (smudge, dust, lens artifact) and
+  // src tiles all look identical — the diff makes the differing region pop.
+  const [showDiff, setShowDiff]   = useState(false)
+  // CSS `filter: brightness(amp)` multiplier on the diff tile. 1× = raw,
+  // higher = faint differences glow. Threshold math is unaffected — this is
+  // pure display.
+  const [amp, setAmp]             = useState(2.5)
   const [state, setState]         = useState<ScanState | null>(null)
   const [error, setError]         = useState<string | null>(null)
   const [scanning, setScanning]   = useState(false)
@@ -208,6 +217,41 @@ export function PreviewFilterDialog({
             <span className="text-[#374151]">Sort skipped first</span>
           </label>
 
+          <label
+            className="flex items-center gap-2 text-sm"
+            title="Display each tile as a grayscale |src - dst| map. Bright pixels mark where the source and target frames differ — use this to find patches that contain your region of interest (smudge, dust, etc.)."
+          >
+            <input
+              type="checkbox"
+              checked={showDiff}
+              onChange={e => setShowDiff(e.target.checked)}
+              className="accent-[#7E3AF2]"
+            />
+            <span className="text-[#374151]">Show diff</span>
+          </label>
+
+          {showDiff && (
+            <label
+              className="flex items-center gap-2 text-sm"
+              title="Multiplier on diff brightness. 1× = raw, 2.5× = default, 5–10× for low-contrast regions, 20× saturates aggressively. Display-only — threshold math uses raw values."
+            >
+              <span className="text-[#374151]">Amp:</span>
+              <input
+                type="number" step={0.5} min={1} max={20}
+                value={amp}
+                onChange={e => setAmp(parseFloat(e.target.value) || 1)}
+                className="w-16 border border-[#e5e7eb] rounded px-2 py-1 text-sm font-mono"
+              />
+              <input
+                type="range" min={1} max={20} step={0.1}
+                value={amp}
+                onChange={e => setAmp(parseFloat(e.target.value))}
+                className="accent-[#7E3AF2]"
+                style={{ width: 120 }}
+              />
+            </label>
+          )}
+
           <div className="ml-auto text-sm">
             {error    && <span className="text-[#EF4444]">Error: {error}</span>}
             {!error && scanning && state && state.sampled > 0 && (
@@ -255,9 +299,14 @@ export function PreviewFilterDialog({
                       width: size, height: size,
                       border: `${Math.max(2, Math.floor(size / 30))}px solid ${border}`,
                       boxSizing: 'border-box',
-                      backgroundImage: `url(data:image/png;base64,${p.thumb})`,
+                      backgroundImage: `url(data:image/png;base64,${showDiff ? p.diffThumb : p.thumb})`,
                       backgroundSize: 'cover',
                       backgroundPosition: 'center',
+                      // CSS brightness() is a linear channel multiplier per
+                      // MDN — exactly what we want for amplifying the raw
+                      // diff. Only applied on the diff thumb; src thumbs
+                      // stay color-accurate.
+                      filter: showDiff ? `brightness(${amp})` : undefined,
                       flex: '0 0 auto',
                     }}
                   />
