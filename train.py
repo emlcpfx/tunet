@@ -1891,10 +1891,22 @@ if __name__ == "__main__":
             if config.logging.log_interval <= 0: error_msgs.append("log.interval<=0")
             if config.logging.preview_batch_interval < 0: error_msgs.append("log.preview<0")
             if config.logging.preview_refresh_rate < 0: error_msgs.append("log.refresh<0")
-            # Mask validation
+            # Mask validation. mask_dir is the folder of pre-painted mask
+            # files (one per src/dst pair). Auto-mask generates the mask
+            # in-memory from |src - dst|, so it satisfies both use_mask_loss
+            # and use_mask_input without any folder on disk — don't demand
+            # mask_dir in that case.
             if config.mask.use_mask_loss or config.mask.use_mask_input:
-                if not config.data.mask_dir: error_msgs.append("mask_dir required when mask features enabled")
-                elif not os.path.isdir(config.data.mask_dir): error_msgs.append(f"data.mask_dir missing: {config.data.mask_dir}")
+                if config.mask.use_auto_mask:
+                    # Auto-mask is providing the mask. If the user *also* set
+                    # a mask_dir (rare mixed workflow), validate it exists.
+                    if config.data.mask_dir and not os.path.isdir(config.data.mask_dir):
+                        error_msgs.append(f"data.mask_dir missing: {config.data.mask_dir}")
+                else:
+                    if not config.data.mask_dir:
+                        error_msgs.append("mask_dir required when mask features enabled (or enable mask.use_auto_mask to generate masks from src-dst diff)")
+                    elif not os.path.isdir(config.data.mask_dir):
+                        error_msgs.append(f"data.mask_dir missing: {config.data.mask_dir}")
             if config.mask.mask_weight < 1.0: error_msgs.append("mask.mask_weight must be >= 1.0")
             # Validation dir checks
             if config.data.val_src_dir and not os.path.isdir(config.data.val_src_dir): error_msgs.append(f"data.val_src_dir missing: {config.data.val_src_dir}")
