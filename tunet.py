@@ -243,6 +243,17 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         size_slider.setTickInterval(20)
 
         sort_check = QCheckBox("Sort skipped first")
+        # Show diff thumbnails instead of src — useful when the region of
+        # interest (smudge, artifact, etc.) is small and you want to see
+        # *where* each patch differs from the target. Diff is amplified ~2.5×
+        # so faint differences are visible without needing per-patch
+        # normalization (which would make every patch look equally bright).
+        show_diff_check = QCheckBox("Show diff (white = changed)")
+        show_diff_check.setToolTip(
+            "Display each patch as a grayscale difference map between src and dst "
+            "instead of the source image. Bright pixels = where src and dst differ. "
+            "Use this to find patches that contain the smudge / artifact / region "
+            "of interest, so you can set the skip threshold to include only those.")
 
         stats_label = QLabel("Scanning…")
         stats_label.setStyleSheet("font-weight: bold;")
@@ -254,6 +265,8 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         ctrl_row.addWidget(size_slider)
         ctrl_row.addSpacing(16)
         ctrl_row.addWidget(sort_check)
+        ctrl_row.addSpacing(8)
+        ctrl_row.addWidget(show_diff_check)
         ctrl_row.addStretch()
         ctrl_row.addWidget(stats_label)
         win_layout.addLayout(ctrl_row)
@@ -318,8 +331,15 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                             patch_diff = diff[y:y+resolution, x:x+resolution]
                             max_diff = float(patch_diff.max())
                             patch_rgb = src_display[y:y+resolution, x:x+resolution]
-                            thumb = _Image.fromarray(patch_rgb).resize((SCAN_SIZE, SCAN_SIZE), _Image.BILINEAR)
-                            patch_data.append((max_diff, thumb))
+                            src_thumb = _Image.fromarray(patch_rgb).resize((SCAN_SIZE, SCAN_SIZE), _Image.BILINEAR)
+                            # Diff thumbnail (grayscale): amplify 2.5× so small
+                            # smudges are visible. Convert to RGB so it renders
+                            # identically to src_thumb in the grid (same QImage
+                            # stride math, same Format_RGB888).
+                            diff_amp = (patch_diff * 2.5).clip(0, 255).astype(np.uint8)
+                            diff_thumb = _Image.fromarray(diff_amp, mode='L').convert('RGB').resize(
+                                (SCAN_SIZE, SCAN_SIZE), _Image.BILINEAR)
+                            patch_data.append((max_diff, src_thumb, diff_thumb))
                 except Exception as e:
                     scan_errors.append(f"{os.path.basename(src_path)}: {e}")
             if no_dst == len(src_files) and len(src_files) > 0:
@@ -342,6 +362,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             threshold = thresh_spin.value()
             thumb_size = size_slider.value()
             do_sort = sort_check.isChecked()
+            show_diff = show_diff_check.isChecked()
 
             # Clear existing grid
             while grid_layout.count():
@@ -349,7 +370,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                 if item.widget():
                     item.widget().deleteLater()
 
-            kept = sum(1 for d, _ in patch_data if d >= threshold)
+            kept = sum(1 for d, _, _ in patch_data if d >= threshold)
             skipped = len(patch_data) - kept
             stats_label.setText(
                 f"Total: {len(patch_data)}   "
@@ -370,7 +391,8 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             row_layout = None
             col = 0
             border = max(2, thumb_size // 30)
-            for max_diff, thumb in items:
+            for max_diff, src_thumb, diff_thumb in items:
+                thumb = diff_thumb if show_diff else src_thumb
                 if col % COLS == 0:
                     row_widget = QWidget()
                     row_layout = QHBoxLayout(row_widget)
@@ -400,6 +422,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         thresh_spin.valueChanged.connect(lambda v: (_render_grid(), self.skip_empty_threshold_input.setValue(v)) if patch_data else None)
         size_slider.valueChanged.connect(lambda _: _render_grid() if patch_data else None)
         sort_check.stateChanged.connect(lambda _: _render_grid() if patch_data else None)
+        show_diff_check.stateChanged.connect(lambda _: _render_grid() if patch_data else None)
 
         QTimer.singleShot(50, _wait_for_scan)
 
