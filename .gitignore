@@ -56,6 +56,15 @@ tunet-web/node_modules/
 tunet-web/.next/
 tunet-web/.env*.local
 tunet-web/next-env.d.ts
+# Incremental TypeScript build cache — regenerated on every build
+tunet-web/tsconfig.tsbuildinfo
+# Personal dev helpers — not part of the shipping app (any dotfile script
+# under tunet-web/ that starts with .bench-)
+tunet-web/.bench-*
+
+# Local benchmark output — accumulated step/sec measurements per machine.
+# We commit the script (scripts/bench_local.py) but not the run logs.
+scripts/bench_results.jsonl
 
 # Scratch files
 aws_gpu_pricing.html

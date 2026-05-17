@@ -13,6 +13,13 @@ const nextConfig: NextConfig = {
       },
     ],
   },
+  // Allow large form-data uploads to /api/spark/upload-stage — multi-hundred-MB
+  // batches of training frames.
+  experimental: {
+    serverActions: {
+      bodySizeLimit: '500mb',
+    },
+  },
 }
 
 export default nextConfig

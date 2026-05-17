@@ -689,7 +689,16 @@ def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_
             if is_main_process(): logging.debug("MSRNet uses GroupNorm; skipping SyncBatchNorm conversion.")
         dist.barrier()
 
-    optimizer = optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=1e-5)
+    # fused=True merges the per-parameter update kernels into a single CUDA
+    # kernel — measurable speedup on small models where the optimizer step
+    # is a non-trivial fraction of the iter time. Only available on CUDA;
+    # falls back to the regular implementation on CPU/MPS.
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=config.training.lr,
+        weight_decay=1e-5,
+        fused=(device_type == 'cuda'),
+    )
 
     # --- LR Scheduler ---
     lr_scheduler_type = getattr(config.training, 'lr_scheduler', 'none')
@@ -823,7 +832,13 @@ def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_
         except Exception as e:
             logging.error(f"Checkpoint load failed: {e}. Starting fresh.", exc_info=True)
             start_epoch, start_step = 0, 0
-            optimizer = optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=1e-5)
+            # fused=True for CUDA, see comment at the primary AdamW above
+            optimizer = optim.AdamW(
+                model.parameters(),
+                lr=config.training.lr,
+                weight_decay=1e-5,
+                fused=(device_type == 'cuda'),
+            )
             scaler = GradScaler(enabled=use_amp_eff)
             # Fall through to finetune_from if available
             finetune_path = getattr(config.training, 'finetune_from', None)
@@ -881,6 +896,45 @@ def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_
                 logging.warning("Falling back to training from scratch.")
         else:
             if is_main_process(): logging.info("No checkpoint found. Starting fresh.")
+
+    # --- torch.compile (optional, opt-out via TUNET_DISABLE_COMPILE=1) ---
+    # Wraps the model so the forward/backward run as fused CUDA graphs after
+    # the first iteration (1–3 min compile cost on first step, then ~5–25%
+    # faster steady-state). Skipped on:
+    #   - non-CUDA devices (no benefit, often worse)
+    #   - PyTorch < 2.0 (compile API absent)
+    #   - Windows or any host without Triton (the inductor backend's codegen
+    #     dependency; Triton on Windows is experimental and not in the
+    #     stock PyTorch wheel — without it, torch.compile crashes on the
+    #     first forward pass).
+    #   - if TUNET_DISABLE_COMPILE=1 in env (escape hatch)
+    # Apply BEFORE DDP — compiling a DDP-wrapped model triggers warnings
+    # and can break.
+    compile_disabled = os.environ.get('TUNET_DISABLE_COMPILE', '0') == '1'
+    can_compile = device_type == 'cuda' and hasattr(torch, 'compile') and not compile_disabled
+    if can_compile:
+        # Probe for Triton — torch.compile defers all errors to first
+        # forward, which makes them hard to recover from. Importing here
+        # lets us skip cleanly with a friendly log message.
+        try:
+            import triton  # noqa: F401
+        except ImportError:
+            can_compile = False
+            if is_main_process():
+                logging.info("torch.compile: skipped (Triton not available — common on Windows). "
+                             "Set up Triton or run on Linux to enable. To suppress this message "
+                             "set TUNET_DISABLE_COMPILE=1.")
+    if can_compile:
+        try:
+            t_compile_setup = time.time()
+            model = torch.compile(model, mode='reduce-overhead', fullgraph=False)
+            if is_main_process():
+                logging.info(f"Model wrapped with torch.compile(mode='reduce-overhead') "
+                             f"in {time.time() - t_compile_setup:.2f}s "
+                             f"(actual compile happens on first step, ~1–3 min)")
+        except Exception as e:
+            if is_main_process():
+                logging.warning(f"torch.compile failed: {e}. Continuing without it.")
 
     # --- DDP Wrap ---
     if world_size > 1:
@@ -1151,6 +1205,21 @@ def train(config):
 
     # --- Training Loop Variables ---
     max_steps = getattr(config.training, 'max_steps', 0)
+    # Benchmark mode (cost-estimator calibration). When >0: run for
+    # `bench_warmup + bench_steps`, log a STEP_RATE line, and exit cleanly so
+    # tunet-web/spark-presets.ts can be re-baselined with real numbers.
+    bench_steps  = int(getattr(config, '_benchmark_steps',  0) or 0)
+    bench_warmup = int(getattr(config, '_benchmark_warmup', 20) or 20)
+    bench_t0 = None       # set when warmup completes
+    bench_step_t0 = None  # global_step value when warmup completes
+    # Normal-mode auto step-rate log: fire once per run after a short warmup
+    # so the dashboard / cost estimator can record real throughput without
+    # the user opting into --benchmark-steps. Set to True after we emit it.
+    auto_step_rate_logged = False
+    auto_step_rate_t0 = None
+    auto_step_rate_step0 = None
+    AUTO_STEP_RATE_WARMUP = 30   # discard first N steps (cold cache, JIT)
+    AUTO_STEP_RATE_WINDOW = 50   # then time the next M steps
     global_step = start_step; iter_epoch = config.training.iterations_per_epoch
     fixed_src, fixed_dst, fixed_mask = None, None, None; preview_count = 0
     val_fixed_src, val_fixed_dst = None, None; val_preview_count = 0
@@ -1224,6 +1293,9 @@ def train(config):
     # --- Main Training Loop ---
     model.train()
     _pending_ckpt_thread: threading.Thread | None = None
+    # Bail-out counter for the safety hatch in the dataloader-next try/except
+    # below. Reset to 0 on every successful batch.
+    _consecutive_batch_errors = 0
     try:
         while True:
             _check_stop_file()
@@ -1269,8 +1341,28 @@ def train(config):
                             logging.error(f"Progressive: failed to recreate dataset at {current_training_res}px: {e}", exc_info=True)
 
             data_load_start = time.time()
+            # Safety hatch: if we keep getting empty batches / StopIterations,
+            # the dataloader is broken (dataset went empty mid-run, all-skipped
+            # patches, EBUSY on Windows, etc.). Rather than spin forever burning
+            # GPU minutes producing zero progress, count consecutive failures
+            # and bail out cleanly. (Real incident 2026-05-01: a stuck job
+            # logged StopIteration every step at ~100/sec for hours.)
             try: batch = next(dataloader_iter)
-            except Exception as e: logging.error(f"S{global_step}: Batch load error: {e}, skipping.", exc_info=True); global_step += 1; continue
+            except StopIteration:
+                logging.error(f"S{global_step}: dataloader exhausted permanently (StopIteration "
+                              f"escaped cycle() — likely dataset has zero usable slices). "
+                              f"Exiting to avoid an infinite zero-work loop.", exc_info=True)
+                break
+            except Exception as e:
+                _consecutive_batch_errors += 1
+                logging.error(f"S{global_step}: Batch load error #{_consecutive_batch_errors}: {e}, "
+                              f"skipping.", exc_info=True)
+                if _consecutive_batch_errors >= 100:
+                    logging.error(f"S{global_step}: 100 consecutive batch errors — bailing out "
+                                  f"to avoid burning compute on a broken dataloader.")
+                    break
+                global_step += 1; continue
+            _consecutive_batch_errors = 0  # reset on success
             if batch is None: logging.warning(f"S{global_step}: Skipped batch (collation error)."); global_step += 1; continue
             # Unpack batch (2-tuple or 3-tuple with mask/auto_mask)
             auto_mask_raw = None
@@ -1326,6 +1418,76 @@ def train(config):
 
             global_step += 1; final_global_step = global_step
 
+            # ── Benchmark mode: time the post-warmup window and exit. ──
+            # We measure wall-clock from the moment warmup ends (so cold-cache,
+            # JIT, autotune, lpips load all wash out) to the moment we hit
+            # `bench_warmup + bench_steps`. The reported STEP_RATE is what the
+            # tunet-web estimator should consume.
+            if bench_steps > 0:
+                steps_done = global_step - start_step
+                if steps_done == bench_warmup and bench_t0 is None:
+                    # Sync GPU work before starting the clock so we don't bake
+                    # queued kernels into the timed window.
+                    if device_type == 'cuda':
+                        try: torch.cuda.synchronize()
+                        except Exception: pass
+                    bench_t0 = time.time()
+                    bench_step_t0 = global_step
+                    if is_main_process():
+                        logging.info(f"[BENCH] warmup complete @ step {global_step}; timing next {bench_steps} steps")
+                if bench_t0 is not None and (global_step - bench_step_t0) >= bench_steps:
+                    if device_type == 'cuda':
+                        try: torch.cuda.synchronize()
+                        except Exception: pass
+                    elapsed = max(1e-6, time.time() - bench_t0)
+                    rate = (global_step - bench_step_t0) / elapsed
+                    if is_main_process():
+                        # Single-line, machine-greppable: dashboards / scripts
+                        # can grep `^STEP_RATE:` to pull this without parsing
+                        # the full log line.
+                        gpu_name = torch.cuda.get_device_name(0) if device_type == 'cuda' else 'cpu'
+                        bs = config.training.batch_size
+                        res = current_training_res
+                        logging.info(
+                            f"STEP_RATE: {rate:.3f} step/sec  "
+                            f"(steps={global_step - bench_step_t0}, elapsed={elapsed:.1f}s, "
+                            f"gpu={gpu_name!r}, model={config.model.model_type}, "
+                            f"size={config.model.model_size_dims}, res={res}, "
+                            f"batch={bs}, loss={config.training.loss})"
+                        )
+                        logging.info("[BENCH] complete — exiting.")
+                    training_successful = True
+                    break
+
+            # ── Normal-mode auto STEP_RATE log (fires once per run) ──
+            # Time the AUTO_STEP_RATE_WINDOW steps after AUTO_STEP_RATE_WARMUP
+            # and emit a single STEP_RATE line with the same shape as the
+            # explicit benchmark mode. This way every real run auto-feeds the
+            # calibration set without the user doing anything.
+            if not auto_step_rate_logged and bench_steps == 0 and is_main_process():
+                steps_done = global_step - start_step
+                if steps_done == AUTO_STEP_RATE_WARMUP and auto_step_rate_t0 is None:
+                    if device_type == 'cuda':
+                        try: torch.cuda.synchronize()
+                        except Exception: pass
+                    auto_step_rate_t0 = time.time()
+                    auto_step_rate_step0 = global_step
+                elif auto_step_rate_t0 is not None and (global_step - auto_step_rate_step0) >= AUTO_STEP_RATE_WINDOW:
+                    if device_type == 'cuda':
+                        try: torch.cuda.synchronize()
+                        except Exception: pass
+                    elapsed = max(1e-6, time.time() - auto_step_rate_t0)
+                    rate = (global_step - auto_step_rate_step0) / elapsed
+                    gpu_name = torch.cuda.get_device_name(0) if device_type == 'cuda' else 'cpu'
+                    logging.info(
+                        f"STEP_RATE: {rate:.3f} step/sec  "
+                        f"(steps={global_step - auto_step_rate_step0}, elapsed={elapsed:.1f}s, "
+                        f"gpu={gpu_name!r}, model={config.model.model_type}, "
+                        f"size={config.model.model_size_dims}, res={current_training_res}, "
+                        f"batch={config.training.batch_size}, loss={config.training.loss})"
+                    )
+                    auto_step_rate_logged = True
+
             if is_main_process() and global_step % config.logging.log_interval == 0:
                 current_lr = optimizer.param_groups[0]['lr']
                 logging.info(f'… (D:{data_load_time:.3f} T:{transfer_time:.3f} C:{compute_time:.3f})')
@@ -1363,7 +1525,11 @@ def train(config):
                      _pending_ckpt_thread.join()
                  ckpt_ep = global_step // iter_epoch; ep_ckpt_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_epoch_{ckpt_ep:09d}.pth') if epoch_end_now else None
                  latest_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth'); cfg_dict = config_to_dict(config)
-                 m_state = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
+                 # Unwrap DDP and torch.compile so the checkpoint saves the
+                 # plain UNet/MSRN state_dict — loadable in any wrapper combo.
+                 base_model = (model.module if isinstance(model, DDP)
+                               else getattr(model, '_orig_mod', model))
+                 m_state = base_model.state_dict()
                  # Save scaler state only if AMP was effectively used
                  scaler_state = scaler.state_dict() if use_amp_eff else None
                  scheduler_state = scheduler.state_dict() if scheduler is not None else None
@@ -1464,7 +1630,9 @@ def train(config):
                         # Save plateau checkpoint
                         plateau_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_plateau.pth')
                         try:
-                            m_state_p = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
+                            base_model_p = (model.module if isinstance(model, DDP)
+                                            else getattr(model, '_orig_mod', model))
+                            m_state_p = base_model_p.state_dict()
                             scaler_state_p = scaler.state_dict() if use_amp_eff else None
                             cfg_dict_p = config_to_dict(config)
                             plateau_data = {'epoch': completed_epoch, 'global_step': global_step, 'model_state_dict': m_state_p, 'optimizer_state_dict': optimizer.state_dict(),
@@ -1504,8 +1672,16 @@ def train(config):
             logging.info(f"Performing final checkpoint save (State @ Step {final_global_step})...")
             try:
                  final_ep = final_global_step // iter_epoch; latest_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth'); cfg_dict = config_to_dict(config)
-                 if model and optimizer and scaler:
-                     m_state = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
+                 # Explicit `is not None` because torch.compile-wrapped models
+                 # raise TypeError on len(), and Python's truthiness check
+                 # falls through to __len__ for nn.Module subclasses.
+                 if model is not None and optimizer is not None and scaler is not None:
+                     # torch.compile-wrapped models keep the original under
+                     # _orig_mod; use that for state_dict so the saved
+                     # checkpoint is loadable from a non-compiled run.
+                     base_model = (model.module if isinstance(model, DDP)
+                                   else getattr(model, '_orig_mod', model))
+                     m_state = base_model.state_dict()
                      scaler_state = scaler.state_dict() if use_amp_eff else None # Check effective use
                      scheduler_state = scheduler.state_dict() if scheduler is not None else None
                      final_data = {'epoch': final_ep, 'global_step': final_global_step, 'model_state_dict': m_state, 'optimizer_state_dict': optimizer.state_dict(),
@@ -1537,6 +1713,11 @@ if __name__ == "__main__":
     parser.add_argument('--training.lr', type=float, dest='training_lr', default=None, help='Override training learning_rate')
     parser.add_argument('--data.output_dir', type=str, dest='data_output_dir', default=None, help='Override data output_dir')
     parser.add_argument('--stop-file', type=str, default=None, help='Path to a stop-signal file; training exits gracefully when this file appears')
+    parser.add_argument('--benchmark-steps', type=int, default=0,
+        help='Run only N steps (after warmup), log STEP_RATE, and exit. Used to calibrate '
+             'the cost estimator in tunet-web. 0 = normal training. Typical: 200.')
+    parser.add_argument('--benchmark-warmup', type=int, default=20,
+        help='Warmup steps to discard before timing in --benchmark-steps mode (default 20).')
     cli_args = parser.parse_args()
 
     # --- Initial Config Loading Logging (Simple Console) ---
@@ -1698,6 +1879,12 @@ if __name__ == "__main__":
     # --- Store config file stem for checkpoint naming ---
     config._config_stem = os.path.splitext(os.path.basename(cli_args.config))[0]
     config._stop_file = cli_args.stop_file
+    # Benchmark mode: tunet-web's cost estimator currently uses unbenchmarked
+    # step/sec guesses by GPU class. --benchmark-steps short-circuits training
+    # after `warmup + N` steps and logs `STEP_RATE: X.Y step/sec` so we can
+    # calibrate baselineStepsPerSec() in spark-presets.ts with real data.
+    config._benchmark_steps = cli_args.benchmark_steps
+    config._benchmark_warmup = cli_args.benchmark_warmup
 
     # --- Start Training ---
     try: train(config)
