@@ -245,15 +245,33 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         sort_check = QCheckBox("Sort skipped first")
         # Show diff thumbnails instead of src — useful when the region of
         # interest (smudge, artifact, etc.) is small and you want to see
-        # *where* each patch differs from the target. Diff is amplified ~2.5×
-        # so faint differences are visible without needing per-patch
-        # normalization (which would make every patch look equally bright).
+        # *where* each patch differs from the target.
         show_diff_check = QCheckBox("Show diff (white = changed)")
         show_diff_check.setToolTip(
             "Display each patch as a grayscale difference map between src and dst "
             "instead of the source image. Bright pixels = where src and dst differ. "
             "Use this to find patches that contain the smudge / artifact / region "
             "of interest, so you can set the skip threshold to include only those.")
+        # Multiplier applied to raw diff (0-255) before display. 1× shows the
+        # raw signal; higher values make faint smudges glow. Re-render only —
+        # doesn't affect the threshold math, which always uses raw max_diff.
+        amp_label = QLabel("Amp:")
+        amp_spin = QDoubleSpinBox()
+        amp_spin.setRange(1.0, 20.0)
+        amp_spin.setSingleStep(0.5)
+        amp_spin.setDecimals(1)
+        amp_spin.setValue(2.5)
+        amp_spin.setSuffix("×")
+        amp_spin.setFixedWidth(70)
+        amp_spin.setToolTip(
+            "Multiplier applied to the diff brightness before display.\n\n"
+            "  1.0× — raw diff (faint smudges may be hard to see)\n"
+            "  2.5× — default; good for most data\n"
+            "  5–10× — for very small or low-contrast regions of interest\n"
+            "  20× — saturates aggressively; useful for finding sub-pixel diffs\n\n"
+            "Affects display only — the skip-empty threshold above still "
+            "uses the raw diff values, so cranking amp doesn't change which "
+            "patches are kept vs skipped.")
 
         stats_label = QLabel("Scanning…")
         stats_label.setStyleSheet("font-weight: bold;")
@@ -267,6 +285,9 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         ctrl_row.addWidget(sort_check)
         ctrl_row.addSpacing(8)
         ctrl_row.addWidget(show_diff_check)
+        ctrl_row.addSpacing(4)
+        ctrl_row.addWidget(amp_label)
+        ctrl_row.addWidget(amp_spin)
         ctrl_row.addStretch()
         ctrl_row.addWidget(stats_label)
         win_layout.addLayout(ctrl_row)
@@ -332,14 +353,17 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                             max_diff = float(patch_diff.max())
                             patch_rgb = src_display[y:y+resolution, x:x+resolution]
                             src_thumb = _Image.fromarray(patch_rgb).resize((SCAN_SIZE, SCAN_SIZE), _Image.BILINEAR)
-                            # Diff thumbnail (grayscale): amplify 2.5× so small
-                            # smudges are visible. Convert to RGB so it renders
-                            # identically to src_thumb in the grid (same QImage
-                            # stride math, same Format_RGB888).
-                            diff_amp = (patch_diff * 2.5).clip(0, 255).astype(np.uint8)
-                            diff_thumb = _Image.fromarray(diff_amp, mode='L').convert('RGB').resize(
-                                (SCAN_SIZE, SCAN_SIZE), _Image.BILINEAR)
-                            patch_data.append((max_diff, src_thumb, diff_thumb))
+                            # Pre-shrink the diff to SCAN_SIZE and store as raw
+                            # uint8 (0-255). Amplification happens at render
+                            # time so the user can crank it interactively
+                            # without re-scanning the dataset. PIL.NEAREST so
+                            # we preserve max values for the brightest pixel
+                            # rather than smoothing them away.
+                            diff_raw_pil = _Image.fromarray(
+                                patch_diff.clip(0, 255).astype(np.uint8), mode='L'
+                            ).resize((SCAN_SIZE, SCAN_SIZE), _Image.BILINEAR)
+                            diff_raw = np.array(diff_raw_pil, dtype=np.uint8)
+                            patch_data.append((max_diff, src_thumb, diff_raw))
                 except Exception as e:
                     scan_errors.append(f"{os.path.basename(src_path)}: {e}")
             if no_dst == len(src_files) and len(src_files) > 0:
@@ -363,6 +387,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             thumb_size = size_slider.value()
             do_sort = sort_check.isChecked()
             show_diff = show_diff_check.isChecked()
+            amp = amp_spin.value()
 
             # Clear existing grid
             while grid_layout.count():
@@ -391,8 +416,14 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             row_layout = None
             col = 0
             border = max(2, thumb_size // 30)
-            for max_diff, src_thumb, diff_thumb in items:
-                thumb = diff_thumb if show_diff else src_thumb
+            for max_diff, src_thumb, diff_raw in items:
+                if show_diff:
+                    # Build diff thumbnail at current amp. uint8 multiply with
+                    # np.clip handles overflow safely.
+                    amped = np.clip(diff_raw.astype(np.float32) * amp, 0, 255).astype(np.uint8)
+                    thumb = _Image.fromarray(amped, mode='L').convert('RGB')
+                else:
+                    thumb = src_thumb
                 if col % COLS == 0:
                     row_widget = QWidget()
                     row_layout = QHBoxLayout(row_widget)
@@ -423,6 +454,10 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         size_slider.valueChanged.connect(lambda _: _render_grid() if patch_data else None)
         sort_check.stateChanged.connect(lambda _: _render_grid() if patch_data else None)
         show_diff_check.stateChanged.connect(lambda _: _render_grid() if patch_data else None)
+        # Only re-render on amp change when the diff view is actually on —
+        # cheap guard against thrashing the grid while the user is scrubbing
+        # values that have no visible effect.
+        amp_spin.valueChanged.connect(lambda _: _render_grid() if (patch_data and show_diff_check.isChecked()) else None)
 
         QTimer.singleShot(50, _wait_for_scan)
 
