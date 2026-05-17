@@ -22,6 +22,7 @@ import { TrainingChart } from '@/components/spark/training-chart'
 import { TrainingStats } from '@/components/spark/training-stats'
 import { PreviewImages } from '@/components/spark/preview-images'
 import { DownloadsPanel } from '@/components/spark/downloads-panel'
+import { JobSettingsPanel } from '@/components/spark/job-settings-panel'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -97,6 +98,9 @@ export default async function JobDetailPage({
           <p className="text-[#7F1D1D] font-mono text-xs">{job.error_message}</p>
         </div>
       )}
+
+      {/* Initial settings the job was submitted with */}
+      <JobSettingsPanel job={job} />
 
       {/* Training chart + Preview images side-by-side */}
       <section className="grid grid-cols-1 xl:grid-cols-2 gap-4">
