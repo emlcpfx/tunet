@@ -1656,7 +1656,13 @@ def train(config):
                     shutdown_requested = True
 
         # --- End of Training Loop ---
-        training_successful = True
+        # Don't claim success if the loop bailed at step 0 — that means we
+        # broke out (e.g. dataloader exhausted from a shm bus error killing
+        # the workers) before any batch landed. Reporting `successfully` in
+        # that case is a billing/UX trap: Spark records the job as succeeded,
+        # the user sees no error flag, but zero training actually happened.
+        # `final_global_step > 0` proves we completed at least one batch.
+        training_successful = final_global_step > 0
     except KeyboardInterrupt:
         if is_main_process(): logging.warning("KeyboardInterrupt. Shutting down...")
         if not shutdown_requested: handle_signal(signal.SIGINT, None)
@@ -1695,6 +1701,14 @@ def train(config):
             logging.info(f"Training finished {status} at Step {final_global_step}.")
         cleanup_ddp();
         if is_main_process(): logging.info("Script finished.")
+
+        # Exit non-zero on real failure so the container exit code reflects
+        # what happened. Spark Fuse maps container_nonzero_exit to job
+        # status='failed' with the real exit_code on the row — without this,
+        # a crash-at-step-0 would be reported as `succeeded` and silently
+        # billed. Graceful shutdowns (SIGINT, max-runtime) still exit 0.
+        if not training_successful and not shutdown_requested:
+            exit(1)
 
 
 # --- Main Execution (`if __name__ == "__main__":`) ---
