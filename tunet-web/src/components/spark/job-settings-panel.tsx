@@ -72,7 +72,10 @@ export function JobSettingsPanel({ job }: { job: SparkJob }) {
 
   return (
     <section>
-      <details className="bg-white border border-[#e5e7eb] rounded-lg" open>
+      {/* Collapsed by default — users usually only need to glance at
+          settings when something looks off; the chart / preview / log
+          deserve the page-fold space otherwise. Click to expand. */}
+      <details className="bg-white border border-[#e5e7eb] rounded-lg">
         <summary className="cursor-pointer select-none px-4 py-3 text-sm font-semibold text-[#374151] hover:bg-[#F9FAFB] rounded-lg flex items-center gap-2">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
                className="transition-transform details-marker-rotate">
