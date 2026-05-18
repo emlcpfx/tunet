@@ -15,6 +15,7 @@
 
 import { Suspense, useEffect, useMemo, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import { useSession } from 'next-auth/react'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Input, FormRow } from '@/components/ui/input'
@@ -121,10 +122,29 @@ function NewJobPageInner() {
   const [maxRetriesOnInterrupt, setMaxRetriesOnInterrupt] = useState<number>(2)
   // Training-alert prefs — read by api/cron/training-alerts. Defaulting both
   // to ON because the whole point is to save the user money; opting out is
-  // explicit. Email is empty by default to force a deliberate choice.
+  // explicit. Email auto-fills from the signed-in Keycloak session below;
+  // the user can still override or clear it to opt out per-job.
   const [alertEmail,    setAlertEmail]    = useState('')
   const [alertPlateau,  setAlertPlateau]  = useState(true)
   const [alertDiverging, setAlertDiverging] = useState(true)
+  // Whether the user has manually touched the email field. Once true, we
+  // stop overwriting from the session — they may want to send alerts to a
+  // shared address or clear the field to opt out.
+  const [alertEmailDirty, setAlertEmailDirty] = useState(false)
+
+  // Auto-populate the alerts email from the signed-in session. Only fires
+  // when the field is empty and the user hasn't manually typed in it — won't
+  // clobber a clone-rehydrated value or anything the user has set by hand.
+  const { data: session } = useSession()
+  useEffect(() => {
+    const sessionEmail = session?.user?.email
+    if (!alertEmailDirty && !alertEmail && typeof sessionEmail === 'string' && sessionEmail) {
+      setAlertEmail(sessionEmail)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally
+    // only re-runs when the session email arrives or the user clears the
+    // dirty flag (currently never); not when alertEmail itself changes.
+  }, [session?.user?.email])
   const [showManualPaths, setShowManualPaths] = useState(false)
   const [picked, setPicked] = useState<FolderPickerResult | null>(null)
 
@@ -1002,8 +1022,14 @@ Leave the email field empty to opt out for this job entirely."
               <Input
                 type="email"
                 value={alertEmail}
-                onChange={(e) => setAlertEmail(e.target.value)}
-                placeholder="you@example.com (leave empty to opt out)"
+                onChange={(e) => {
+                  // First manual edit pins the field — session won't try to
+                  // refill it later. Keeps "I cleared this on purpose" working
+                  // as a real opt-out.
+                  setAlertEmailDirty(true)
+                  setAlertEmail(e.target.value)
+                }}
+                placeholder={session?.user?.email ?? 'you@example.com (leave empty to opt out)'}
                 className="w-full max-w-md"
               />
               <div className={`flex flex-wrap items-center gap-4 text-xs ${alertEmail.trim() ? '' : 'opacity-50 pointer-events-none'}`}>
