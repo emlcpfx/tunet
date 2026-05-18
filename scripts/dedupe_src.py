@@ -240,10 +240,22 @@ def main():
     ap.add_argument('--threshold', type=float, default=0.05,
         help='Max mean-pixel-difference (0-1) to consider near-duplicate. '
              'Default 0.05. Try 0.08 for looser grouping, 0.03 for stricter.')
-    ap.add_argument('--delete', action='store_true', help='Actually delete the suggested files')
-    ap.add_argument('--yes', action='store_true', help='Skip the confirmation prompt when --delete is on')
+    ap.add_argument('--delete', action='store_true',
+        help='Actually delete the suggested files (irreversible). '
+             'Mutually exclusive with --move.')
+    ap.add_argument('--move', nargs='?', const='_moved', default=None, metavar='SUBDIR',
+        help='Move the suggested files into <src_dir>/<SUBDIR>/ instead of '
+             'deleting (default subdir name: _moved). Safer than --delete '
+             'since you can recover files by moving them back. Mutually '
+             'exclusive with --delete.')
+    ap.add_argument('--yes', action='store_true',
+        help='Skip the confirmation prompt when --delete or --move is on')
     ap.add_argument('--html', metavar='PATH', help='Write a visual HTML report to this path')
     args = ap.parse_args()
+
+    if args.delete and args.move:
+        print('ERROR: --delete and --move are mutually exclusive (pick one)', file=sys.stderr)
+        sys.exit(2)
 
     if not os.path.isdir(args.src_dir):
         print(f'ERROR: not a directory: {args.src_dir}', file=sys.stderr)
@@ -309,24 +321,57 @@ def main():
         print(' done')
         print(f'Open in a browser to confirm groupings visually before deleting.')
 
-    # Delete
-    to_delete = [paths[idx] for _, idxs, _ in groups for idx in idxs[1:]]  # all but the rep (idxs[0])
-    if args.delete:
+    # Action: move (safer) or delete (irreversible)
+    to_process = [paths[idx] for _, idxs, _ in groups for idx in idxs[1:]]  # all but the rep (idxs[0])
+
+    if args.move is not None:
+        # Move to subfolder — safer; user can recover by moving back.
+        move_dir = os.path.join(args.src_dir, args.move)
         if not args.yes:
-            print(f'\nAbout to DELETE {len(to_delete)} files. Confirm? [y/N] ', end='', flush=True)
+            print(f'\nAbout to MOVE {len(to_process)} files to {move_dir}/. Confirm? [y/N] ', end='', flush=True)
             resp = input().strip().lower()
             if resp not in ('y', 'yes'):
                 print('Aborted.')
                 return
-        for p in to_delete:
+        os.makedirs(move_dir, exist_ok=True)
+        moved = 0
+        for p in to_process:
+            dst = os.path.join(move_dir, os.path.basename(p))
+            # Avoid clobber if a file with that name already exists in _moved
+            # from a prior run — pick a sibling name like 'foo (2).jpg'.
+            if os.path.exists(dst):
+                stem, ext = os.path.splitext(os.path.basename(p))
+                n = 2
+                while os.path.exists(os.path.join(move_dir, f'{stem} ({n}){ext}')):
+                    n += 1
+                dst = os.path.join(move_dir, f'{stem} ({n}){ext}')
+            try:
+                shutil.move(p, dst)
+                moved += 1
+                print(f'  moved: {os.path.basename(p)} → {args.move}/{os.path.basename(dst)}')
+            except Exception as e:
+                print(f'  FAILED to move {p}: {e}', file=sys.stderr)
+        print(f'\nMoved {moved} files to {move_dir}/. '
+              f'To restore, move them back into {args.src_dir} (or delete the {args.move}/ folder when satisfied).')
+
+    elif args.delete:
+        if not args.yes:
+            print(f'\nAbout to DELETE {len(to_process)} files (irreversible). Confirm? [y/N] ', end='', flush=True)
+            resp = input().strip().lower()
+            if resp not in ('y', 'yes'):
+                print('Aborted.')
+                return
+        for p in to_process:
             try:
                 os.remove(p)
                 print(f'  deleted: {os.path.basename(p)}')
             except Exception as e:
                 print(f'  FAILED to delete {p}: {e}', file=sys.stderr)
-        print(f'\nDeleted {len(to_delete)} files.')
+        print(f'\nDeleted {len(to_process)} files.')
+
     else:
-        print(f'\n(Report only — pass --delete to actually remove the {len(to_delete)} suggested files.)')
+        print(f'\n(Report only — pass --move to relocate the {len(to_process)} suggested files '
+              f'to a _moved/ subfolder, or --delete to remove them.)')
 
 
 if __name__ == '__main__':
