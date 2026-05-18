@@ -261,9 +261,22 @@ export async function POST(req: Request) {
       // line 53-62 cp's that into /output/<sourceSubdir>/. We then point the
       // new run's output_dir at /output/<sourceSubdir> so trainer + seeded
       // file end up in the same place.
+      //
+      // For local uploads we ALSO rename to <sourceSubdir>_tunet_latest.pth
+      // (the folder-prefix fallback at train.py:758-762). The local desktop
+      // GUI defaults the prefix to 'model' (-> model_tunet_latest.pth) but
+      // train.py on Spark only looks for config-stem ('config_tunet_latest')
+      // and folder-name prefixes — never 'model'. Without the rename the
+      // seeded file is invisible to train.py and the run starts fresh
+      // instead of resuming. For Spark-source resume the source file is
+      // already canonically named (the originating job used the same
+      // discovery logic to save it) so no rename is needed there.
+      const seededName = localStageId
+        ? `${sourceSubdir}_tunet_latest.pth`
+        : body.source.checkpointName
       resumeOutputSubdir = sourceSubdir
       extraFiles = [{
-        relPath: `output/${sourceSubdir}/${body.source.checkpointName}`,
+        relPath: `output/${sourceSubdir}/${seededName}`,
         data:    ckptBuf,
       }]
     } else {
