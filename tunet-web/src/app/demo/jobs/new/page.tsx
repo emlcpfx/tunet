@@ -433,7 +433,20 @@ function NewJobPageInner() {
       gpu:     gpuKey,
       mode,
       ...(source && (mode === 'resume' || mode === 'finetune')
-        ? { source: { jobId: source.jobId, checkpointName: source.checkpointName } }
+        ? {
+            source: {
+              jobId:          source.jobId,
+              checkpointName: source.checkpointName,
+              // Critical for local-upload resume: without this field the
+              // server sees jobId='local-upload' and tries to call getJob()
+              // against the Spark API, which 404s. The route uses
+              // localCheckpointStageId to skip the Spark lookup and read
+              // the .pth straight from the upload-stage tmpdir instead.
+              ...(source.localCheckpointStageId
+                ? { localCheckpointStageId: source.localCheckpointStageId }
+                : {}),
+            },
+          }
         : {}),
       ...(stageId ? { stageId } : {}),
       inputs: {
