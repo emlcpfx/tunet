@@ -25,6 +25,7 @@ import { AutoMaskDialog } from '@/components/spark/auto-mask-dialog'
 import { AdvancedSettings } from '@/components/spark/advanced-settings'
 import { ModePicker } from '@/components/spark/mode-picker'
 import { SourceJobPicker } from '@/components/spark/source-job-picker'
+import { YamlConfigImporter } from '@/components/spark/yaml-config-importer'
 import {
   PRESETS, type Preset, type PresetKey, type AdvancedOverrides,
   estimateTraining, pricePerHour, resolveColorSpace,
@@ -627,6 +628,20 @@ function NewJobPageInner() {
               />
             </div>
           )}
+          {/* YAML config importer — pre-fills Advanced Settings + Max Steps
+              from a tunet model.yaml the user has on disk. Always available
+              regardless of mode; useful for porting local runs into the
+              browser form without re-typing each value. */}
+          <YamlConfigImporter
+            onLoaded={(r) => {
+              // Merge with existing overrides so partial YAMLs don't blow
+              // away whatever the user already had set.
+              setAdvanced(prev => ({ ...prev, ...r.advanced }))
+              if (typeof r.maxSteps === 'number') setMaxSteps(r.maxSteps)
+              // Auto-open Advanced so the user can see what was applied
+              setShowAdvanced(true)
+            }}
+          />
         </Card>
 
         {/* ── Step 2: Name ──────────────────────────────────── */}
