@@ -66,3 +66,37 @@ export async function uploadStage(
   if (!stageId) throw new Error('No batches uploaded — picker had no files')
   return stageId
 }
+
+/**
+ * Upload a single .pth checkpoint file for local-resume. Returns the stageId
+ * the training-jobs route can read it from. Separate from uploadStage()
+ * because there's no folder picker / role decomposition — just one file with
+ * a known role and basename.
+ *
+ * On a 200-500 MB .pth this can take 10-60 s depending on the network. The
+ * onProgress callback is called once at the end (FormData doesn't expose
+ * progress events on fetch); use a spinner / "uploading…" placeholder in
+ * the caller instead of trying to drive a progress bar.
+ */
+export async function uploadCheckpoint(
+  file: File,
+): Promise<{ stageId: string; filename: string; bytes: number }> {
+  const fd = new FormData()
+  fd.set('role', 'checkpoint')
+  fd.append('files', file, file.name)
+
+  const res = await fetch('/api/spark/upload-stage', { method: 'POST', body: fd })
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}))
+    throw new Error(j.error ?? `upload-stage HTTP ${res.status}`)
+  }
+  const json = await res.json() as {
+    stageId: string
+    received: { role: string; files: number; bytes: number }
+  }
+  return {
+    stageId:  json.stageId,
+    filename: file.name,
+    bytes:    json.received?.bytes ?? file.size,
+  }
+}

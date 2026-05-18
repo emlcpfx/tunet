@@ -34,7 +34,12 @@ export const dynamic = 'force-dynamic'
 // modest batch of EXRs.
 export const maxDuration = 300
 
-const ALLOWED_ROLES = new Set(['src', 'dst', 'val_src', 'val_dst', 'mask'])
+// 'checkpoint' is for local-resume uploads: the user trained off-Spark
+// (on their workstation) and wants to continue training on Spark using
+// the .pth they have on disk. Single file, not batched. training-jobs
+// reads it from <stageDir>/checkpoint/<filename> and threads it into the
+// extraFiles bundle just like a Spark-source resume would.
+const ALLOWED_ROLES = new Set(['src', 'dst', 'val_src', 'val_dst', 'mask', 'checkpoint'])
 
 function stageDir(stageId: string): string {
   return path.join(os.tmpdir(), 'tunet-stages', stageId)

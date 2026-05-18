@@ -20,7 +20,12 @@ export type TrainingMode = 'new' | 'resume' | 'finetune'
 export type ComputeMode  = 'instant' | 'smart'
 
 export interface SourceJobRef {
-  /** Spark job id of the prior run we're resuming from / fine-tuning off of. */
+  /**
+   * Spark job id of the prior run we're resuming from / fine-tuning off of.
+   * For local-checkpoint uploads (where the user trained off-Spark), this
+   * is the sentinel string 'local-upload' and `localCheckpointStageId`
+   * carries the upload-stage handle the server reads the .pth from.
+   */
   jobId: string
   /** Friendly name at clone time — display-only, for the "Resuming X" badge. */
   jobLabel: string
@@ -30,6 +35,13 @@ export interface SourceJobRef {
    * fine-tune mode lets the user pick any .pth.
    */
   checkpointName: string
+  /**
+   * Set when the .pth came from a local browser upload rather than a prior
+   * Spark job. Value is the stageId returned from /api/spark/upload-stage,
+   * which the training-jobs route uses to read the file from disk instead of
+   * fetching it from Spark's ShareSync. `jobId` is 'local-upload' in this case.
+   */
+  localCheckpointStageId?: string
 }
 
 export interface SerializedFormState {

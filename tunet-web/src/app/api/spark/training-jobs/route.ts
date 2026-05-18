@@ -54,6 +54,14 @@ interface Body {
     jobId:          string
     /** Filename of the .pth inside the source job's output dir. */
     checkpointName: string
+    /**
+     * If set, the .pth was uploaded from the user's machine via
+     * /api/spark/upload-stage with role='checkpoint' rather than fetched
+     * from a prior Spark job. `jobId` is the sentinel 'local-upload' in
+     * this case and the route reads bytes from <tmp>/tunet-stages/<id>/
+     * checkpoint/<checkpointName> instead of calling the Spark API.
+     */
+    localCheckpointStageId?: string
   }
   inputs?: {
     src_dir?:       string
@@ -176,44 +184,76 @@ export async function POST(req: Request) {
       return jsonError(`source.checkpointName must end in .pth`, 400)
     }
 
-    // Look up the source job + its output subdir name.
-    let sourceJob
-    try {
-      sourceJob = await getJob(body.source.jobId)
-    } catch (e) {
-      return jsonError(`failed to load source job: ${e instanceof Error ? e.message : 'unknown'}`, 502)
-    }
-    if (!sourceJob) return jsonError(`source job ${body.source.jobId} not found`, 404)
-    if (!shareSyncBaseUrl(sourceJob)) {
-      return jsonError(`source job has no resolvable ShareSync base URL`, 503)
-    }
-    const sourceSubdir = (() => {
-      const cmd = sourceJob.command
-      if (!Array.isArray(cmd) || cmd.length < 3) return null
-      const arg = cmd[2]
-      if (typeof arg !== 'string' || !arg.startsWith('/output/')) return null
-      return arg.slice('/output/'.length).split('/').filter(Boolean)[0] ?? null
-    })()
-    if (!sourceSubdir) {
-      return jsonError(`source job ${body.source.jobId} has no recoverable output subdir`, 422)
-    }
+    // Two source paths: local-upload (the user staged a .pth via
+    // /api/spark/upload-stage from their machine) or Spark-source
+    // (the .pth lives in a prior Spark job's output ShareSync dir).
+    // Local-upload skips the Spark Graph lookup entirely.
+    const localStageId = typeof body.source.localCheckpointStageId === 'string'
+      ? body.source.localCheckpointStageId
+      : null
+    let ckptBuf: Buffer
+    let sourceSubdir: string
 
-    // Pull the .pth bytes from ShareSync. fetchOutputFile resolves the URL
-    // via the same logic the rest of the proxy uses, so any job that the
-    // file-proxy can read is fetchable here.
-    let upstream: Response
-    try {
-      upstream = await fetchOutputFile(sourceJob, body.source.checkpointName)
-    } catch (e) {
-      return jsonError(`fetch checkpoint failed: ${e instanceof Error ? e.message : 'unknown'}`, 502)
+    if (localStageId) {
+      const ckptDir = path.join(os.tmpdir(), 'tunet-stages', localStageId, 'checkpoint')
+      const ckptPath = path.join(ckptDir, body.source.checkpointName)
+      if (!fs.existsSync(ckptPath)) {
+        return jsonError(
+          `local checkpoint ${body.source.checkpointName} not found at ${ckptPath} ` +
+            `(stage may have been cleaned up — re-upload and retry)`,
+          400,
+        )
+      }
+      try {
+        ckptBuf = await fs.promises.readFile(ckptPath)
+      } catch (e) {
+        return jsonError(`read local checkpoint failed: ${e instanceof Error ? e.message : 'unknown'}`, 500)
+      }
+      // For local resume there's no prior Spark job to inherit an output
+      // subdir from. Use the new job's safeName so the seeded .pth lands at
+      // /output/<safeName>/ and train.py's auto-resume picks it up there.
+      sourceSubdir = safeName
+    } else {
+      // Spark-source path (unchanged): look up the prior job + fetch its .pth.
+      let sourceJob
+      try {
+        sourceJob = await getJob(body.source.jobId)
+      } catch (e) {
+        return jsonError(`failed to load source job: ${e instanceof Error ? e.message : 'unknown'}`, 502)
+      }
+      if (!sourceJob) return jsonError(`source job ${body.source.jobId} not found`, 404)
+      if (!shareSyncBaseUrl(sourceJob)) {
+        return jsonError(`source job has no resolvable ShareSync base URL`, 503)
+      }
+      const sub = (() => {
+        const cmd = sourceJob.command
+        if (!Array.isArray(cmd) || cmd.length < 3) return null
+        const arg = cmd[2]
+        if (typeof arg !== 'string' || !arg.startsWith('/output/')) return null
+        return arg.slice('/output/'.length).split('/').filter(Boolean)[0] ?? null
+      })()
+      if (!sub) {
+        return jsonError(`source job ${body.source.jobId} has no recoverable output subdir`, 422)
+      }
+      sourceSubdir = sub
+
+      // Pull the .pth bytes from ShareSync. fetchOutputFile resolves the URL
+      // via the same logic the rest of the proxy uses, so any job that the
+      // file-proxy can read is fetchable here.
+      let upstream: Response
+      try {
+        upstream = await fetchOutputFile(sourceJob, body.source.checkpointName)
+      } catch (e) {
+        return jsonError(`fetch checkpoint failed: ${e instanceof Error ? e.message : 'unknown'}`, 502)
+      }
+      if (!upstream.ok) {
+        return jsonError(
+          `checkpoint ${body.source.checkpointName} not found in source output (HTTP ${upstream.status})`,
+          upstream.status === 404 ? 404 : 502,
+        )
+      }
+      ckptBuf = Buffer.from(await upstream.arrayBuffer())
     }
-    if (!upstream.ok) {
-      return jsonError(
-        `checkpoint ${body.source.checkpointName} not found in source output (HTTP ${upstream.status})`,
-        upstream.status === 404 ? 404 : 502,
-      )
-    }
-    const ckptBuf = Buffer.from(await upstream.arrayBuffer())
 
     if (mode === 'resume') {
       // train.py picks up checkpoints from <output_dir>/<prefix>_tunet_latest.pth.

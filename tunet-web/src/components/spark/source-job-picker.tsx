@@ -11,10 +11,11 @@
  * checkpoints uploaded yet" hint instead of an error.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { SparkJob } from '@/lib/spark-types'
 import { jobLabel } from '@/lib/spark-types'
 import type { SourceJobRef } from '@/lib/spark-form-state'
+import { uploadCheckpoint } from '@/lib/upload-stage'
 
 interface CheckpointEntry {
   name:     string
@@ -37,6 +38,15 @@ interface SourceJobPickerProps {
 }
 
 export function SourceJobPicker({ mode, value, onChange }: SourceJobPickerProps) {
+  // Two source paths: a prior Spark job (existing behavior) or a .pth file
+  // the user has on their machine (new — for users who trained off-Spark
+  // and want to continue training on Spark). The 'local' path skips all the
+  // Spark API plumbing and just uploads the .pth via /api/spark/upload-stage
+  // with role='checkpoint'.
+  const [sourceMode, setSourceMode] = useState<'spark' | 'local'>(
+    value?.localCheckpointStageId ? 'local' : 'spark'
+  )
+
   const [jobs,    setJobs]    = useState<SparkJob[] | null>(null)
   const [jobsErr, setJobsErr] = useState<string | null>(null)
   const [pickedJobId, setPickedJobId] = useState<string>(value?.jobId ?? '')
@@ -44,6 +54,19 @@ export function SourceJobPicker({ mode, value, onChange }: SourceJobPickerProps)
   const [ckpts,    setCkpts]    = useState<ChecksResponse | null>(null)
   const [ckptsErr, setCkptsErr] = useState<string | null>(null)
   const [loading,  setLoading]  = useState(false)
+
+  // Local-upload state — populated as the user picks + uploads a .pth.
+  const [localFile,       setLocalFile]       = useState<File | null>(null)
+  const [localUploading,  setLocalUploading]  = useState(false)
+  const [localError,      setLocalError]      = useState<string | null>(null)
+  // Persist the uploaded handle so the user can swap files / fix the name
+  // without losing the staged upload.
+  const [localUploaded,   setLocalUploaded]   = useState<{ stageId: string; filename: string; bytes: number } | null>(
+    value?.localCheckpointStageId
+      ? { stageId: value.localCheckpointStageId, filename: value.checkpointName, bytes: 0 }
+      : null
+  )
+  const localInputRef = useRef<HTMLInputElement | null>(null)
 
   // Load list of jobs once on mount. We keep all of them and filter client-side
   // — the API response is small (a few KB even at hundreds of jobs).
@@ -100,9 +123,142 @@ export function SourceJobPicker({ mode, value, onChange }: SourceJobPickerProps)
     return !['queued', 'provisioning'].includes(j.status) || j.last_agent_heartbeat_at
   })
 
+  async function handleLocalFileSelected(file: File) {
+    setLocalFile(file)
+    setLocalError(null)
+    if (!file.name.endsWith('.pth')) {
+      setLocalError('Pick a .pth file (PyTorch checkpoint).')
+      return
+    }
+    setLocalUploading(true)
+    try {
+      const result = await uploadCheckpoint(file)
+      setLocalUploaded(result)
+      // Tell the parent — `jobId: 'local-upload'` is the sentinel the
+      // training-jobs route uses to know not to call the Spark API.
+      // preset/gpuKey are null because we can't infer them from a local file.
+      onChange(
+        {
+          jobId:          'local-upload',
+          jobLabel:       `Local: ${result.filename}`,
+          checkpointName: result.filename,
+          localCheckpointStageId: result.stageId,
+        },
+        { preset: null, gpuKey: null },
+      )
+    } catch (e) {
+      setLocalError(e instanceof Error ? e.message : 'Upload failed')
+      setLocalUploaded(null)
+      onChange(null, { preset: null, gpuKey: null })
+    } finally {
+      setLocalUploading(false)
+    }
+  }
+
   return (
     <div className="space-y-3">
-      {/* Job picker */}
+      {/* Source-mode tabs */}
+      <div className="inline-flex rounded-lg border border-[#e5e7eb] bg-white p-0.5 text-xs font-semibold">
+        <button
+          type="button"
+          onClick={() => {
+            setSourceMode('spark')
+            // Switching away from local clears the local picker but keeps
+            // the Spark selection (if any) intact — let onChange handle the
+            // current-value update when jobs load.
+            if (sourceMode !== 'spark' && value?.localCheckpointStageId) {
+              onChange(null, { preset: null, gpuKey: null })
+            }
+          }}
+          className={`px-3 py-1.5 rounded-md transition-colors ${
+            sourceMode === 'spark' ? 'bg-[#7E3AF2] text-white' : 'text-[#6b7280] hover:bg-[#F9FAFB]'
+          }`}
+        >
+          From Spark job
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setSourceMode('local')
+            if (sourceMode !== 'local' && value && !value.localCheckpointStageId) {
+              // Clear the Spark selection so the form doesn't submit both
+              setPickedJobId('')
+              setCkpts(null)
+              onChange(null, { preset: null, gpuKey: null })
+            }
+          }}
+          className={`px-3 py-1.5 rounded-md transition-colors ${
+            sourceMode === 'local' ? 'bg-[#7E3AF2] text-white' : 'text-[#6b7280] hover:bg-[#F9FAFB]'
+          }`}
+        >
+          Upload local .pth
+        </button>
+      </div>
+
+      {/* Local .pth upload */}
+      {sourceMode === 'local' && (
+        <div className="pl-3 border-l-2 border-[#e9d5ff] space-y-2">
+          <p className="text-[11px] text-[#6b7280] leading-relaxed">
+            For continuing a model you trained on your own machine. The .pth
+            file (typically 100-500 MB) uploads to a staging area on the
+            tunet-web server, then ships in the Spark job tarball. The new run
+            seeds your checkpoint at the start so train.py picks it up via the
+            same auto-resume path as a Spark-source resume.
+          </p>
+          <div className="flex items-center gap-2">
+            <input
+              ref={localInputRef}
+              type="file"
+              accept=".pth"
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (f) handleLocalFileSelected(f)
+              }}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => localInputRef.current?.click()}
+              disabled={localUploading}
+              className="px-3 py-1.5 text-xs font-semibold border border-[#7E3AF2] text-[#7E3AF2] rounded hover:bg-[#faf5ff] disabled:opacity-50"
+            >
+              {localUploading ? 'Uploading…' : (localUploaded ? 'Replace .pth' : 'Browse for .pth')}
+            </button>
+            {localUploaded && !localUploading && (
+              <span className="text-xs text-[#16A34A] font-mono">
+                ✓ {localUploaded.filename}
+                {localUploaded.bytes > 0 && ` (${formatBytes(localUploaded.bytes)})`}
+              </span>
+            )}
+            {localFile && localUploading && (
+              <span className="text-xs text-[#6b7280] font-mono">
+                Uploading {localFile.name} ({formatBytes(localFile.size)})…
+              </span>
+            )}
+          </div>
+          {localError && (
+            <p className="text-xs text-[#EF4444]">{localError}</p>
+          )}
+          {localUploaded && !localUploading && mode === 'resume' && (
+            <p className="text-[11px] text-[#6b7280] leading-relaxed">
+              The new run will write into <code className="bg-[#F9FAFB] px-1 rounded">/output/&lt;job-name&gt;</code>{' '}
+              with this checkpoint seeded so train.py can pick up where local training left off.
+              <strong className="text-[#D97706]"> Preset / model size / loss must match what you trained
+              locally</strong> — train.py refuses to load a checkpoint with mismatched architecture.
+            </p>
+          )}
+          {localUploaded && !localUploading && mode === 'finetune' && (
+            <p className="text-[11px] text-[#6b7280] leading-relaxed">
+              Weights are loaded from your local .pth; optimizer + step counter reset on the
+              Spark side. Preset / model can differ from what you trained locally as long as
+              the architecture shape matches.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Job picker (Spark-source path) */}
+      {sourceMode === 'spark' && (<>
       <div>
         <label className="block text-xs font-semibold text-[#374151] mb-1.5">
           {mode === 'resume' ? 'Resume which job?' : 'Fine-tune from which job?'}
@@ -175,6 +331,7 @@ export function SourceJobPicker({ mode, value, onChange }: SourceJobPickerProps)
           )}
         </div>
       )}
+      </>)}
     </div>
   )
 }
