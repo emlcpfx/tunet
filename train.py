@@ -544,12 +544,26 @@ def _setup_logging(config, rank, device, world_size):
             logging.error(f"Error setting up file logging: {log_setup_e}")
 
 
-def _auto_batch_size(model, resolution, n_input_ch, device, device_type, use_amp):
+def _auto_batch_size(model, resolution, n_input_ch, device, device_type, use_amp,
+                     use_lpips=False, lpips_module=None, use_compile=False):
     """Estimate the largest batch size that fits in GPU memory without OOM.
 
     Runs a single no_grad forward pass at bs=1 to measure real activation memory,
     then scales linearly to estimate all other batch sizes. No backward pass is
     run during probing, so this is fast and doesn't grind the machine.
+
+    Memory accounting:
+      - Main-model activations: measured at bs=1, 3x scale for backward
+      - LPIPS VGG forward: ~30 MB/sample per VGG side at 256-512 res (rough but
+        consistent), so we add per-sample overhead of ~30 MB * 2 sides + a
+        fixed ~500 MB for the VGG params themselves on first run
+      - torch.compile with mode='reduce-overhead' allocates a ~2-3 GB private
+        CUDA Graph pool that isn't accounted for in `free` at probe time —
+        we reserve a fixed ~2 GB if use_compile=True
+    Without these, auto-batch happily picks numbers that OOM the moment
+    LPIPS or the compile graph kicks in (real incident: A10 + batch=24 +
+    l1+lpips OOMed on the first LPIPS forward; auto-batch said 19 GB was
+    usable, reality was ~17 GB after LPIPS+graph reservations).
     """
     if device_type != 'cuda':
         if is_main_process():
@@ -582,11 +596,31 @@ def _auto_batch_size(model, resolution, n_input_ch, device, device_type, use_amp
         activation_per_sample = max(peak - baseline, 1)
         # backward stores ~3x the no_grad activation memory (empirically validated)
         per_sample_train = activation_per_sample * 3
-        usable = free * 0.85  # leave 15% headroom
+        # LPIPS overhead: VGG-16 forward at training resolution. Two sides
+        # (out, dst), and PyTorch has to keep activations for the gradient
+        # w.r.t. `out` (the gradient flows through VGG's frozen params back
+        # to the model output). Empirically ~30 MB per side per sample at
+        # 256-512 res, so ~60 MB/sample total.
+        if use_lpips:
+            per_sample_train += 60 * 1_000_000  # 60 MB per sample
+        # CUDA Graph private pool reservation when torch.compile mode is
+        # reduce-overhead. The pool grows during the first compiled forward
+        # and isn't reflected in `free` at probe time. Empirically 2-3 GB
+        # for our model sizes; reserve 2.5 GB as a safety margin.
+        compile_reserve = (2.5 * 1024 * 1024 * 1024) if use_compile else 0
+        # Headroom: 15% normally, bump to 20% when LPIPS is on (LPIPS forward
+        # has bursty allocations that the per-sample estimate doesn't
+        # capture perfectly — the OOM we hit was on a 384 MB allocation).
+        headroom_factor = 0.80 if use_lpips else 0.85
+        usable = (free - compile_reserve) * headroom_factor
         if is_main_process():
+            extras = []
+            if use_lpips: extras.append('LPIPS +60MB/sample')
+            if use_compile: extras.append(f'compile pool -{compile_reserve/1e9:.1f}GB')
+            extras_str = f"  [{', '.join(extras)}]" if extras else ''
             logging.info(f"Auto batch size: measured {activation_per_sample / 1e6:.0f}MB/sample no_grad "
                          f"(~{per_sample_train / 1e6:.0f}MB with backward). "
-                         f"Usable: {usable / 1e6:.0f}MB / {free / 1e6:.0f}MB free.")
+                         f"Usable: {usable / 1e6:.0f}MB / {free / 1e6:.0f}MB free.{extras_str}")
         for bs in candidates:
             if per_sample_train * bs <= usable:
                 chosen = bs
@@ -1263,9 +1297,16 @@ def train(config):
     # --- Auto Batch Size (after model exists) ---
     if auto_batch_pending and model is not None:
         if is_main_process():
+            # Detect whether torch.compile was applied to `model` so the
+            # auto-batcher can reserve memory for the CUDA Graph private pool
+            # (~2.5 GB) — without this it picked numbers that OOM'd when
+            # LPIPS + compile ran together at first forward.
+            model_compiled = hasattr(model, '_orig_mod')
             config.training.batch_size = _auto_batch_size(
                 model, config.data.resolution, n_input_ch, device, device_type,
-                getattr(config.training, 'use_amp', True))
+                getattr(config.training, 'use_amp', True),
+                use_lpips=use_lpips, lpips_module=loss_fn_lpips,
+                use_compile=model_compiled)
         if world_size > 1:
             bs_list = [config.training.batch_size]
             dist.broadcast_object_list(bs_list, src=0)
