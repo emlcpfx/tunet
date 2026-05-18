@@ -86,62 +86,89 @@ def distance(fp1: np.ndarray, fp2: np.ndarray) -> float:
     return float(np.abs(fp1.astype(np.int16) - fp2.astype(np.int16)).mean()) / 255.0
 
 
-class UnionFind:
-    """Standard union-find for grouping frames transitively."""
-    def __init__(self, n: int):
-        self.parent = list(range(n))
-    def find(self, x: int) -> int:
-        while self.parent[x] != x:
-            self.parent[x] = self.parent[self.parent[x]]
-            x = self.parent[x]
-        return x
-    def union(self, a: int, b: int) -> None:
-        ra, rb = self.find(a), self.find(b)
-        if ra != rb:
-            self.parent[ra] = rb
-
-
 def find_near_duplicate_groups(
     paths: list[str], fingerprints: np.ndarray, threshold: float
 ) -> dict[int, list[int]]:
-    """Return {group_id: [file_index, ...]} for all groups with >1 member."""
-    n = len(paths)
-    uf = UnionFind(n)
-    # O(n^2) pairwise — fine for datasets up to a few thousand frames; the
-    # actual comparison is cheap (vectorized numpy on 1024-element arrays).
-    fp_int = fingerprints.astype(np.int16)
-    for i in range(n):
-        # Vectorize the inner loop: distance from i to all j>i in one shot
-        diffs = np.abs(fp_int[i+1:] - fp_int[i]).mean(axis=1) / 255.0
-        for off, d in enumerate(diffs):
-            if d < threshold:
-                uf.union(i, i + 1 + off)
+    """Return {group_id: [file_index, ...]} for all groups with >1 member.
 
-    groups: dict[int, list[int]] = defaultdict(list)
+    Uses centroid-anchored greedy clustering: every member of a group must
+    be within `threshold` of the group's CENTROID (the frame with the most
+    near-neighbors). This avoids the single-linkage chaining problem where
+    a long sequence of slowly-drifting frames (A close to B, B close to C,
+    C close to D...) all end up in one giant group even though A and D are
+    visually distinct.
+
+    Algorithm:
+      1. Compute the full pairwise distance matrix (n^2 but vectorized).
+      2. For each unassigned frame, count how many other unassigned frames
+         are within `threshold`.
+      3. Pick the frame with the most neighbors — that's group 1's centroid.
+      4. Add the centroid + all its in-threshold neighbors to group 1, mark
+         them all as assigned.
+      5. Repeat from step 2 with the remaining unassigned frames.
+      6. Stop when no unassigned frame has any neighbors within threshold.
+    """
+    n = len(paths)
+    fp_int = fingerprints.astype(np.int16)
+
+    # Build the full distance matrix once. n^2 floats — at n=1000 that's
+    # 8 MB, totally fine. We need the full matrix because the greedy step
+    # repeatedly counts in-threshold neighbors per row.
+    distmat = np.zeros((n, n), dtype=np.float32)
     for i in range(n):
-        groups[uf.find(i)].append(i)
-    # Only keep groups with multiple members
-    return {gid: idxs for gid, idxs in groups.items() if len(idxs) > 1}
+        diffs = np.abs(fp_int[i+1:] - fp_int[i]).mean(axis=1) / 255.0
+        distmat[i, i+1:] = diffs
+        distmat[i+1:, i] = diffs
+
+    # Boolean adjacency: who's within threshold of whom?
+    neighbors = distmat < threshold
+    np.fill_diagonal(neighbors, False)  # don't count self
+
+    assigned = np.zeros(n, dtype=bool)
+    groups: dict[int, list[int]] = {}
+    next_gid = 0
+
+    while True:
+        # Count in-threshold neighbors per unassigned frame, ignoring already-
+        # assigned frames (they can't be added to a new group).
+        scores = neighbors.sum(axis=1, where=~assigned)  # for column mask
+        # Zero out scores for assigned rows so they can't be picked as centroid
+        scores = np.where(assigned, -1, scores)
+        best = int(np.argmax(scores))
+        if scores[best] <= 0:
+            break  # no remaining frame has any in-threshold neighbors
+
+        # Build the group: centroid + all unassigned frames within threshold
+        members = [best]
+        for j in range(n):
+            if j != best and not assigned[j] and neighbors[best, j]:
+                members.append(j)
+        # Mark all members as assigned
+        for m in members:
+            assigned[m] = True
+        groups[next_gid] = members
+        next_gid += 1
+
+    return groups
 
 
 def pick_representative(idxs: list[int], fingerprints: np.ndarray) -> tuple[int, dict[int, float]]:
-    """Pick the most-central frame in a group (lowest avg distance to others).
+    """Use the group's centroid (already first in idxs from grouping algorithm)
+    as the representative; return distances from rep to every member.
 
-    Returns (representative_idx, {member_idx: distance_from_representative}).
+    With centroid-anchored grouping the first entry in idxs is already the
+    frame with the most in-threshold neighbors. No need to recompute.
     """
-    n = len(idxs)
-    fp_int = fingerprints[idxs].astype(np.int16)
-    # Pairwise distances within the group
-    pairwise = np.zeros((n, n))
-    for i in range(n):
-        for j in range(i+1, n):
-            d = float(np.abs(fp_int[i] - fp_int[j]).mean()) / 255.0
-            pairwise[i, j] = d
-            pairwise[j, i] = d
-    avg_dist = pairwise.mean(axis=1)
-    rep_local = int(np.argmin(avg_dist))
-    rep_global = idxs[rep_local]
-    return rep_global, {idxs[k]: pairwise[rep_local, k] for k in range(n)}
+    rep_global = idxs[0]
+    fp_rep = fingerprints[rep_global].astype(np.int16)
+    dists: dict[int, float] = {}
+    for idx in idxs:
+        if idx == rep_global:
+            dists[idx] = 0.0
+        else:
+            d = float(np.abs(fingerprints[idx].astype(np.int16) - fp_rep).mean()) / 255.0
+            dists[idx] = d
+    return rep_global, dists
 
 
 def write_html_report(
