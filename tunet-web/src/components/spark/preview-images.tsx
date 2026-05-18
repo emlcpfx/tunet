@@ -237,8 +237,15 @@ export function PreviewImages({ job }: PreviewImagesProps) {
             className={zoom === 'fit' ? 'w-full overflow-hidden' : 'overflow-auto max-h-[600px]'}
             style={zoom === 'fit' ? {} : { width: '100%' }}
           >
+            {/* No `key` on this <img>. Keying on state.src would force a
+                remount on every poll (the URL changes via cache-buster on
+                every refresh) — the browser would clear the canvas while
+                downloading the new image, producing a flicker the user
+                noticed as "disappear and reappear." Without the key, React
+                keeps the same DOM node and just updates src; browsers swap
+                in the new image only once it's decoded, so the old preview
+                stays visible until the new one is ready. */}
             <img
-              key={state.src}
               src={state.src}
               alt={`${tab} preview`}
               className="block"
@@ -506,8 +513,11 @@ function ExpandedPreview({
             touchAction: 'none',
           }}
         >
+          {/* Same flicker-fix as the inline panel: drop the key so React
+              keeps this <img> node across refreshes. The pan/zoom state
+              lives on the outer transform, not on the img element, so
+              there's nothing to lose by reusing the DOM node. */}
           <img
-            key={src}
             src={src}
             alt={`${tab} preview`}
             draggable={false}
