@@ -21,7 +21,7 @@
  * Actual data upload happens via ShareSync (next step).
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.exr', '.tif', '.tiff', '.bmp', '.webp'])
 
@@ -91,13 +91,20 @@ export function FolderPicker({ onPicked }: FolderPickerProps) {
   const [scanning, setScanning] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // webkitdirectory needs to be set imperatively in React (not a standard prop)
-  useEffect(() => {
-    if (inputRef.current) {
-      inputRef.current.setAttribute('webkitdirectory', '')
-      inputRef.current.setAttribute('directory', '')
-      inputRef.current.setAttribute('mozdirectory', '')
-    }
+  // webkitdirectory / directory / mozdirectory are non-standard so React's
+  // type system doesn't expose them as JSX props. They MUST be set on every
+  // mount of the underlying <input>, including post-HMR re-renders. The
+  // earlier useEffect(() => {...}, []) pattern was fragile: if React swapped
+  // the DOM node out for any reason (sibling re-render, suspense boundary,
+  // strict-mode remount), the new node would lack the attributes and the
+  // picker would silently degrade to a file picker. A ref callback runs
+  // synchronously on every node-attach, so the attributes can't be lost.
+  const setInputRef = useCallback((el: HTMLInputElement | null) => {
+    inputRef.current = el
+    if (!el) return
+    el.setAttribute('webkitdirectory', '')
+    el.setAttribute('directory', '')
+    el.setAttribute('mozdirectory', '')
   }, [])
 
   async function onChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -196,7 +203,7 @@ export function FolderPicker({ onPicked }: FolderPickerProps) {
       {!info ? (
         <label className="block">
           <input
-            ref={inputRef}
+            ref={setInputRef}
             type="file"
             multiple
             onChange={onChange}
