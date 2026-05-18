@@ -114,9 +114,14 @@ function NewJobPageInner() {
   const [pairs, setPairs] = useState<number>(200)   // user-supplied or auto-detected from folder pick
   const [pairsAutoDetected, setPairsAutoDetected] = useState(false)
   const [idleHold, setIdleHold] = useState(0)
-  // Compute mode — InstantCompute (default, guaranteed availability) vs
+  // Compute mode — InstantCompute (guaranteed availability) vs
   // SmartCompute (preemptible, ~60% cheaper, auto-retries on interrupt).
-  const [computeMode, setComputeMode] = useState<ComputeMode>('instant')
+  // Defaults to SmartCompute because the retry budget makes preemption a
+  // non-event for most training jobs (tunet writes checkpoints frequently,
+  // so a retry resumes from the last saved state) and the ~60% savings are
+  // significant on multi-hour runs. Users who care about predictable start
+  // time / guaranteed no interruption can flip to Instant in one click.
+  const [computeMode, setComputeMode] = useState<ComputeMode>('smart')
   // SmartCompute retry budget. Default 2 (one above Spark's default 1). Range
   // [0, 5] per docs. Ignored when computeMode='instant'.
   const [maxRetriesOnInterrupt, setMaxRetriesOnInterrupt] = useState<number>(2)
