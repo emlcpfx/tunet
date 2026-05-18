@@ -953,7 +953,7 @@ def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_
 # One-shot flag for diagnostic logging (so we print mask stats once at the
 # start of training instead of every step). Keyed dict so we can add more
 # diagnostics here without colliding namespaces.
-_DIAG_LOGGED: dict = {'mask': False}
+_DIAG_LOGGED: dict = {'mask': False, 'lpips_err': False}
 
 
 def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion_l1, criterion_l2,
@@ -1044,8 +1044,29 @@ def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion
             lp = torch.tensor(0.0, device=device)
             if use_lpips and loss_fn_lpips:
                 try:
+                    # LPIPS's VGG backbone is fp32-loaded but autocast is
+                    # active here, so the call runs in mixed precision. That's
+                    # been fine historically but interactions with
+                    # torch.compile(mode='reduce-overhead') + CUDA Graphs can
+                    # silently break it. If that happens we want to KNOW —
+                    # see the one-shot warning below.
                     lp = loss_fn_lpips(out, dst).mean()
-                except Exception:
+                except Exception as lpips_err:
+                    # Log the first failure with full traceback so the user
+                    # can diagnose (commonly: torch.compile/CUDA-Graph
+                    # interaction, AMP dtype mismatch, VGG shape error).
+                    # Subsequent failures stay silent so we don't spam the log
+                    # every step at high frequency.
+                    if not _DIAG_LOGGED['lpips_err']:
+                        _DIAG_LOGGED['lpips_err'] = True
+                        logging.warning(
+                            f"LPIPS computation failed on first attempt: "
+                            f"{type(lpips_err).__name__}: {lpips_err}. "
+                            f"Loss is falling back to L1-only — set "
+                            f"TUNET_DISABLE_COMPILE=1 to rule out torch.compile, "
+                            f"or report this if it persists.",
+                            exc_info=True,
+                        )
                     lp = torch.tensor(0.0, device=device)
             if use_weighted:
                 loss = (config.training.l1_weight * l1
@@ -1092,6 +1113,7 @@ def train(config):
     # Reset one-shot diagnostic flags so a second train() call in the same
     # process (rare, but happens in tests + REPL workflows) prints them again.
     _DIAG_LOGGED['mask'] = False
+    _DIAG_LOGGED['lpips_err'] = False
     training_successful = False; final_global_step = 0
     # Separate from shutdown_requested (which means "user / max-time / stop-file
     # asked us to stop"). loop_crashed is for unhandled exceptions in the
