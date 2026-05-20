@@ -72,6 +72,16 @@ def log(msg):
     print(f"[comfy_run] {msg}", flush=True)
 
 
+def hold_for_sync():
+    """Files written to /output just before the container exits can miss the
+    agent's ShareSync upload — a fast-exiting convert-only job loses the freshly
+    written workflow_api.json this way. Hold briefly so the sync catches up."""
+    secs = int(env("COMFY_EXIT_HOLD", "15"))
+    if secs > 0:
+        log(f"holding {secs}s so /output finishes syncing to ShareSync...")
+        time.sleep(secs)
+
+
 def http_json(url, method="GET", payload=None, timeout=60):
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(url, data=data, method=method)
@@ -376,6 +386,7 @@ def main():
 
         if convert_only:
             log("COMFY_CONVERT_ONLY set — emitted graph, skipping render.")
+            hold_for_sync()
             return 0
 
         # 6. Queue + wait ------------------------------------------------------
@@ -388,6 +399,7 @@ def main():
         ok = wait_for_completion(port, prompt_id)
         exit_code = 0 if ok else 1
         log("Done." if ok else "Failed.")
+        hold_for_sync()
     finally:
         if proc.poll() is None:
             proc.terminate()
