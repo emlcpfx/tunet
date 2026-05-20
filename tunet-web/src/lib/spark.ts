@@ -27,6 +27,12 @@ export const SPARK_API = 'https://api.prod.aapse1.sparkcloud.studio'
 // Default image — matches what spark_launch.py uses (Walt's last-known-good)
 export const DEFAULT_IMAGE = 'runpod/pytorch:1.0.3-cu1281-torch271-ubuntu2204'
 
+// Mandatory tag on every job we submit. Spark identifies jobs carrying this
+// as official Clean Plate FX / TuNet work under our cost + revenue-share
+// agreement (Spark Fuse API v1.17 §2.3). Submissions WITHOUT it are billed at
+// standard rates, so submitJob() force-merges it onto every request.
+export const TUNET_JOB_TAG = 'cpfx_tunet'
+
 // ── GPU shortcut → SKU map (mirrors spark_launch.py GPU_TYPES) ────────────────
 
 export const GPU_TYPES = {
@@ -201,6 +207,13 @@ export interface SubmitJobInput {
    * in the same Downloads panel as the .pth they were built from.
    */
   outputShareSyncPath?: string
+  /**
+   * Extra grouping tags for this job (e.g. 'render_pass:final',
+   * 'experiment_id:e3094'). The mandatory `cpfx_tunet` billing tag is always
+   * added by submitJob() — callers don't need to include it. Each tag must
+   * match Spark's `^[a-z0-9_\-:\.]+$` rule (see API v1.17 §2.3).
+   */
+  tags?: string[]
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -255,11 +268,16 @@ export async function estimateJobCost(
 
 export async function submitJob(input: SubmitJobInput): Promise<SubmitJobResponse> {
   const mode = input.mode ?? 'instant'
+  // Force-merge the mandatory billing tag, deduped, ahead of any caller tags.
+  const tags = [TUNET_JOB_TAG, ...(input.tags ?? [])].filter(
+    (t, i, arr) => arr.indexOf(t) === i,
+  )
   return sparkFetch<SubmitJobResponse>('POST', '/api/compute/jobs', {
     name:            input.name,
     instanceType:    input.instanceType,
     image:           input.image ?? DEFAULT_IMAGE,
     command:         input.command,
+    tags,
     inputPushMode:   'auto-prepare',
     // Idle-hold is InstantCompute-only (per docs §11.3); Spark ignores it on
     // smart-mode jobs, but omit it anyway so the request body is honest.
