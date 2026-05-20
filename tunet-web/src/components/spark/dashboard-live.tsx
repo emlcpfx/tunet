@@ -168,7 +168,13 @@ function StuckJobsBanner({
 }) {
   const [busy, setBusy] = useState<string | null>(null)
 
-  async function requestCancel(jobId: string) {
+  async function requestCancel(jobId: string, label: string, alreadyRequested: boolean) {
+    // Confirm only on the first cancel — re-sending to an already-cancel-
+    // requested job is idempotent (not destructive), so no need to nag.
+    if (!alreadyRequested &&
+        !window.confirm(`Cancel "${label}"?\n\nSends SIGTERM to the job. Worst case you lose ≤500 steps since the last checkpoint.`)) {
+      return
+    }
     setBusy(jobId)
     try {
       await fetch(`/api/spark/jobs/${jobId}/cancel`, { method: 'POST' })
@@ -217,7 +223,7 @@ function StuckJobsBanner({
             </div>
             <button
               type="button"
-              onClick={() => requestCancel(job.id)}
+              onClick={() => requestCancel(job.id, jobLabel(job), !!job.cancel_requested_at)}
               disabled={busy === job.id}
               className="text-xs px-3 py-1.5 rounded bg-[#92400E] hover:bg-[#78350F] text-white disabled:opacity-50 flex-shrink-0"
             >
