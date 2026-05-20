@@ -48,6 +48,7 @@ Environment (set by comfy_launch.py):
                         — /object_info only needs the node classes, not weights.
 """
 
+import base64
 import json
 import os
 import shutil
@@ -385,7 +386,15 @@ def main():
             log(f"Applied {len(patches)} patch(es).")
 
         if convert_only:
-            log("COMFY_CONVERT_ONLY set — emitted graph, skipping render.")
+            # Belt-and-suspenders: also emit the graph into the job log (which
+            # uploads reliably even when the /output sync drops the file),
+            # base64-chunked between sentinels for safe recovery from the log.
+            blob = base64.b64encode(json.dumps(workflow).encode()).decode()
+            print("===WF_API_B64_BEGIN===", flush=True)
+            for i in range(0, len(blob), 120):
+                print(blob[i:i + 120], flush=True)
+            print("===WF_API_B64_END===", flush=True)
+            log("COMFY_CONVERT_ONLY set — emitted graph (to /output and log), skipping render.")
             hold_for_sync()
             return 0
 
