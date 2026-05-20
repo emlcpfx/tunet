@@ -34,6 +34,13 @@ Environment (set by comfy_launch.py):
     COMFY_EXTRA_ARGS    extra args appended to main.py
     COMFY_READY_TIMEOUT seconds to wait for startup      (default 300)
     COMFY_CONVERT_ONLY  "1" = convert + emit api.json, don't render
+
+  No-build path (assemble the environment on the node, public base image):
+    COMFY_FETCH_NODES   JSON list of git repo URLs to clone into custom_nodes
+                        (+ pip install requirements.txt). Always fetched.
+    COMFY_FETCH_MODELS  JSON list of {"url","dest"} (dest relative to COMFY_HOME,
+                        e.g. "models/vae/x.safetensors"). Skipped on CONVERT_ONLY
+                        — /object_info only needs the node classes, not weights.
 """
 
 import json
@@ -69,13 +76,46 @@ def http_json(url, method="GET", payload=None, timeout=60):
         return json.loads(r.read().decode())
 
 
-def download(url, dest):
+def download(url, dest, label="file"):
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    log(f"Fetching LoRA → {dest}")
+    log(f"downloading {label} -> {dest}")
     req = urllib.request.Request(url, headers={"User-Agent": "comfy_run/1.0"})
-    with urllib.request.urlopen(req, timeout=120) as r, open(dest, "wb") as f:
+    with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
         shutil.copyfileobj(r, f, length=1024 * 1024)
-    log(f"LoRA downloaded ({os.path.getsize(dest) / 1024 / 1024:.1f} MB)")
+    log(f"  {label} done ({os.path.getsize(dest) / 1024 / 1024:.1f} MB)")
+
+
+def fetch_nodes(comfy_home, repos):
+    """Clone custom-node repos into custom_nodes and pip-install their reqs.
+    Idempotent: a repo already present is left as-is (warm-start reuse)."""
+    if not repos:
+        return
+    cn = os.path.join(comfy_home, "custom_nodes")
+    os.makedirs(cn, exist_ok=True)
+    for url in repos:
+        name = url.rstrip("/").split("/")[-1]
+        dest = os.path.join(cn, name)
+        if os.path.isdir(dest):
+            log(f"node pack present: {name}")
+        else:
+            log(f"cloning node pack: {name}")
+            if subprocess.run(["git", "clone", "--depth", "1", url, dest]).returncode != 0:
+                log(f"WARNING: git clone failed for {name} — workflow may not load")
+                continue
+        req = os.path.join(dest, "requirements.txt")
+        if os.path.isfile(req):
+            log(f"pip install -r {name}/requirements.txt")
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", req])
+
+
+def fetch_models(comfy_home, models):
+    """Download each {url,dest} into COMFY_HOME if not already present."""
+    for m in models:
+        dest = os.path.join(comfy_home, m["dest"])
+        if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+            log(f"model present: {m['dest']}")
+            continue
+        download(m["url"], dest, os.path.basename(dest))
 
 
 def relay(stream, prefix):
@@ -265,14 +305,20 @@ def main():
         workflow = json.load(f)
     os.makedirs(output_dir, exist_ok=True)
 
-    # 1. Optional LoRA fetch ---------------------------------------------------
-    lora_url = env("COMFY_LORA_URL")
-    if lora_url:
-        try:
-            download(lora_url, os.path.join(comfy_home, "models", "loras",
-                                            env("COMFY_LORA_NAME", "lora.safetensors")))
-        except Exception as e:  # noqa: BLE001
-            sys.exit(f"ERROR: LoRA download failed: {e}")
+    # 1. Assemble the environment (no-build path) ------------------------------
+    # Node packs are always needed (ComfyUI must register the classes, and
+    # /object_info drives UI->API conversion). Weights + LoRA are only needed to
+    # actually render, so skip them on convert-only to keep that step fast.
+    try:
+        fetch_nodes(comfy_home, json.loads(env("COMFY_FETCH_NODES", "[]")))
+        if not convert_only:
+            fetch_models(comfy_home, json.loads(env("COMFY_FETCH_MODELS", "[]")))
+            lora_url = env("COMFY_LORA_URL")
+            if lora_url:
+                download(lora_url, os.path.join(comfy_home, "models", "loras",
+                                                env("COMFY_LORA_NAME", "lora.safetensors")), "LoRA")
+    except Exception as e:  # noqa: BLE001 — fail the job loudly
+        sys.exit(f"ERROR: environment assembly failed: {e}")
 
     # 2. Launch ComfyUI --------------------------------------------------------
     extra = env("COMFY_EXTRA_ARGS", "")

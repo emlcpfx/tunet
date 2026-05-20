@@ -79,29 +79,33 @@ preset's edits. The converted `workflow_api.json` is written to ShareSync each
 run — pull it once, drop it in as `cleanplate_ltx.api.json`, and point the
 preset's `workflow` at it to skip conversion on later runs.
 
-So the **only required setup** is the image:
+### No build required (default)
 
-```bash
-docker build -t <registry>/comfy-ltx23:latest comfy_spark/   # then docker push
-```
+The preset runs on a **public** ComfyUI base image (`yanwk/comfyui-boot:latest`).
+On startup `comfy_run.py` clones the 7 node packs (`node_packs`) and downloads the
+5 LTX-2.3 weights + the Obscura LoRA (`models` / `lora_default`) **onto the Spark
+node** — nothing is built or pushed, nothing large touches your computer. So
+there's **no required setup** beyond `.env` credentials; you can run immediately.
 
-Edit the `Dockerfile` to bake in the LTX-2.3 weights (or wire up a Spark model
-cache) — re-downloading them every run is slow and burns compute time. Then set
-`image` in `presets/cleanplate_ltx.preset.json` to what you pushed.
+Trade-off: ~30 GB is fetched to the node on each **cold** start. Within an
+`--idle-hold` window the warm node is reused, so iterations are fast. (Want fast
+cold starts instead? Bake the [Dockerfile](Dockerfile) into an image once and set
+`image` in the preset to it — same node packs + weights, baked in.)
 
-Recommended first run — convert the graph and inspect it before spending a
-render:
+First, convert the graph and inspect it — this **skips** the 30 GB model pull
+(conversion only needs the node classes), so it's quick:
 
 ```bash
 python comfy_spark/comfy_launch.py --preset cleanplate_ltx --convert-only
 # → pull workflow_api.json from the job's ShareSync output, eyeball it
 ```
 
-Then the real thing:
+Then the real render (the clip is the positional arg; no --image needed):
 
 ```bash
 python comfy_spark/comfy_launch.py --preset cleanplate_ltx \
-    shot.mp4 --prompt "remove the wooden fence from the foreground" --strength 2.3
+    shot.mov --prompt "remove the wooden fence from the foreground" --strength 2.3 \
+    --idle-hold 300
 ```
 
 UI→API conversion handles active nodes, scalar/combo widgets, named or

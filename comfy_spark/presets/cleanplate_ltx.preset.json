@@ -1,16 +1,39 @@
 {
   "description": "LTX-2.3 (distilled fp8) video-to-video occlusion / foreground removal using the Obscura Remova LoRA. Graph: axiomgraph/ComfyUIWorkflow 'LTX 2.3 Obscura_Remova'.",
 
-  "_WORKFLOW": "cleanplate_ltx.workflow.json is the UI/graph export (source of truth). comfy_run.py converts it to API format on Spark using the image's /object_info, so you don't need a fully-loaded local ComfyUI. The first converted graph is written to ShareSync as workflow_api.json — pull it and drop it here as cleanplate_ltx.api.json (and point 'workflow' at it) to skip conversion on later runs.",
-  "_PARAMS": "Node ids come from the UI graph and are preserved through conversion. Patches are applied AFTER conversion, so the paths target API format. Primitive nodes (432/302) use input name 'value' by convention; if a render fails with a 'patch target ... not in graph' note or bad inputs, pull the converted workflow_api.json and check the field names.",
-  "_TODO": "Set 'image' to your built ComfyUI image (see comfy_spark/Dockerfile). That's the only required edit before a real run.",
+  "_HOWITRUNS": "No-build path: a public ComfyUI base image (image) runs comfy_run.py, which on startup clones node_packs into custom_nodes and downloads models + the LoRA onto the Spark node, then converts cleanplate_ltx.workflow.json (UI graph) to API format via /object_info and renders. Nothing is built or pushed; nothing large touches your computer. Trade-off: ~30 GB is fetched on each COLD start (use --idle-hold to keep a warm node between iterations). --convert-only skips the model download (only node classes are needed for conversion), so it's quick.",
+  "_PARAMS": "Node ids come from the UI graph and are preserved through conversion; patches apply post-conversion, so paths target API format. Primitive nodes (432/302) use input name 'value' by convention; if a patch warns 'not in graph' or inputs look wrong, pull the converted workflow_api.json (written to ShareSync) and check field names.",
 
-  "image": "REPLACE_WITH_YOUR_COMFY_LTX_IMAGE",
-  "gpu": "l40s",
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "comfy_home": "/root/ComfyUI",
+  "gpu": "rtxpro6000",
   "mode": "instant",
   "extra_args": "",
 
   "workflow": "cleanplate_ltx.workflow.json",
+
+  "node_packs": [
+    "https://github.com/Lightricks/ComfyUI-LTXVideo",
+    "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite",
+    "https://github.com/kijai/ComfyUI-KJNodes",
+    "https://github.com/rgthree/rgthree-comfy",
+    "https://github.com/yolain/ComfyUI-Easy-Use",
+    "https://github.com/evanspearman/ComfyMath",
+    "https://github.com/ltdrdata/ComfyUI-Inspire-Pack"
+  ],
+
+  "models": [
+    { "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/diffusion_models/ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors",
+      "dest": "models/diffusion_models/ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors" },
+    { "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors",
+      "dest": "models/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors" },
+    { "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/text_encoders/ltx-2.3_text_projection_bf16.safetensors",
+      "dest": "models/text_encoders/ltx-2.3_text_projection_bf16.safetensors" },
+    { "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_video_vae_bf16.safetensors",
+      "dest": "models/vae/LTX23_video_vae_bf16.safetensors" },
+    { "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_audio_vae_bf16.safetensors",
+      "dest": "models/vae/LTX23_audio_vae_bf16.safetensors" }
+  ],
 
   "lora_default": "https://huggingface.co/WepeNerd/Obscura_Remova/resolve/main/LTX23_Obscura_Remova_v1.safetensors",
   "lora_name": "LTX23_Obscura_Remova_v1.safetensors",

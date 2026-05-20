@@ -453,6 +453,14 @@ def main():
         env_vars["COMFY_LORA_NAME"] = lora_name
     if preset.get("extra_args"):
         env_vars["COMFY_EXTRA_ARGS"] = preset["extra_args"]
+    # No-build path: tell comfy_run.py where ComfyUI lives in the base image and
+    # what to clone/download onto the node at startup.
+    if preset.get("comfy_home"):
+        env_vars["COMFY_HOME"] = preset["comfy_home"]
+    if preset.get("node_packs"):
+        env_vars["COMFY_FETCH_NODES"] = json.dumps(preset["node_packs"])
+    if preset.get("models"):
+        env_vars["COMFY_FETCH_MODELS"] = json.dumps(preset["models"])
 
     # ── dry run: show what would happen ───────────────────────────────────────
     print(f"\n[comfy] {'DRY RUN — ' if args.dry_run else ''}submit plan")
@@ -480,7 +488,9 @@ def main():
         return
 
     # ── pack, submit, upload, tail ────────────────────────────────────────────
-    command = ["python", "/input/comfy_run.py"]
+    # bash -c mirrors the proven quickstart invocation and dodges PATH/entrypoint
+    # quirks across public ComfyUI base images.
+    command = ["bash", "-c", "python3 /input/comfy_run.py"]
     tar_path = build_tar(workflow, input_files, patches_to_pack)
     try:
         resp = submit_job(job_name, instance_type, image, command, env_vars,
