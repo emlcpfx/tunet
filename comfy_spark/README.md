@@ -105,8 +105,14 @@ Then the real render (the clip is the positional arg; no --image needed):
 ```bash
 python comfy_spark/comfy_launch.py --preset cleanplate_ltx \
     shot.mov --prompt "remove the wooden fence from the foreground" --strength 2.3 \
-    --idle-hold 300
+    --idle-hold 300 --download ./renders
 ```
+
+Outputs are written to the job's **ShareSync** folder, not your disk. The submit
+line prints that folder's URL, and `--download DIR` pulls everything in it (the
+rendered mp4, plus the converted `workflow_api.json`) to a local directory once
+the job finishes. Without `--download`, fetch from ShareSync's web UI / mounted
+drive.
 
 UI→API conversion handles active nodes, scalar/combo widgets, named or
 positional `widgets_values`, and seed/`control_after_generate` offsets. Muted

@@ -43,6 +43,8 @@ import sys
 import tarfile
 import tempfile
 import time
+import xml.etree.ElementTree as ET
+from urllib.parse import urljoin, urlparse, unquote
 
 import requests
 
@@ -146,6 +148,84 @@ def list_jobs(tag=GROUP_TAG):
 
 def cancel_job(job_id):
     return spark("POST", f"/api/compute/jobs/{job_id}/cancel").json()
+
+
+def get_job(job_id):
+    return spark("GET", f"/api/compute/jobs/{job_id}").json()
+
+
+TERMINAL_STATUSES = {"succeeded", "completed", "failed", "cancelled",
+                     "spot-interrupted", "spot_interrupted"}
+
+
+def wait_for_terminal(job_id, poll=5):
+    """Block until the job reaches a terminal state; return that status."""
+    while True:
+        status = (get_job(job_id) or {}).get("status", "")
+        if status in TERMINAL_STATUSES:
+            return status
+        time.sleep(poll)
+
+
+# ── ShareSync output download (WebDAV) ────────────────────────────────────────
+# The Spark bearer token authenticates against the files.* host too (single
+# sign-on), so the same getToken() works for PROPFIND/GET on output URLs.
+
+_DAV = "{DAV:}"
+
+
+def webdav_list(url):
+    """PROPFIND Depth:1 -> [(name, full_url, is_dir)], excluding the dir itself."""
+    tok = get_token()
+    dir_url = url if url.endswith("/") else url + "/"
+    r = requests.request(
+        "PROPFIND", dir_url,
+        headers={"Authorization": f"Bearer {tok}", "Depth": "1",
+                 "Content-Type": "application/xml"},
+        data='<?xml version="1.0" encoding="utf-8"?>'
+             '<propfind xmlns="DAV:"><prop><resourcetype/></prop></propfind>',
+        timeout=60,
+    )
+    if r.status_code == 404:
+        return []
+    if not r.ok:
+        raise RuntimeError(f"PROPFIND {dir_url} -> HTTP {r.status_code}")
+    root = ET.fromstring(r.text)
+    base_path = urlparse(dir_url).path.rstrip("/")
+    entries = []
+    for resp in root.findall(f"{_DAV}response"):
+        href = resp.findtext(f"{_DAV}href")
+        if not href:
+            continue
+        full = urljoin(dir_url, href)
+        path = urlparse(full).path.rstrip("/")
+        if path == base_path:
+            continue  # the directory itself
+        is_dir = resp.find(f".//{_DAV}collection") is not None
+        entries.append((unquote(path.split("/")[-1]), full, is_dir))
+    return entries
+
+
+def download_outputs(base_url, dest_dir, _rel=""):
+    """Recursively pull every file under base_url into dest_dir. Returns count."""
+    os.makedirs(os.path.join(dest_dir, _rel), exist_ok=True)
+    n = 0
+    for name, href, is_dir in webdav_list(base_url):
+        if is_dir:
+            n += download_outputs(href, dest_dir, os.path.join(_rel, name))
+            continue
+        tok = get_token()
+        r = requests.get(href, headers={"Authorization": f"Bearer {tok}"}, timeout=1200)
+        if not r.ok:
+            print(f"[download] WARN {name}: HTTP {r.status_code}")
+            continue
+        local = os.path.join(dest_dir, _rel, name)
+        with open(local, "wb") as f:
+            f.write(r.content)
+        rel = os.path.join(_rel, name) if _rel else name
+        print(f"[download] {rel} ({len(r.content) / 1024 / 1024:.1f} MB)")
+        n += 1
+    return n
 
 
 def submit_job(name, instance_type, image, command, env_vars, mode, idle, max_retries, extra_tags):
@@ -339,6 +419,8 @@ def main():
     ap.add_argument("--convert-only", action="store_true",
                     help="convert a UI graph → API format on Spark, write it to ShareSync, and exit (no render)")
     ap.add_argument("--no-tail", action="store_true", help="don't stream logs after submit")
+    ap.add_argument("--download", metavar="DIR",
+                    help="after the job finishes, pull its ShareSync outputs into DIR")
     ap.add_argument("--dry-run", action="store_true", help="patch + print the workflow and planned submit; don't submit")
     # housekeeping
     ap.add_argument("--inspect", metavar="WORKFLOW", help="print node ids/types of a workflow and exit")
@@ -503,13 +585,27 @@ def main():
         upload_url = (resp.get("input") or {}).get("uploadUrl")
         if not job_id or not upload_url:
             sys.exit(f"ERROR: submit response missing jobId/uploadUrl: {resp}")
+        out_url = (resp.get("output") or {}).get("shareSyncBaseUrl")
         upload_tarball(upload_url, tar_path)
         print(f"[comfy] Job submitted: {job_id}")
-        if args.no_tail:
+        if out_url:
+            print(f"[comfy] Output folder (ShareSync): {out_url}")
+        if not args.no_tail:
+            stream_logs(job_id)
+        elif not args.download:
             print(f"\nWatch:  python comfy_spark/comfy_launch.py --logs {job_id}")
             print(f"Cancel: python comfy_spark/comfy_launch.py --cancel {job_id}")
-        else:
-            stream_logs(job_id)
+        if args.download:
+            # Always confirm the job is really done before harvesting (a tail
+            # may have been detached with Ctrl+C, or --no-tail was used).
+            print("[download] waiting for the job to finish...")
+            status = wait_for_terminal(job_id)
+            print(f"[download] job {status}; pulling outputs -> {args.download}")
+            if not out_url:
+                print("[download] no output URL in submit response; nothing to fetch")
+            else:
+                count = download_outputs(out_url, args.download)
+                print(f"[download] {count} file(s) -> {os.path.abspath(args.download)}")
     finally:
         try:
             os.unlink(tar_path)
