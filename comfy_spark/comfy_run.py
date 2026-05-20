@@ -1,0 +1,334 @@
+"""
+comfy_run.py — headless ComfyUI batch runner that executes INSIDE the
+Spark Fuse container.
+
+Packed into the input tarball at /input/comfy_run.py by comfy_launch.py and
+invoked as the job command:  ["python", "/input/comfy_run.py"].
+
+Pure stdlib (urllib/json/subprocess) so it runs on any ComfyUI image.
+
+Flow:
+    1. (optional) download a LoRA into <COMFY_HOME>/models/loras
+    2. launch ComfyUI (--listen 127.0.0.1), relaying its logs into ours
+    3. wait for /system_stats (server ready)
+    4. load the workflow. If it's a UI/graph export (has a "nodes" list),
+       convert it to API format using the server's own /object_info schema,
+       and write the result to /output for reuse.
+    5. apply any /input/patches.json edits (node/path/value) to the API graph
+    6. POST the API graph to /prompt and poll /history to completion
+       (skipped if COMFY_CONVERT_ONLY=1 — emit the converted graph and stop)
+    7. exit 0 on success, non-zero on failure
+
+Inputs are mounted at /input (ComfyUI --input-directory). Outputs go to /output
+(ComfyUI --output-directory), streamed to ShareSync by the Spark agent.
+
+Environment (set by comfy_launch.py):
+    COMFY_HOME          ComfyUI install dir              (default /ComfyUI)
+    COMFY_WORKFLOW      workflow JSON, UI or API format  (default /input/workflow.json)
+    COMFY_PATCHES       patch ops JSON                   (default /input/patches.json)
+    COMFY_PORT          port ComfyUI binds               (default 8188)
+    COMFY_INPUT_DIR     ComfyUI input dir                (default /input)
+    COMFY_OUTPUT_DIR    ComfyUI output dir               (default /output)
+    COMFY_LORA_URL      optional direct .safetensors URL to fetch
+    COMFY_LORA_NAME     filename to save the LoRA as     (default lora.safetensors)
+    COMFY_EXTRA_ARGS    extra args appended to main.py
+    COMFY_READY_TIMEOUT seconds to wait for startup      (default 300)
+    COMFY_CONVERT_ONLY  "1" = convert + emit api.json, don't render
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+
+HOST = "127.0.0.1"
+# INPUT_TYPES whose first element marks a settable widget rather than a wired slot.
+WIDGET_SCALARS = {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"}
+
+
+def env(name, default=None):
+    v = os.environ.get(name)
+    return v if v not in (None, "") else default
+
+
+def log(msg):
+    print(f"[comfy_run] {msg}", flush=True)
+
+
+def http_json(url, method="GET", payload=None, timeout=60):
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
+def download(url, dest):
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    log(f"Fetching LoRA → {dest}")
+    req = urllib.request.Request(url, headers={"User-Agent": "comfy_run/1.0"})
+    with urllib.request.urlopen(req, timeout=120) as r, open(dest, "wb") as f:
+        shutil.copyfileobj(r, f, length=1024 * 1024)
+    log(f"LoRA downloaded ({os.path.getsize(dest) / 1024 / 1024:.1f} MB)")
+
+
+def relay(stream, prefix):
+    for line in iter(stream.readline, ""):
+        sys.stdout.write(f"{prefix}{line}")
+        sys.stdout.flush()
+    stream.close()
+
+
+def wait_ready(port, timeout, proc):
+    deadline = time.time() + timeout
+    url = f"http://{HOST}:{port}/system_stats"
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            log(f"ERROR: ComfyUI exited during startup (code {proc.returncode}).")
+            return False
+        try:
+            http_json(url, timeout=5)
+            log("ComfyUI is up.")
+            return True
+        except (urllib.error.URLError, ConnectionError, OSError):
+            time.sleep(2)
+    log(f"ERROR: ComfyUI did not become ready within {timeout}s.")
+    return False
+
+
+# ── UI/graph → API-format conversion ─────────────────────────────────────────
+
+def _is_widget(definition):
+    """An INPUT_TYPES entry is a settable widget if its type is a scalar
+    (INT/FLOAT/STRING/BOOLEAN/COMBO) or a literal list of combo options."""
+    if not isinstance(definition, (list, tuple)) or not definition:
+        return False
+    t = definition[0]
+    return isinstance(t, list) or t in WIDGET_SCALARS
+
+
+def _has_control_after_generate(name, definition):
+    """Some INT widgets (seeds, primitives) emit an extra control value
+    ("fixed"/"randomize"/…) into widgets_values that has no API input."""
+    opts = definition[1] if len(definition) > 1 and isinstance(definition[1], dict) else {}
+    if opts.get("control_after_generate"):
+        return True
+    return definition[0] == "INT" and name in {"seed", "noise_seed", "rand_seed"}
+
+
+def ui_to_api(graph, object_info):
+    """Convert a ComfyUI UI/graph export to API (/prompt) format using the live
+    node schema. Mirrors the frontend's graphToPrompt for the cases this tool
+    targets: active nodes only, scalar/combo widgets, named or positional
+    widgets_values, control_after_generate offsets. Bypassed (mode 4) and muted
+    (mode 2) nodes are dropped — if a kept node depended on one, /prompt fails
+    loudly rather than rendering something wrong."""
+    links = {L[0]: (L[1], L[2]) for L in graph.get("links", [])}
+    api = {}
+    skipped = []
+    for node in graph["nodes"]:
+        if node.get("mode", 0) in (2, 4):
+            skipped.append((node["id"], node["type"]))
+            continue
+        ct = node["type"]
+        info = object_info.get(ct)
+        if not info:
+            # UI-only nodes (notes, reroutes the schema doesn't know) → drop
+            continue
+        nid = str(node["id"])
+        inputs = {}
+        connected = set()
+        # 1. wired inputs
+        for slot in node.get("inputs", []) or []:
+            link_id = slot.get("link")
+            name = slot.get("name")
+            if link_id is not None and link_id in links:
+                origin_node, origin_slot = links[link_id]
+                inputs[name] = [str(origin_node), origin_slot]
+                connected.add(name)
+        # 2. widget values
+        ordered = []
+        spec = info.get("input", {}) or {}
+        for group in ("required", "optional"):
+            for name, definition in (spec.get(group) or {}).items():
+                ordered.append((name, definition))
+        wv = node.get("widgets_values")
+        if isinstance(wv, dict):
+            # newer frontend: named widget values (e.g. VHS_* nodes)
+            valid = {n for n, _ in ordered}
+            for name, val in wv.items():
+                if name in valid and name not in connected:
+                    inputs[name] = val
+        elif isinstance(wv, list):
+            idx = 0
+            for name, definition in ordered:
+                if name in connected or not _is_widget(definition):
+                    continue
+                if idx >= len(wv):
+                    break
+                inputs[name] = wv[idx]
+                idx += 1
+                if _has_control_after_generate(name, definition):
+                    idx += 1
+        api[nid] = {"class_type": ct, "inputs": inputs}
+    if skipped:
+        log(f"Skipped {len(skipped)} muted/bypassed node(s): {skipped}")
+    log(f"Converted UI graph → API format ({len(api)} nodes).")
+    return api
+
+
+def is_ui_graph(obj):
+    return isinstance(obj, dict) and isinstance(obj.get("nodes"), list)
+
+
+# ── patching (server-side, post-conversion) ──────────────────────────────────
+
+def apply_patch(workflow, node_id, dotted_path, value):
+    node_id = str(node_id)
+    if node_id not in workflow:
+        log(f"WARNING: patch target node {node_id} not in graph — skipping {dotted_path}")
+        return
+    cur = workflow[node_id]
+    parts = dotted_path.split(".")
+    for p in parts[:-1]:
+        if p not in cur:
+            cur[p] = {}
+        cur = cur[p]
+    cur[parts[-1]] = value
+
+
+# ── prompt lifecycle ──────────────────────────────────────────────────────────
+
+def queue_prompt(port, workflow, client_id):
+    resp = http_json(f"http://{HOST}:{port}/prompt", method="POST",
+                     payload={"prompt": workflow, "client_id": client_id})
+    if "error" in resp or resp.get("node_errors"):
+        log("ERROR: ComfyUI rejected the workflow:")
+        log(json.dumps(resp, indent=2)[:2000])
+        return None
+    return resp.get("prompt_id")
+
+
+def wait_for_completion(port, prompt_id, poll=3.0):
+    url = f"http://{HOST}:{port}/history/{prompt_id}"
+    while True:
+        try:
+            hist = http_json(url, timeout=15)
+        except (urllib.error.URLError, OSError):
+            time.sleep(poll)
+            continue
+        entry = hist.get(prompt_id)
+        if entry:
+            status = entry.get("status", {})
+            if status.get("completed") or status.get("status_str") == "success":
+                _report_outputs(entry.get("outputs", {}))
+                return True
+            if status.get("status_str") == "error":
+                log("ERROR: workflow execution failed:")
+                for m in status.get("messages", []):
+                    log(f"  {m}")
+                return False
+        time.sleep(poll)
+
+
+def _report_outputs(outputs):
+    n = 0
+    for node_id, out in outputs.items():
+        for key in ("images", "gifs", "videos", "files"):
+            for item in out.get(key, []):
+                fn = item.get("filename") if isinstance(item, dict) else item
+                sub = item.get("subfolder", "") if isinstance(item, dict) else ""
+                log(f"  output[{node_id}] {'/'.join(p for p in (sub, fn) if p)}")
+                n += 1
+    log(f"{n} output file(s) in {env('COMFY_OUTPUT_DIR', '/output')}")
+
+
+def main():
+    comfy_home = env("COMFY_HOME", "/ComfyUI")
+    workflow_path = env("COMFY_WORKFLOW", "/input/workflow.json")
+    patches_path = env("COMFY_PATCHES", "/input/patches.json")
+    port = int(env("COMFY_PORT", "8188"))
+    input_dir = env("COMFY_INPUT_DIR", "/input")
+    output_dir = env("COMFY_OUTPUT_DIR", "/output")
+    ready_timeout = int(env("COMFY_READY_TIMEOUT", "300"))
+    convert_only = env("COMFY_CONVERT_ONLY") == "1"
+
+    if not os.path.isfile(workflow_path):
+        sys.exit(f"ERROR: workflow not found at {workflow_path}")
+    with open(workflow_path) as f:
+        workflow = json.load(f)
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 1. Optional LoRA fetch ---------------------------------------------------
+    lora_url = env("COMFY_LORA_URL")
+    if lora_url:
+        try:
+            download(lora_url, os.path.join(comfy_home, "models", "loras",
+                                            env("COMFY_LORA_NAME", "lora.safetensors")))
+        except Exception as e:  # noqa: BLE001
+            sys.exit(f"ERROR: LoRA download failed: {e}")
+
+    # 2. Launch ComfyUI --------------------------------------------------------
+    extra = env("COMFY_EXTRA_ARGS", "")
+    cmd = [sys.executable, "main.py", "--listen", HOST, "--port", str(port),
+           "--input-directory", input_dir, "--output-directory", output_dir,
+           "--disable-auto-launch"] + (extra.split() if extra else [])
+    log(f"Starting ComfyUI: {' '.join(cmd)} (cwd={comfy_home})")
+    proc = subprocess.Popen(cmd, cwd=comfy_home, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    threading.Thread(target=relay, args=(proc.stdout, "  | "), daemon=True).start()
+
+    exit_code = 1
+    try:
+        if not wait_ready(port, ready_timeout, proc):
+            return 1
+
+        # 4. Convert UI → API if needed ---------------------------------------
+        if is_ui_graph(workflow):
+            log("Workflow is UI/graph format — converting via /object_info.")
+            object_info = http_json(f"http://{HOST}:{port}/object_info", timeout=120)
+            workflow = ui_to_api(workflow, object_info)
+            with open(os.path.join(output_dir, "workflow_api.json"), "w") as f:
+                json.dump(workflow, f, indent=2)
+            log("Wrote converted workflow_api.json to output (pull it to reuse).")
+
+        # 5. Apply patches -----------------------------------------------------
+        if os.path.isfile(patches_path):
+            with open(patches_path) as f:
+                patches = json.load(f)
+            for op in patches:
+                apply_patch(workflow, op["node"], op["path"], op["value"])
+            log(f"Applied {len(patches)} patch(es).")
+
+        if convert_only:
+            log("COMFY_CONVERT_ONLY set — emitted graph, skipping render.")
+            return 0
+
+        # 6. Queue + wait ------------------------------------------------------
+        client_id = f"spark-{int(time.time())}"
+        log(f"Queuing workflow (client_id={client_id})")
+        prompt_id = queue_prompt(port, workflow, client_id)
+        if not prompt_id:
+            return 1
+        log(f"Queued prompt_id={prompt_id} — running...")
+        ok = wait_for_completion(port, prompt_id)
+        exit_code = 0 if ok else 1
+        log("Done." if ok else "Failed.")
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

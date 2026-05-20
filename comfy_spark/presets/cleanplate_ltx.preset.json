@@ -1,0 +1,26 @@
+{
+  "description": "LTX-2.3 (distilled fp8) video-to-video occlusion / foreground removal using the Obscura Remova LoRA. Graph: axiomgraph/ComfyUIWorkflow 'LTX 2.3 Obscura_Remova'.",
+
+  "_WORKFLOW": "cleanplate_ltx.workflow.json is the UI/graph export (source of truth). comfy_run.py converts it to API format on Spark using the image's /object_info, so you don't need a fully-loaded local ComfyUI. The first converted graph is written to ShareSync as workflow_api.json — pull it and drop it here as cleanplate_ltx.api.json (and point 'workflow' at it) to skip conversion on later runs.",
+  "_PARAMS": "Node ids come from the UI graph and are preserved through conversion. Patches are applied AFTER conversion, so the paths target API format. Primitive nodes (432/302) use input name 'value' by convention; if a render fails with a 'patch target ... not in graph' note or bad inputs, pull the converted workflow_api.json and check the field names.",
+  "_TODO": "Set 'image' to your built ComfyUI image (see comfy_spark/Dockerfile). That's the only required edit before a real run.",
+
+  "image": "REPLACE_WITH_YOUR_COMFY_LTX_IMAGE",
+  "gpu": "l40s",
+  "mode": "instant",
+  "extra_args": "",
+
+  "workflow": "cleanplate_ltx.workflow.json",
+
+  "lora_default": "https://huggingface.co/WepeNerd/Obscura_Remova/resolve/main/LTX23_Obscura_Remova_v1.safetensors",
+  "lora_name": "LTX23_Obscura_Remova_v1.safetensors",
+
+  "params": {
+    "prompt":   { "node": "432", "path": "inputs.value" },
+    "negative": { "node": "315", "path": "inputs.text" },
+    "video":    { "node": "372", "path": "inputs.video" },
+    "lora":     { "node": "427", "path": "inputs.lora_name" },
+    "strength": { "node": "427", "path": "inputs.strength_model", "default": 2.3 },
+    "fps":      { "node": "302", "path": "inputs.value", "default": 24 }
+  }
+}

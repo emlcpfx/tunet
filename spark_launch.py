@@ -57,6 +57,12 @@ DEFAULT_IMAGE   = 'runpod/pytorch:1.0.3-cu1281-torch271-ubuntu2204'
 DEFAULT_SKU     = 'g6e.4xlarge'   # 1× L40S 48GB
 DEFAULT_IDLE    = 0               # 0 = stop immediately when job exits
 
+# Mandatory billing tag. Spark identifies jobs carrying this as official Clean
+# Plate FX / TuNet work under the cost + revenue-share agreement (Spark Fuse API
+# v1.17 §2.3). Submissions WITHOUT it are billed at STANDARD rates, so it's
+# force-merged onto every job we submit (mirrors tunet-web/src/lib/spark.ts).
+TUNET_JOB_TAG   = 'cpfx_tunet'
+
 # Spark container paths (replaces the /workspace/* layout RunPod used)
 INPUT_REMOTE    = '/input'
 OUTPUT_REMOTE   = '/output'
@@ -159,7 +165,8 @@ def submit_job(name, instance_type, image, command, idle_hold_seconds=DEFAULT_ID
         'instanceType':      instance_type,
         'image':             image,
         'command':           command,                # list[str] — argv to run inside container
-        'inputPushMode':     'auto-prepare',         # we'll upload a tarball
+        'tags':              [TUNET_JOB_TAG],         # mandatory billing tag (see above)
+        'inputPushMode':     'auto-prepare',          # we'll upload a tarball
         'idleHoldSeconds':   idle_hold_seconds,
     }
     return spark('POST', '/api/compute/jobs', body).json()
