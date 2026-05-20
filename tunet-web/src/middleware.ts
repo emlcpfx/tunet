@@ -6,8 +6,7 @@ function isPublicPath(pathname: string): boolean {
     pathname.startsWith('/api/auth') ||
     pathname.startsWith('/sign-in') ||
     pathname.startsWith('/sign-up') ||
-    pathname.startsWith('/api/webhooks') ||
-    pathname === '/api/billing/webhook'
+    pathname.startsWith('/api/webhooks')
   )
 }
 

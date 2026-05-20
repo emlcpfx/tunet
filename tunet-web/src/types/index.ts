@@ -42,17 +42,6 @@ export interface DbJob {
   created_at: string
 }
 
-export interface DbBillingEvent {
-  id: string
-  user_id: string
-  job_id: string | null
-  type: 'top_up' | 'compute_charge' | 'manual_adjustment' | 'refund'
-  amount_cents: number
-  description: string | null
-  stripe_payment_intent: string | null
-  created_at: string
-}
-
 export interface DbGpuPricing {
   gpu_type_id: string
   display_name: string
@@ -150,30 +139,6 @@ export interface MonitorMetrics {
 
 export interface MonitorLogs {
   lines: string[]
-}
-
-// ── Billing ───────────────────────────────────────────────────────────────────
-
-export interface CreditPack {
-  id: string
-  label: string              // charge amount shown on button, e.g. '$10.61'
-  balance_cents: number      // dollars added to user balance, in cents — same unit as price_cents
-  price_cents: number        // what Stripe charges, in cents — slightly higher to cover 2.9% + $0.30
-  bonus_pct?: number
-}
-
-// Price formula: ceil((balance_cents + 30) / 0.971)
-// User pays price_cents, gets balance_cents added to their account.
-// The difference covers the Stripe fee so operator always nets the full balance amount.
-export const CREDIT_PACKS: CreditPack[] = [
-  { id: 'pack_10',  label: '$10.61',  balance_cents:  1000, price_cents:  1061 },
-  { id: 'pack_25',  label: '$26.06',  balance_cents:  2500, price_cents:  2606 },
-  { id: 'pack_50',  label: '$51.81',  balance_cents:  5250, price_cents:  5181, bonus_pct: 5 },
-  { id: 'pack_100', label: '$103.30', balance_cents: 11000, price_cents: 10330, bonus_pct: 10 },
-]
-
-export function formatCredits(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`
 }
 
 export function formatDuration(seconds: number): string {

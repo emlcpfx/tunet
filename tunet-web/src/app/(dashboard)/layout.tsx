@@ -1,24 +1,14 @@
 import { auth } from '@/auth'
 import { redirect } from 'next/navigation'
-import { createServiceClient } from '@/lib/supabase'
 import { Sidebar } from '@/components/layout/sidebar'
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
   const session = await auth()
-  const userId = session?.user?.id
-  if (!userId) redirect('/sign-in')
-
-  // Fetch credit balance
-  const svc = createServiceClient()
-  const { data: user } = await svc
-    .from('users')
-    .select('credit_balance_cents')
-    .eq('id', userId)
-    .single()
+  if (!session?.user?.id) redirect('/sign-in')
 
   return (
     <div className="flex min-h-screen">
-      <Sidebar creditBalance={user?.credit_balance_cents ?? 0} />
+      <Sidebar />
       <main className="flex-1 overflow-auto">
         <div className="p-6 max-w-6xl mx-auto">
           {children}

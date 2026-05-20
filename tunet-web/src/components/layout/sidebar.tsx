@@ -2,7 +2,6 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useSession, signOut } from 'next-auth/react'
-import { formatCredits } from '@/types'
 
 interface NavItem {
   href: string
@@ -65,11 +64,7 @@ const navItems: NavItem[] = [
   },
 ]
 
-interface SidebarProps {
-  creditBalance?: number
-}
-
-export function Sidebar({ creditBalance }: SidebarProps) {
+export function Sidebar() {
   const pathname = usePathname()
   const { data: session } = useSession()
   const user = session?.user
@@ -108,14 +103,6 @@ export function Sidebar({ creditBalance }: SidebarProps) {
           )
         })}
       </div>
-
-      {/* Credit balance */}
-      {creditBalance !== undefined && (
-        <div className="mx-3 mb-2 px-3 py-2.5 bg-[#F7F4FC] rounded-lg">
-          <p className="text-xs text-[#6b7280]">Credits</p>
-          <p className="text-base font-bold text-[#ae69f4]">{formatCredits(creditBalance)}</p>
-        </div>
-      )}
 
       {/* User */}
       <div className="border-t border-[#e5e7eb] px-3 py-3 space-y-1">
