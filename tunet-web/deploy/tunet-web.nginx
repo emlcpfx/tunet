@@ -1,0 +1,32 @@
+server {
+    listen 80;
+    listen [::]:80;
+    server_name tunet.cleanplatefx.com;
+
+    # Large enough for ~1 GB .pth checkpoint uploads to /api/spark/upload-stage
+    # (and multi-hundred-MB training-frame batches). The route streams these to
+    # disk, so the cap is just a sanity ceiling.
+    client_max_body_size 2g;
+    # Stream the request body to the backend instead of buffering the whole
+    # upload first — pairs with the route's streamed-to-disk handler so a 1 GB
+    # upload never fully lands in nginx or in the Node process's memory.
+    proxy_request_buffering off;
+
+    location / {
+        proxy_pass http://127.0.0.1:3002;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket / SSE
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}

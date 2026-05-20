@@ -42,6 +42,7 @@ export function JobSettingsPanel({ job }: { job: SparkJob }) {
   const alertsOn = (alertEmail || '').trim() !== ''
   const alertPlateau = stashed?.alerts.plateau ?? (env.TUNET_ALERT_PLATEAU === '1')
   const alertDiverging = stashed?.alerts.diverging ?? (env.TUNET_ALERT_DIVERGING === '1')
+  const alertSpot = stashed?.alerts.spot ?? (env.TUNET_ALERT_SPOT === '1')
 
   // Resolution + model size — prefer overrides, fall back to preset defaults
   const presetObj = presetKey && presetKey in PRESETS ? PRESETS[presetKey as keyof typeof PRESETS] : null
@@ -158,6 +159,7 @@ export function JobSettingsPanel({ job }: { job: SparkJob }) {
               <Row label="Recipient" value={alertEmail} mono small />
               <Row label="On plateau" value={alertPlateau ? 'yes' : 'no'} />
               <Row label="On diverging" value={alertDiverging ? 'yes' : 'no'} />
+              <Row label="On spot interrupt" value={alertSpot ? 'yes' : 'no'} />
             </Group>
           )}
 

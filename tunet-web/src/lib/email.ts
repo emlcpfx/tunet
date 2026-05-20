@@ -153,3 +153,35 @@ or something is broken. You probably want to stop and investigate:
 — TuNet`,
   }
 }
+
+export interface SpotInterruptContext {
+  jobName:       string
+  jobUrl:        string
+  /** Direct link to resume from the last checkpoint (one-click). */
+  resumeUrl:     string
+  /** Spark's error_message, if any (e.g. "Container drained after ..."). */
+  errorMessage?: string
+}
+
+export function spotInterruptedEmail(ctx: SpotInterruptContext): { subject: string; text: string } {
+  return {
+    subject: `[tunet] ${ctx.jobName}: interrupted by SmartCompute (spot reclaim)`,
+    text:
+`Your training run "${ctx.jobName}" was interrupted — SmartCompute reclaimed
+the GPU before the job finished.
+${ctx.errorMessage ? `\nSpark says: ${ctx.errorMessage}\n` : ''}
+Any checkpoints written before the interruption are saved. You can resume
+from the latest checkpoint in one click:
+
+    ${ctx.resumeUrl}
+
+Or open the job to review what happened:
+
+    ${ctx.jobUrl}
+
+If this keeps happening, switch the run to InstantCompute — it costs more
+but won't be reclaimed mid-training.
+
+— TuNet`,
+  }
+}

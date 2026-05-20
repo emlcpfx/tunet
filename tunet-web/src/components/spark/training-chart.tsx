@@ -23,13 +23,30 @@ const ZOOM_PRESETS: { key: string; label: string; epochs: number | null }[] = [
   { key: 'last_20', label: '20 ep', epochs: 20  },
 ]
 
-const SMOOTH_PRESETS = [0.0, 0.5, 0.9, 0.95, 0.99]
+// Named smoothing presets — the slider value IS the EMA memory weight, so
+// 0.0 = raw and 0.99 = nearly-flat. Without a label the number is opaque to
+// a beginner (they don't know whether 0.17 is "a lot" or "almost none"). The
+// label below the slider buckets the slider into named tiers so the user
+// reads "Smooth: Light" instead of guessing what 0.17 means.
+const SMOOTH_PRESETS = [0.0, 0.5, 0.85, 0.95, 0.99]
+
+function smoothingLabel(alpha: number): string {
+  if (alpha < 0.05)  return 'Raw'
+  if (alpha < 0.6)   return 'Light'
+  if (alpha < 0.85)  return 'Medium'
+  if (alpha < 0.97)  return 'Heavy'
+  return 'Max'
+}
 
 interface CustomView { xLo: number; xHi: number; yMin: number; yMax: number }
 
 export function TrainingChart({ jobId }: TrainingChartProps) {
   const { series, status: streaming } = useTrainingStream(jobId)
-  const [smoothing, setSmoothing] = useState(0.6)
+  // Default to "Medium" smoothing — per-step L1 has huge mini-batch variance
+  // (easy patches give tiny loss, hard patches give big loss), so the raw
+  // line zigzags wildly. 0.85 gives a readable curve without hiding genuine
+  // trend reversals. Was 0.6 ("Light") which left the chart looking spiky.
+  const [smoothing, setSmoothing] = useState(0.85)
   const [zoomKey, setZoomKey]     = useState('all')
   const [showRaw, setShowRaw]     = useState(true)
   const [logScale, setLogScale]   = useState(false)
@@ -302,15 +319,18 @@ function ChartToolbar({
             onChange={e => setSmoothing(parseFloat(e.target.value))}
             className="accent-[#7E3AF2]"
             style={{ width: 80 }}
+            title={`EMA memory weight (α=${smoothing.toFixed(2)}). 0 = raw, 0.99 = heavily smoothed.`}
           />
-          <span className="font-mono text-[10px] w-7 text-right">{smoothing.toFixed(2)}</span>
+          <span className="font-mono text-[10px] w-14 text-right" title={`α=${smoothing.toFixed(2)}`}>
+            {smoothingLabel(smoothing)}
+          </span>
           <button
             onClick={() => {
               const next = SMOOTH_PRESETS.find(p => p > smoothing + 0.005) ?? 0
               setSmoothing(next)
             }}
             className="text-[10px] text-[#7E3AF2] hover:underline"
-            title="Cycle smoothing presets"
+            title={`Cycle: Raw → Light → Medium → Heavy → Max`}
           >
             cycle
           </button>

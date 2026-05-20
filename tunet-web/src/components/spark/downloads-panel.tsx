@@ -26,6 +26,13 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
   const [error, setError]   = useState<string | null>(null)
   const [loading, setLoad]  = useState(true)
   const [expanded, setExp]  = useState(false)
+  const [exportState, setExportState] = useState<
+    | { kind: 'idle' }
+    | { kind: 'submitting' }
+    | { kind: 'submitted'; jobId: string; checkpoint: string }
+    | { kind: 'ready';     downloadUrl: string; checkpoint: string; exportName: string }
+    | { kind: 'error';     msg: string }
+  >({ kind: 'idle' })
 
   useEffect(() => {
     let cancelled = false
@@ -88,12 +95,106 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
   const trainingLog = files.find(f => f.name === 'training.log')
   const otherLogs   = files.filter(f => f.name.endsWith('.log') && f.name !== 'training.log')
 
+  // "Export now" handler — POSTs to /api/spark/jobs/:id/export-onnx.
+  // Two possible success shapes:
+  //   { fromCache: true,  downloadUrl, … }  → auto-export already produced
+  //     a fresh .onnx; we surface a direct download link, no new compute.
+  //   { fromCache: false, jobId, … }        → no fresh export available;
+  //     a tiny Spark job was spawned, link to its progress page.
+  async function handleExport() {
+    setExportState({ kind: 'submitting' })
+    try {
+      const res = await fetch(`/api/spark/jobs/${job.id}/export-onnx`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({}),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
+      if (data.fromCache) {
+        setExportState({
+          kind:        'ready',
+          downloadUrl: data.downloadUrl,
+          checkpoint:  data.checkpoint,
+          exportName:  data.exportName,
+        })
+      } else {
+        setExportState({
+          kind:       'submitted',
+          jobId:      data.jobId,
+          checkpoint: data.checkpoint,
+        })
+      }
+    } catch (e) {
+      setExportState({ kind: 'error', msg: e instanceof Error ? e.message : 'submit failed' })
+    }
+  }
+
+  // The export-onnx route needs a real .pth to read from ShareSync. Until
+  // the first epoch lands the button is dead weight, so disable it.
+  const canExport = !!pthLatest
+
   return (
     <div className="bg-white border border-[#e5e7eb] rounded-lg p-4">
       <h3 className="text-sm font-semibold text-[#111827] mb-1">Downloads</h3>
       <p className="text-xs text-[#6b7280] mb-3">
-        Latest checkpoint and exports. ONNX files are produced when training completes.
+        Latest checkpoint and exports. <span className="font-semibold">Export now</span> grabs the
+        most recent auto-exported ONNX from training (instant download) — or if none exists yet, falls
+        back to a tiny CPU job (~2 min, ~$0.02) that converts on demand.
       </p>
+
+      {/* ── Export now action row ─────────────────────────────────────────── */}
+      <div className="flex items-center gap-2 mb-3 p-2 rounded-md bg-[#faf5ff] border border-[#e9d5ff]">
+        <button
+          onClick={handleExport}
+          disabled={
+            !canExport ||
+            exportState.kind === 'submitting' ||
+            exportState.kind === 'submitted' ||
+            exportState.kind === 'ready'
+          }
+          className={`text-xs font-semibold px-3 py-1.5 rounded-md transition-colors ${
+            !canExport || exportState.kind === 'submitting' || exportState.kind === 'submitted' || exportState.kind === 'ready'
+              ? 'bg-[#e5e7eb] text-[#9ca3af] cursor-not-allowed'
+              : 'bg-[#7E3AF2] text-white hover:bg-[#6D28D9] cursor-pointer'
+          }`}
+        >
+          {exportState.kind === 'submitting' ? 'Checking…' : 'Export now'}
+        </button>
+        <div className="text-xs text-[#6b7280] min-w-0 flex-1">
+          {exportState.kind === 'idle' && (canExport
+            ? <>Convert <span className="font-mono text-[#374151]">{pthLatest?.name}</span> → ONNX + TorchScript</>
+            : 'Waiting for the first checkpoint…')}
+          {exportState.kind === 'submitting' && 'Looking for a ready export…'}
+          {exportState.kind === 'ready' && (
+            <>
+              Ready from training:{' '}
+              <a
+                href={exportState.downloadUrl}
+                download={exportState.exportName}
+                className="text-[#7E3AF2] hover:underline font-semibold"
+              >
+                Download {exportState.exportName} ↓
+              </a>
+            </>
+          )}
+          {exportState.kind === 'submitted' && (
+            <>
+              No fresh auto-export — spawned a job from <span className="font-mono text-[#374151]">{exportState.checkpoint}</span>.{' '}
+              <a
+                href={`/demo/jobs/${exportState.jobId}`}
+                className="text-[#7E3AF2] hover:underline font-semibold"
+              >
+                View progress →
+              </a>{' '}
+              Files will appear here when it completes.
+            </>
+          )}
+          {exportState.kind === 'error' && (
+            <span className="text-[#EF4444]">Failed: {exportState.msg}</span>
+          )}
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         <DownloadCard

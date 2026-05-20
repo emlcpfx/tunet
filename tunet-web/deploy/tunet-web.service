@@ -1,0 +1,23 @@
+[Unit]
+Description=TuNet Web (Next.js)
+After=network.target
+
+[Service]
+Type=simple
+User=tunet
+Group=tunet
+WorkingDirectory=/opt/tunet-web
+EnvironmentFile=/etc/tunet-web/env
+ExecStart=/usr/bin/node /opt/tunet-web/server.js
+Restart=always
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/tunet-web /tmp
+
+[Install]
+WantedBy=multi-user.target

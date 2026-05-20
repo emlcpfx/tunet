@@ -7,7 +7,6 @@ export interface SparkJob {
   id:                       string
   organisation_id?:         number
   user_id?:                 number
-  availability_region?:     string
   mode?:                    string
   image?:                   string
   command?:                 string[]

@@ -381,7 +381,7 @@ individually with `git revert`.
 
 | # | Optimization | Result | Commit | Notes |
 |---|---|---|---|---|
-| 1 | Dataloader workers + prefetch | **N/A locally** | — | `train.py:635` forces `num_workers=0` on Windows (spawn-multiprocessing hang fix). Linux Spark agents already auto-detect optimal worker count via `auto_detect_num_workers()`. No commit. |
+| 1 | Dataloader workers + prefetch | **N/A locally; cloud re-test pending** | — | `train.py:635` forces `num_workers=0` on Windows (spawn-multiprocessing hang fix). On Spark, auto-detect was also clamping to 0 until 2026-05-18 because the container `/dev/shm` defaulted to 64 MB and bus-errored any DataLoader worker (safety net at `training/dataloader_utils.py:78-87`). Spark now defaults `/dev/shm` to 2 GiB with an optional `shmSize` submit param, so `auto_detect_num_workers()` will deliver 6–8 workers on cloud — worth re-measuring ref sweep on L4 (~10–20% expected at higher res). No commit. |
 | 2 | Fused AdamW (CUDA) | **+1.5 to +3.3%** | `97de4d7` | `optim.AdamW(..., fused=True)`. Free win, no risk. Biggest at small workloads where the optimizer step is a bigger fraction of iter time. |
 | 3 | `torch.compile(mode='reduce-overhead')` | **+13.1% on cloud L4** (validated 2026-05-02) | `b1ed932` | Can't run locally on Windows — Triton has no wheel. On cloud, L4/512/bs2 measured 6.39 step/s eager, 7.23 step/s compiled. Cost estimator's L4 baseline updated to reflect this. T4/A10 not yet re-measured. |
 | 4 | `channels_last` memory format | **REGRESSION −40 to −64%** | reverted | UNet has GroupNorm + skip-connection `cat` ops that don't have NHWC kernels. PyTorch falls back to NCHW at every such op, paying memory-layout conversion cost on every layer. Mixed-format graphs are strictly worse. |

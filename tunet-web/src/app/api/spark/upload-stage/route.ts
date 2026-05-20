@@ -27,6 +27,8 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import * as crypto from 'node:crypto'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -52,6 +54,15 @@ function newStageId(): string {
 // ── POST ────────────────────────────────────────────────────────────────────
 
 export async function POST(req: Request) {
+  // Large single-file uploads (e.g. ~1 GB .pth checkpoints) come in as a raw
+  // octet-stream body, NOT multipart. We stream those straight to disk so we
+  // never hold the whole file in memory — req.formData() would buffer the
+  // entire ~1 GB, which OOM-kills the service on a small (1 GB RAM) host.
+  const contentType = req.headers.get('content-type') ?? ''
+  if (!contentType.includes('multipart/form-data')) {
+    return handleRawUpload(req)
+  }
+
   let form: FormData
   try {
     form = await req.formData()
@@ -96,6 +107,55 @@ export async function POST(req: Request) {
   return NextResponse.json({
     stageId,
     received: { role, files: files.length, bytes: totalBytes },
+    stage:    summary,
+  }, { status: 201 })
+}
+
+// ── Raw streamed upload (single file, no multipart) ──────────────────────────
+//
+// Used for large files (~1 GB .pth checkpoints). The client sends the file as
+// the raw request body with metadata in headers:
+//   x-role      — same role values as the multipart path
+//   x-filename  — URL-encoded basename (we take basename only, no traversal)
+//   x-stage-id  — optional; omit on the first upload to mint a new stage
+// We pipe req.body → disk so peak memory stays at the stream buffer size, not
+// the file size.
+async function handleRawUpload(req: Request): Promise<Response> {
+  let stageId = req.headers.get('x-stage-id') ?? ''
+  if (!stageId) stageId = newStageId()
+
+  const role = req.headers.get('x-role') ?? ''
+  if (!ALLOWED_ROLES.has(role)) {
+    return NextResponse.json({ error: `role must be one of: ${[...ALLOWED_ROLES].join(', ')}` }, { status: 400 })
+  }
+
+  const rawName  = req.headers.get('x-filename') ?? ''
+  const safeName = path.basename(decodeURIComponent(rawName))
+  if (!safeName || safeName.startsWith('.')) {
+    return NextResponse.json({ error: 'x-filename header missing or invalid' }, { status: 400 })
+  }
+  if (!req.body) {
+    return NextResponse.json({ error: 'empty request body' }, { status: 400 })
+  }
+
+  const targetDir = path.join(stageDir(stageId), role)
+  await fs.promises.mkdir(targetDir, { recursive: true })
+  const destPath = path.join(targetDir, safeName)
+
+  try {
+    // Readable.fromWeb adapts the web ReadableStream (req.body) to a Node
+    // stream; pipeline handles backpressure + closes the file handle.
+    await pipeline(Readable.fromWeb(req.body as Parameters<typeof Readable.fromWeb>[0]), fs.createWriteStream(destPath))
+  } catch (e) {
+    await fs.promises.rm(destPath, { force: true }).catch(() => {})
+    return NextResponse.json({ error: 'upload stream failed', detail: e instanceof Error ? e.message : '' }, { status: 500 })
+  }
+
+  const bytes   = (await fs.promises.stat(destPath)).size
+  const summary = await summarizeStage(stageId)
+  return NextResponse.json({
+    stageId,
+    received: { role, files: 1, bytes },
     stage:    summary,
   }, { status: 201 })
 }

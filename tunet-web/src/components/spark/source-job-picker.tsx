@@ -109,11 +109,12 @@ export function SourceJobPicker({ mode, value, onChange }: SourceJobPickerProps)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- onChange not stable; we only want to re-run on jobId change
   }, [pickedJobId])
 
-  // If parent clears `value` (e.g. mode flip back to 'new'), keep our local
-  // dropdown in sync so re-entering the mode shows a clean state.
-  useEffect(() => {
-    if (!value && pickedJobId) setPickedJobId('')
-  }, [value, pickedJobId])
+  // Note: we used to auto-clear pickedJobId whenever the parent's value went
+  // null, but that fired in the wrong window — when a user picks a job, our
+  // local state flips first and the parent's value catches up async after the
+  // checkpoints fetch resolves. The auto-clear would reset the dropdown mid-
+  // pick. Mode flip back to 'new' unmounts us entirely (gate at new/page.tsx),
+  // so we don't actually need to react to value going null while mounted.
 
   // Filter to jobs that *probably* have output: terminal-success or running.
   // We don't strictly enforce — Spark's status semantics are fuzzy, and the

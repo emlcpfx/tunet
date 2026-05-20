@@ -54,6 +54,7 @@ yml/
 # Web app
 tunet-web/node_modules/
 tunet-web/.next/
+tunet-web/.next-prod/
 tunet-web/.env*.local
 tunet-web/next-env.d.ts
 # Incremental TypeScript build cache — regenerated on every build
@@ -61,6 +62,16 @@ tunet-web/tsconfig.tsbuildinfo
 # Personal dev helpers — not part of the shipping app (any dotfile script
 # under tunet-web/ that starts with .bench-)
 tunet-web/.bench-*
+# Deploy tarballs (created by deploy/deploy.ps1)
+tunet-web/tunet-web-deploy*.tar.gz
+# Deploy secrets — production EnvironmentFile (AUTH_SECRET, service-role key,
+# Spark creds). NEVER commit. deploy.ps1 reads VPS creds from tunet/.env.
+tunet-web/deploy/tunet-web.env
+# WebDAV / API debug dumps (scratch from ShareSync troubleshooting)
+tunet-web/propfind.xml
+tunet-web/resp.bin
+tunet-web/resp.headers
+tunet-web/response_*.xml
 
 # Local benchmark output — accumulated step/sec measurements per machine.
 # We commit the script (scripts/bench_local.py) but not the run logs.
@@ -68,3 +79,4 @@ scripts/bench_results.jsonl
 
 # Scratch files
 aws_gpu_pricing.html
+tunet-web/deploy/tunet-web.env

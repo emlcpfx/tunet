@@ -71,6 +71,15 @@ export default async function JobDetailPage({
         </div>
         <div className="flex items-center gap-3 flex-shrink-0">
           <LiveStatusBadge initialJob={job} />
+          {!isLive && (
+            <Link
+              href={`/demo/jobs/new?resume=${job.id}`}
+              className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#7E3AF2] text-[#7E3AF2] hover:bg-[#faf5ff] transition-colors"
+              title="Continue training from this job's latest checkpoint"
+            >
+              Resume
+            </Link>
+          )}
           <Link
             href={`/demo/jobs/new?clone=${job.id}`}
             className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#e5e7eb] text-[#374151] hover:bg-[#F9FAFB] transition-colors"
@@ -110,7 +119,7 @@ export default async function JobDetailPage({
 
       {/* Stats + analysis strip */}
       <section>
-        <TrainingStats jobId={job.id} />
+        <TrainingStats jobId={job.id} job={job} />
       </section>
 
       {/* Provisioning timeline + log stream (combined client view) */}

@@ -128,7 +128,6 @@ export interface SparkJob {
   id:                          string
   organisation_id?:            number
   user_id?:                    number
-  availability_region?:        string
   mode?:                       string
   image?:                      string
   command?:                    string[]
@@ -195,6 +194,13 @@ export interface SubmitJobInput {
    * range [0, 5]. Ignored when mode='instant'.
    */
   maxRetriesOnInterrupt?: number
+  /**
+   * Override the ShareSync path the agent uploads /output/ to. Defaults to
+   * `/Spark Fuse Jobs/{jobId}/`. Used by the export-onnx route to point the
+   * export job's output at the *source* job's dir so the .onnx files land
+   * in the same Downloads panel as the .pth they were built from.
+   */
+  outputShareSyncPath?: string
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -224,11 +230,8 @@ export async function cancelJob(id: string): Promise<SparkJob> {
 
 export interface SparkEstimateResponse {
   instanceType:       string
-  availabilityRegion: string
   mode:               'instant' | 'smart'
   rate: {
-    costPerHourUsd:        string
-    markupMultiplier:      number
     billedPerSecondCents:  string
     billedPerHourUsd:      string
   }
@@ -265,6 +268,9 @@ export async function submitJob(input: SubmitJobInput): Promise<SubmitJobRespons
     mode,
     ...(mode === 'smart' && input.maxRetriesOnInterrupt !== undefined
       ? { maxRetriesOnInterrupt: input.maxRetriesOnInterrupt }
+      : {}),
+    ...(input.outputShareSyncPath
+      ? { outputShareSyncPath: input.outputShareSyncPath }
       : {}),
   })
 }
@@ -325,6 +331,30 @@ export async function openLogStream(jobId: string): Promise<Response> {
  *
  * Returns null if neither is available + the path is missing.
  */
+/**
+ * Percent-encode each segment of a URL path, preserving '/'. Needed because
+ * `output_share_sync_path` is a *raw* path string (e.g. `Spark Fuse Jobs/...`
+ * with literal spaces). Node's `fetch` tolerates raw spaces (it auto-encodes
+ * to `%20`), but strict consumers like the export job's `curl` reject them
+ * with "URL using bad/illegal format". So we encode the path here at the one
+ * place the full URL is assembled.
+ *
+ * Idempotent: a segment that's already encoded (`Compute%20Jobs`) is decoded
+ * first so we don't double-encode it to `Compute%2520Jobs`. A stray literal
+ * '%' that can't be decoded falls back to encoding the segment as-is.
+ */
+function encodePathSegments(p: string): string {
+  return p
+    .split('/')
+    .map(seg => {
+      if (!seg) return seg
+      let raw = seg
+      try { raw = decodeURIComponent(seg) } catch { /* keep literal */ }
+      return encodeURIComponent(raw)
+    })
+    .join('/')
+}
+
 export function shareSyncBaseUrl(j: SparkJob): string | null {
   const path = j.output_share_sync_path
   if (!path) return null
@@ -350,9 +380,12 @@ export function shareSyncBaseUrl(j: SparkJob): string | null {
   // ones submitted from elsewhere with a different layout).
   const subdir = jobOutputSubdir(j)
   const segs = [
+    // filesBase is already URL-encoded (it came from a real submit URL, e.g.
+    // the space id arrives as `%24`), so we leave it untouched. Only the raw
+    // path/subdir need encoding.
     filesBase.replace(/\/+$/, ''),
-    path.replace(/^\/+/, '').replace(/\/+$/, ''),
-    ...(subdir ? [subdir] : []),
+    encodePathSegments(path.replace(/^\/+/, '').replace(/\/+$/, '')),
+    ...(subdir ? [encodePathSegments(subdir)] : []),
   ].filter(s => s.length > 0)
   return segs.join('/')
 }
@@ -379,7 +412,7 @@ export function shareSyncInputBaseUrl(j: SparkJob): string | null {
                  ?? j.env?.TUNET_FILES_BASE
                  ?? process.env.SPARK_FILES_BASE_URL
   if (!filesBase) return null
-  return `${filesBase.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`
+  return `${filesBase.replace(/\/+$/, '')}/${encodePathSegments(path.replace(/^\/+/, '').replace(/\/+$/, ''))}`
 }
 
 /**
@@ -500,9 +533,22 @@ interface WebdavEntry {
 export async function listOutputDir(j: SparkJob): Promise<WebdavEntry[]> {
   const base = shareSyncBaseUrl(j)
   if (!base) throw new Error('No ShareSync URL available for this job')
+  return propfindDir(base)
+}
 
+/**
+ * Depth-1 PROPFIND on an arbitrary ShareSync URL. Returns the immediate
+ * children. Used by callers that need to look at a sub-directory of a job
+ * (e.g. `<base>/exports/flame/`) without enumerating the whole tree.
+ *
+ * Returns an empty array on 404 — callers usually want "no files" rather
+ * than an exception when the sub-directory simply doesn't exist yet.
+ */
+export async function propfindDir(url: string): Promise<WebdavEntry[]> {
   const tok = await getToken()
-  const res = await fetch(`${base}/`, {
+  // Ensure trailing slash so the WebDAV server treats it as a collection.
+  const dirUrl = url.endsWith('/') ? url : `${url}/`
+  const res = await fetch(dirUrl, {
     method: 'PROPFIND',
     headers: {
       'Authorization': `Bearer ${tok}`,
@@ -521,11 +567,12 @@ export async function listOutputDir(j: SparkJob): Promise<WebdavEntry[]> {
 </propfind>`,
     cache: 'no-store',
   })
+  if (res.status === 404) return []
   if (!res.ok) {
     throw new Error(`PROPFIND failed: HTTP ${res.status}`)
   }
   const xml = await res.text()
-  return parseWebdavMultistatus(xml, base)
+  return parseWebdavMultistatus(xml, dirUrl)
 }
 
 /**

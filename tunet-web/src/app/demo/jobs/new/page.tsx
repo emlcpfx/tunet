@@ -92,6 +92,7 @@ function NewJobPageInner() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const cloneFromId = searchParams.get('clone')
+  const resumeFromId = searchParams.get('resume')
 
   // Form state
   const [name,    setName]    = useState('')
@@ -116,12 +117,13 @@ function NewJobPageInner() {
   const [idleHold, setIdleHold] = useState(0)
   // Compute mode — InstantCompute (guaranteed availability) vs
   // SmartCompute (preemptible, ~60% cheaper, auto-retries on interrupt).
-  // Defaults to SmartCompute because the retry budget makes preemption a
-  // non-event for most training jobs (tunet writes checkpoints frequently,
-  // so a retry resumes from the last saved state) and the ~60% savings are
-  // significant on multi-hour runs. Users who care about predictable start
-  // time / guaranteed no interruption can flip to Instant in one click.
-  const [computeMode, setComputeMode] = useState<ComputeMode>('smart')
+  // Defaults to InstantCompute: TuNet's per-run setup cost is high (~5-8 min
+  // for torch.compile warmup + auto-batch sizing + first-step compile), which
+  // is longer than the time-to-first-checkpoint. Spot preemption inside that
+  // window loses the whole setup and a retry just repeats it — observed three
+  // back-to-back spot kills before any training step ran. Spot only pays off
+  // on long runs that checkpoint early; flip to Smart in one click for those.
+  const [computeMode, setComputeMode] = useState<ComputeMode>('instant')
   // SmartCompute retry budget. Default 2 (one above Spark's default 1). Range
   // [0, 5] per docs. Ignored when computeMode='instant'.
   const [maxRetriesOnInterrupt, setMaxRetriesOnInterrupt] = useState<number>(2)
@@ -132,6 +134,7 @@ function NewJobPageInner() {
   const [alertEmail,    setAlertEmail]    = useState('')
   const [alertPlateau,  setAlertPlateau]  = useState(true)
   const [alertDiverging, setAlertDiverging] = useState(true)
+  const [alertSpot,     setAlertSpot]     = useState(true)
   // Whether the user has manually touched the email field. Once true, we
   // stop overwriting from the session — they may want to send alerts to a
   // shared address or clear the field to opt out.
@@ -240,6 +243,35 @@ function NewJobPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional one-shot on mount
   }, [cloneFromId])
 
+  // ── Resume-from-job ────────────────────────────────────────────────────────
+  // ?resume=<jobId> is a one-click entry point from a failed/finished job's
+  // detail page. It rehydrates the full form state (so preset/model/loss match
+  // — train.py refuses to load a checkpoint with mismatched architecture), then
+  // flips to resume mode and pre-selects the source job. SourceJobPicker reads
+  // source.jobId on mount and auto-loads the job's latest checkpoint.
+  const [resumeError, setResumeError] = useState<string | null>(null)
+  useEffect(() => {
+    if (!resumeFromId) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(`/api/spark/jobs/${resumeFromId}`, { cache: 'no-store' })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data = await res.json()
+        const job = data.job as SparkJob | undefined
+        if (!job)      throw new Error('source job not found')
+        if (cancelled) return
+        applyClonedJob(job)
+        setMode('resume')
+        setSource({ jobId: job.id, jobLabel: jobLabel(job), checkpointName: '' })
+      } catch (e) {
+        if (!cancelled) setResumeError(e instanceof Error ? e.message : 'Resume failed')
+      }
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional one-shot on mount
+  }, [resumeFromId])
+
   function applyClonedJob(job: SparkJob) {
     setCloneSource({ id: job.id, label: jobLabel(job) })
 
@@ -268,6 +300,7 @@ function NewJobPageInner() {
       setAlertEmail(stashed.alerts.email)
       setAlertPlateau(stashed.alerts.plateau)
       setAlertDiverging(stashed.alerts.diverging)
+      setAlertSpot(stashed.alerts.spot)
       if (stashed.manual) {
         setShowManualPaths(true)
         setSrcDir(stashed.manual.srcDir)
@@ -286,6 +319,7 @@ function NewJobPageInner() {
         setAlertEmail(emailGuess)
         setAlertPlateau(job.env?.TUNET_ALERT_PLATEAU === '1')
         setAlertDiverging(job.env?.TUNET_ALERT_DIVERGING === '1')
+        setAlertSpot(job.env?.TUNET_ALERT_SPOT === '1')
       }
     }
 
@@ -426,7 +460,7 @@ function NewJobPageInner() {
       idleHoldSeconds: idleHold,
       pairs,
       skipThreshold,
-      alerts:  { email: alertEmail.trim(), plateau: alertPlateau, diverging: alertDiverging },
+      alerts:  { email: alertEmail.trim(), plateau: alertPlateau, diverging: alertDiverging, spot: alertSpot },
       manual:  showManualPaths
         ? { srcDir, dstDir, valSrcDir, valDstDir }
         : undefined,
@@ -476,6 +510,7 @@ function NewJobPageInner() {
         email:     alertEmail.trim(),
         plateau:   alertPlateau,
         diverging: alertDiverging,
+        spot:      alertSpot,
       } : undefined,
       formState,
     })
@@ -628,9 +663,9 @@ function NewJobPageInner() {
         </div>
       )}
 
-      {cloneError && (
+      {(cloneError || resumeError) && (
         <div className="px-4 py-3 bg-[#FEF2F2] border border-[#fecaca] rounded-lg text-sm text-[#EF4444]">
-          Couldn&apos;t load source job: {cloneError}
+          Couldn&apos;t load source job: {cloneError ?? resumeError}
         </div>
       )}
 
@@ -952,11 +987,6 @@ SmartCompute (~60% off)
   the GPU mid-run with a short warning — Spark auto-re-queues your job on
   fresh smart capacity up to your retry budget.
 
-  v1.15 caveat: smart-mode capacity comes from only 2 data centers, so
-  some SKUs (especially RTX PRO 6000) can sit in queued for several
-  minutes before capacity is found. Spark Fuse v1.2 (target 2026-05-22)
-  expands this.
-
   Spark Fuse pays the partial-attempt time on every retry, not you — but
   if your container can't resume from /output/ checkpoints, each retry
   re-runs from scratch.`}
@@ -1073,6 +1103,18 @@ Leave the email field empty to opt out for this job entirely."
                   <span className="text-[#374151]">
                     Notify if loss starts going up
                     <span className="text-[#9ca3af]"> (LR or data problem)</span>
+                  </span>
+                </label>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={alertSpot}
+                    onChange={(e) => setAlertSpot(e.target.checked)}
+                    className="accent-[#7E3AF2]"
+                  />
+                  <span className="text-[#374151]">
+                    Notify on spot interruption
+                    <span className="text-[#9ca3af]"> (SmartCompute reclaimed the GPU)</span>
                   </span>
                 </label>
               </div>

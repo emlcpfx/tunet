@@ -554,16 +554,18 @@ def _auto_batch_size(model, resolution, n_input_ch, device, device_type, use_amp
 
     Memory accounting:
       - Main-model activations: measured at bs=1, 3x scale for backward
-      - LPIPS VGG forward: ~30 MB/sample per VGG side at 256-512 res (rough but
-        consistent), so we add per-sample overhead of ~30 MB * 2 sides + a
-        fixed ~500 MB for the VGG params themselves on first run
-      - torch.compile with mode='reduce-overhead' allocates a ~2-3 GB private
-        CUDA Graph pool that isn't accounted for in `free` at probe time —
-        we reserve a fixed ~2 GB if use_compile=True
-    Without these, auto-batch happily picks numbers that OOM the moment
-    LPIPS or the compile graph kicks in (real incident: A10 + batch=24 +
-    l1+lpips OOMed on the first LPIPS forward; auto-batch said 19 GB was
-    usable, reality was ~17 GB after LPIPS+graph reservations).
+      - LPIPS VGG forward: ~60 MB/sample (both VGG sides) added per sample
+      - torch.compile(mode='reduce-overhead') captures the whole training step
+        into a private CUDA Graph pool. That pool scales with the training
+        activation memory (measured ~0.66x of per-sample training cost on a
+        Blackwell at bs=16, res=512) — it is NOT a fixed overhead. We model it
+        as a per-sample MULTIPLIER (×1.7 when use_compile), so it scales with
+        the chosen batch and resolution.
+    The old code reserved a flat 2.5 GB for the graph pool. That under-budgets
+    badly at high resolution / large batch — the pool there is tens of GB, not
+    2.5. Symptom: res>384 OOMed on every GPU regardless of the picked batch
+    (e.g. Blackwell bs=16 res=512 hit 99% VRAM, LPIPS then OOMed; A10 bs=6
+    res=512 would too). Folding the pool into the per-sample cost fixes that.
     """
     if device_type != 'cuda':
         if is_main_process():
@@ -603,23 +605,30 @@ def _auto_batch_size(model, resolution, n_input_ch, device, device_type, use_amp
         # 256-512 res, so ~60 MB/sample total.
         if use_lpips:
             per_sample_train += 60 * 1_000_000  # 60 MB per sample
-        # CUDA Graph private pool reservation when torch.compile mode is
-        # reduce-overhead. The pool grows during the first compiled forward
-        # and isn't reflected in `free` at probe time. Empirically 2-3 GB
-        # for our model sizes; reserve 2.5 GB as a safety margin.
-        compile_reserve = (2.5 * 1024 * 1024 * 1024) if use_compile else 0
+        per_sample_base = per_sample_train  # pre-graph, for logging
+        # torch.compile(mode='reduce-overhead') keeps a private CUDA Graph pool
+        # holding the step's working set — roughly +0.66x the per-sample
+        # training cost (measured: Blackwell bs=16 res=512 → 34.8 GB pool vs
+        # 53 GB training alloc). It scales with batch AND resolution, so it
+        # must be a per-sample multiplier, not the old flat 2.5 GB reserve
+        # (which under-budgeted and OOMed at res>384). Use 0.7 for a hair of
+        # margin over the measured 0.66.
+        GRAPH_FACTOR = 0.7
+        if use_compile:
+            per_sample_train *= (1.0 + GRAPH_FACTOR)
         # Headroom: 15% normally, bump to 20% when LPIPS is on (LPIPS forward
         # has bursty allocations that the per-sample estimate doesn't
         # capture perfectly — the OOM we hit was on a 384 MB allocation).
         headroom_factor = 0.80 if use_lpips else 0.85
-        usable = (free - compile_reserve) * headroom_factor
+        usable = free * headroom_factor
         if is_main_process():
             extras = []
             if use_lpips: extras.append('LPIPS +60MB/sample')
-            if use_compile: extras.append(f'compile pool -{compile_reserve/1e9:.1f}GB')
+            if use_compile: extras.append(f'compile graph x{1.0 + GRAPH_FACTOR:.1f}')
             extras_str = f"  [{', '.join(extras)}]" if extras else ''
             logging.info(f"Auto batch size: measured {activation_per_sample / 1e6:.0f}MB/sample no_grad "
-                         f"(~{per_sample_train / 1e6:.0f}MB with backward). "
+                         f"(~{per_sample_base / 1e6:.0f}MB backward"
+                         f"{f', ~{per_sample_train / 1e6:.0f}MB with graph pool' if use_compile else ''}). "
                          f"Usable: {usable / 1e6:.0f}MB / {free / 1e6:.0f}MB free.{extras_str}")
         for bs in candidates:
             if per_sample_train * bs <= usable:

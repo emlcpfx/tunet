@@ -24,9 +24,15 @@ Three alert kinds:
 
 | Kind             | Trigger                                                              | Subject line                                |
 |------------------|----------------------------------------------------------------------|---------------------------------------------|
-| `plateau`        | Best loss is 30+ epochs old (and slope ≈ 0)                          | "training has plateaued"                    |
+| `plateau`        | Best loss is 30+ epochs old                                          | "training has plateaued"                    |
 | `training_done`  | Best loss is 50+ epochs old                                          | "training likely done — consider stopping"  |
-| `diverging`      | Smoothed slope > +1%/epoch (loss is going UP)                        | "training appears to be diverging"          |
+| `diverging`      | Smoothed slope > +1%/epoch OR half-over-half drift > +3% (loss UP)   | "training appears to be diverging"          |
+
+**Best-age guard (added 2026-05-18):** if best loss is ≤ 2 epochs old, no
+stop-style alert fires regardless of other signals. Heavy EMA smoothing
+can make `relative_slope` read near-zero right after a new best — the
+old logic mis-fired plateau emails in that window. Same guard applies
+to the UI's Status chip so the page and the email never disagree.
 
 `plateau` and `training_done` are mutually exclusive — when both qualify
 on the same tick, only `training_done` fires (otherwise we'd send two
@@ -116,23 +122,26 @@ runs. If the email says "Plateau — may stop" but the desktop UI says
 
 So `src/lib/training-alerts.ts` mirrors the Python line-for-line:
 
-| Python (`training_monitor.py`)          | TS (`training-alerts.ts`)                     |
-|------------------------------------------|------------------------------------------------|
-| `window_epochs = min(20, current * 0.5)` | `Math.min(20, currentEpoch * 0.5)`            |
-| `alpha = 0.95` EMA                       | `last = 0.95 * last + 0.05 * v`               |
-| Slope via least-squares on smoothed Y    | Same closed-form `ssXy / ssXx`                |
-| `relative_slope = slope / current_smooth`| identical                                      |
-| `< -0.005 → improving / > 0.005 → div`   | identical                                      |
-| `epochs_since_best > 50 → consider stop` | maps to `training_done`                       |
-| `> 30 || abs(slope) < 0.001 → may stop`  | maps to `plateau`                             |
-| `> 0.01 → diverging - check LR`          | maps to `diverging`                           |
+| Python (`training_monitor.py`)                       | TS (`training-alerts.ts`)                     |
+|------------------------------------------------------|------------------------------------------------|
+| `window_epochs = min(20, current * 0.5)`             | `Math.min(20, currentEpoch * 0.5)`            |
+| `alpha = 0.95` EMA                                   | `last = 0.95 * last + 0.05 * v`               |
+| Slope via least-squares on smoothed Y                | Same closed-form `ssXy / ssXx`                |
+| `relative_slope = slope / current_smooth`            | identical                                      |
+| `pct_change` from half-vs-half on smoothed window    | identical                                      |
+| Trend label derived from `pct_change` (was relSlope) | identical                                      |
+| Guard: `epochs_since_best <= 2` blocks all stop alerts | identical                                    |
+| `epochs_since_best > 50 → training_done`             | identical                                      |
+| `epochs_since_best > 30 → plateau` (slope-only OR dropped 2026-05-18) | identical                     |
+| `relative_slope > 0.01 or pct > 3 → diverging`       | identical                                      |
 
 The Status text the user sees in the email also matches exactly what
 the chart-side `analyzeTraining()` (`src/components/spark/training-stats.tsx`)
 shows them on the page. That's deliberate — same words, same wall.
 
 If you tune the thresholds in either place, **also tune them in the other**.
-Both are flagged with `// Mirror of training_monitor.py:649` comments so
+All three sites (Python `training_monitor.py:649`, TS `training-alerts.ts`,
+TS `training-stats.tsx`) are flagged with cross-reference comments so
 future-us knows they're coupled.
 
 ---

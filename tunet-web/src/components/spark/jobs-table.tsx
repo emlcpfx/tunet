@@ -26,6 +26,30 @@ import {
 import { hideJobs, restoreJobs, useHiddenJobs } from '@/lib/hidden-jobs'
 import { SparkStatusBadge } from './status-badge'
 
+// Same shape as /api/spark/pricing's PricingMap — duplicated rather than
+// imported because that route is server-only and this is a client component.
+type PricingMap = Record<string, { instantUsdPerHr: number | null; smartUsdPerHr: number | null }>
+
+/** USD cost for a job using its mode + SKU + runtime. Null if any piece is missing. */
+function jobCostUsd(j: SparkJob, pricing: PricingMap | null): number | null {
+  if (!pricing) return null
+  const sku = j.instance_type_name
+  if (!sku) return null
+  const rate = pricing[sku]
+  if (!rate) return null
+  const ms = jobRuntimeMs(j)
+  if (ms === null) return null
+  const hourly = j.mode === 'smart' ? rate.smartUsdPerHr : rate.instantUsdPerHr
+  if (hourly === null || !Number.isFinite(hourly)) return null
+  return (ms / 3_600_000) * hourly
+}
+
+function formatCost(usd: number | null): string {
+  if (usd === null)   return '—'
+  if (usd < 0.005)    return '<$0.01'
+  return `$${usd.toFixed(2)}`
+}
+
 interface JobsTableProps {
   jobs:           SparkJob[]
   /** "Started" column formatter — dashboard wants relative ("3m ago"), list wants absolute. */
@@ -46,6 +70,19 @@ export function JobsTable({ jobs, startedFormat, onAfterAction }: JobsTableProps
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState(false)
   const [outcome, setOutcome] = useState<ActionOutcome | null>(null)
+  // Per-SKU pricing — fetched once on mount, used by the Cost column.
+  // /api/spark/pricing has a 5-min server-side cache so this is cheap even if
+  // the dashboard mounts a few times per session. Null means "still loading
+  // or fetch failed" — Cost cells fall back to "—" in that case.
+  const [pricing, setPricing] = useState<PricingMap | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/spark/pricing', { cache: 'force-cache' })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (!cancelled && d) setPricing(d as PricingMap) })
+      .catch(() => { /* silent — Cost cells will just show '—' */ })
+    return () => { cancelled = true }
+  }, [])
 
   // Filter hidden jobs out unless the user asked to see them.
   const visibleJobs = useMemo(() => {
@@ -238,6 +275,7 @@ export function JobsTable({ jobs, startedFormat, onAfterAction }: JobsTableProps
               <th className="text-left px-4 py-3 text-xs font-semibold text-[#374151]">Status</th>
               <th className="text-left px-4 py-3 text-xs font-semibold text-[#374151]">Started</th>
               <th className="text-left px-4 py-3 text-xs font-semibold text-[#374151]">Duration</th>
+              <th className="text-right px-4 py-3 text-xs font-semibold text-[#374151]">Cost</th>
               <th className="px-4 py-3" />
             </tr>
           </thead>
@@ -287,6 +325,21 @@ export function JobsTable({ jobs, startedFormat, onAfterAction }: JobsTableProps
                   <td className="px-4 py-3"><SparkStatusBadge status={j.status} liveOverride={derivedStatus(j)} /></td>
                   <td className="px-4 py-3 text-[#6b7280] text-xs">{startedFormat(j)}</td>
                   <td className="px-4 py-3 text-[#6b7280] text-xs">{formatRuntime(jobRuntimeMs(j))}</td>
+                  <td
+                    className="px-4 py-3 text-right text-[#6b7280] text-xs font-mono"
+                    title={
+                      pricing && j.instance_type_name && pricing[j.instance_type_name]
+                        ? `${j.mode === 'smart' ? 'SmartCompute' : 'InstantCompute'}: $${
+                            (j.mode === 'smart'
+                              ? pricing[j.instance_type_name].smartUsdPerHr
+                              : pricing[j.instance_type_name].instantUsdPerHr
+                            )?.toFixed(2) ?? '—'
+                          }/hr`
+                        : undefined
+                    }
+                  >
+                    {formatCost(jobCostUsd(j, pricing))}
+                  </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-3">
                       {isHidden ? (

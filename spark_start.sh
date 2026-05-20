@@ -21,6 +21,18 @@ echo "  config     : $CONFIG"
 echo "  tunet_dir  : $TUNET_DIR"
 echo ""
 
+# ── 0. Container diagnostics ────────────────────────────────
+# /dev/shm size matters: PyTorch DataLoader workers communicate
+# via shared memory and bus-error when /dev/shm is tiny. Walt's
+# 2026-05-18 platform update sets the default to 2 GiB across
+# the fleet (was 64 MB before, which forced num_workers=0 via
+# our auto-detect guard in training/dataloader_utils.py).
+# Logging the actual size on every job confirms the fix is live
+# and surfaces any future regression in one line.
+echo "[diag] /dev/shm size:"
+df -h /dev/shm 2>&1 | sed 's/^/  /'
+echo ""
+
 # ── 1. Pick the newest available Python ─────────────────────
 # The runpod/pytorch image ships both 3.10 (as `python3`) and 3.12
 # (where bare `pip` is bound). Our pinned scipy/numpy require ≥3.11,

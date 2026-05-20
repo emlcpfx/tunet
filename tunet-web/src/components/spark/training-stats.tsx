@@ -12,15 +12,21 @@
  * thresholds verbatim — keep in sync if you tweak there.
  */
 
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTrainingStream, type Point } from './use-training-stream'
+import type { SparkJob } from '@/lib/spark-types'
+
+// Mirror of /api/spark/pricing's PricingMap shape (server-only file, can't import).
+type PricingMap = Record<string, { instantUsdPerHr: number | null; smartUsdPerHr: number | null }>
 
 interface TrainingStatsProps {
   jobId: string
+  /** Used for the live cost-per-epoch projection. Optional — when absent the cost cells just render "—". */
+  job?:  SparkJob
 }
 
-export function TrainingStats({ jobId }: TrainingStatsProps) {
-  const { series, scalars } = useTrainingStream(jobId)
+export function TrainingStats({ jobId, job }: TrainingStatsProps) {
+  const { series, scalars, iterationsPerEpoch } = useTrainingStream(jobId)
 
   // ── Best tracking (across the entire run) ────────────────────────────────
   const bestL1     = useMemo(() => bestPoint(series.train), [series.train])
@@ -36,6 +42,36 @@ export function TrainingStats({ jobId }: TrainingStatsProps) {
   const psnrCur  = scalars.valPsnr.length > 0 ? scalars.valPsnr[scalars.valPsnr.length - 1] : null
   const ssimCur  = scalars.valSsim.length > 0 ? scalars.valSsim[scalars.valSsim.length - 1] : null
   const stepTimeAvg = avgRecent(scalars.stepTimeS, 50)
+
+  // ── Live cost-per-epoch projection ───────────────────────────────────────
+  // step_time × iterations_per_epoch × $/hr ÷ 3600. Updates as the rolling
+  // step-time average converges in the early steps of a run (T/Step starts
+  // pessimistic because the first batch pays warmup / cudnn-autotune cost,
+  // then settles within ~30 steps). Re-projecting on every emission gives
+  // the user a true running estimate rather than a stale submit-time quote.
+  const [pricing, setPricing] = useState<PricingMap | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/spark/pricing', { cache: 'force-cache' })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (!cancelled && d) setPricing(d as PricingMap) })
+      .catch(() => { /* silent — cost cells fall back to '—' */ })
+    return () => { cancelled = true }
+  }, [])
+
+  const hourlyUsd = useMemo(() => {
+    if (!job || !pricing) return null
+    const sku = job.instance_type_name
+    if (!sku) return null
+    const r = pricing[sku]
+    if (!r) return null
+    const rate = job.mode === 'smart' ? r.smartUsdPerHr : r.instantUsdPerHr
+    return Number.isFinite(rate ?? NaN) ? rate : null
+  }, [job, pricing])
+
+  const costPerEpochUsd = (stepTimeAvg !== null && iterationsPerEpoch !== null && hourlyUsd !== null)
+    ? (stepTimeAvg * iterationsPerEpoch * hourlyUsd) / 3600
+    : null
 
   return (
     <div className="bg-white border border-[#e5e7eb] rounded-lg overflow-hidden">
@@ -66,9 +102,27 @@ export function TrainingStats({ jobId }: TrainingStatsProps) {
         <Stat label="Step Time"      value={stepTimeAvg ? `${stepTimeAvg.toFixed(3)}s` : '—'} />
         <Stat label="Val Points"     value={series.val.length.toString()} />
         <Stat label="Best Age"       value={bestL1 && cur ? `${(cur.x - bestL1.x).toFixed(1)} ep` : '—'} />
+        <Stat label="Cost / Epoch"   value={formatCost(costPerEpochUsd)}
+              hint={iterationsPerEpoch ? `${iterationsPerEpoch.toLocaleString()} steps` : undefined} />
+        <Stat label="Cost / 10 ep"   value={formatCost(costPerEpochUsd !== null ? costPerEpochUsd * 10 : null)}
+              hint={hourlyUsd !== null ? `$${hourlyUsd.toFixed(2)}/hr` : undefined} />
       </div>
     </div>
   )
+}
+
+/**
+ * Format a USD amount for the stats grid. Renders `<$0.01` for sub-penny
+ * projections (rather than the misleading `$0.00`), two decimals up to $10,
+ * one decimal up to $100, and whole dollars above that — keeps the cell
+ * readable at all magnitudes without horizontal scroll.
+ */
+function formatCost(usd: number | null): string {
+  if (usd === null)        return '—'
+  if (usd < 0.005)         return '<$0.01'
+  if (usd < 10)            return `$${usd.toFixed(2)}`
+  if (usd < 100)           return `$${usd.toFixed(1)}`
+  return `$${Math.round(usd)}`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -180,13 +234,15 @@ function analyzeTraining(train: Point[], bestL1: Point | null): Analysis {
   const currentSmooth = smoothed[n - 1]
   const relSlope = currentSmooth > 0 ? slope / currentSmooth : 0
 
-  // ── Trend ────────────────────────────────────────────────────────────────
-  const trend: AnalysisLabel =
-    relSlope < -0.005 ? { label: 'Improving', color: COLORS.good } :
-    relSlope >  0.005 ? { label: 'Diverging', color: COLORS.bad } :
-                        { label: 'Flat',      color: COLORS.warn }
-
   // ── Recent Change (% diff first vs second half of window) ────────────────
+  // Half-vs-half mean is more robust to EMA end-lag than a regression slope:
+  // when raw loss drops fast inside the window, the smoothed series starts
+  // near raw[0] and only gradually catches up, so `slope` reads near-zero
+  // even though the cumulative drop is large. Half-vs-half captures that
+  // cumulative drop honestly. We use it as the canonical "is loss going
+  // down?" signal — both the Trend chip and the Status recommendation read
+  // from it (so they can never disagree like they did when Trend was
+  // computed straight off `relSlope`).
   const mid = Math.floor(smoothed.length / 2)
   const firstAvg  = mid > 0 ? smoothed.slice(0, mid).reduce((s, v) => s + v, 0) / mid : 0
   const secondAvg = (smoothed.length - mid) > 0
@@ -197,6 +253,16 @@ function analyzeTraining(train: Point[], bestL1: Point | null): Analysis {
     label: `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`,
     color: pctColor,
   }
+
+  // ── Trend ────────────────────────────────────────────────────────────────
+  // Derived from the same `pct` metric as Recent Change so the two chips
+  // can never contradict (e.g. "Trend: Flat" alongside "Recent Change: -29.9%"
+  // used to happen because Trend read a near-zero regression slope while
+  // Recent Change read the lag-aware mean comparison).
+  const trend: AnalysisLabel =
+    pct < -1 ? { label: 'Improving', color: COLORS.good } :
+    pct >  1 ? { label: 'Diverging', color: COLORS.bad } :
+               { label: 'Flat',      color: COLORS.warn }
 
   // ── Plateau ──────────────────────────────────────────────────────────────
   const epochsSinceBest = bestL1 ? currentEpoch - bestL1.x : 0
@@ -209,18 +275,39 @@ function analyzeTraining(train: Point[], bestL1: Point | null): Analysis {
     color: plateauColor,
   }
 
-  // ── Status (recommendation) ─────────────────────────────────────────────
+  // ── Status (the only chip a beginner needs to act on) ───────────────────
+  // Decision tree in priority order. Earlier branches override later ones.
+  //
+  //   1. Diverging (>+1%/ep slope)  → "stop, lower LR" regardless of best-age
+  //   2. New best just landed       → never "stop", even if slope reads flat
+  //                                    (slope lags by design when loss drops fast)
+  //   3. Active improvement         → "training well"
+  //   4. Stale best (>50ep)         → strong stop signal
+  //   5. Stale-ish (>30ep)          → soft stop signal
+  //   6. Flat with old-ish best     → "slowing, keep watching"
+  //   7. Mild improvement           → "slow improvement"
+  //   8. None of the above          → "stable"
+  //
+  // Guard #2 is the load-bearing one: without it, a fresh best with tiny
+  // smoothed slope ("Flat" trend) would mis-recommend stopping.
+  const STRONG_IMPROVE = pct < -3       // half-over-half drop > 3 %
+  const DIVERGING      = relSlope > 0.01 || pct > 3
+
   let status: AnalysisLabel
-  if (relSlope < -0.005 && epochsSinceBest < 20) {
+  if (DIVERGING) {
+    status = { label: 'Stop — diverging, lower LR', color: COLORS.bad }
+  } else if (epochsSinceBest <= 2) {
+    status = { label: 'Training well — new best', color: COLORS.good }
+  } else if (relSlope < -0.005 || STRONG_IMPROVE) {
     status = { label: 'Training well', color: COLORS.good }
-  } else if (relSlope > 0.01) {
-    status = { label: 'Diverging — check LR', color: COLORS.bad }
   } else if (epochsSinceBest > 50) {
-    status = { label: 'Consider stopping', color: COLORS.bad }
-  } else if (epochsSinceBest > 30 || Math.abs(relSlope) < 0.001) {
+    status = { label: 'Stop — no new best in 50+ epochs', color: COLORS.bad }
+  } else if (epochsSinceBest > 30) {
     status = { label: 'Plateau — may stop', color: COLORS.warn }
+  } else if (Math.abs(relSlope) < 0.001 && epochsSinceBest > 10) {
+    status = { label: 'Slowing — keep watching', color: COLORS.warn }
   } else if (relSlope < -0.001) {
-    status = { label: 'Slow progress', color: COLORS.warn }
+    status = { label: 'Slow improvement', color: COLORS.text }
   } else {
     status = { label: 'Stable', color: COLORS.text }
   }

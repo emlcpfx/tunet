@@ -42,15 +42,24 @@ independent of each other.
 | ref / 512 / bs2 | 8.46 | **8.60** (+1.7%) | skipped | ❌ 3.12 (-64%) |
 | ref / 512 / bs4 | 5.45 | **5.53** (+1.5%) | skipped | not run |
 
-### Opt 1 — Dataloader workers + prefetch — SKIPPED
+### Opt 1 — Dataloader workers + prefetch — SKIPPED (blocker lifted 2026-05-18)
 
 Couldn't apply locally. `train.py:635` *forces `num_workers=0` on Windows*
 (spawn-multiprocessing hangs were fixed by killing it). On Linux Spark
-agents the existing `auto_detect_num_workers()` already picks 6–8 workers
-based on VRAM/CPU/resolution, which is roughly optimal — there's no
-obvious headroom without architectural changes.
+agents the auto-detect logic was *also* clamping to 0 — Spark containers
+shipped with the Docker default 64 MB `/dev/shm`, which bus-errored any
+DataLoader worker that tried to ship a batch (safety net at
+`training/dataloader_utils.py:78-87`).
 
-**No commit.** Documented as a no-op for local runs.
+Spark fixed this 2026-05-18: container `/dev/shm` now defaults to 2 GiB
+across the fleet, with a new optional `shmSize` submit param for jobs
+that need more. Our 512 MiB safety threshold will no longer trip on
+Spark, so `auto_detect_num_workers()` will actually deliver its
+VRAM/CPU/resolution-driven 6–8 workers on cloud runs. Walt's estimate
+is ~10–20% faster training at higher resolutions — worth re-running
+the ref sweep on cloud L4 to quantify.
+
+**No commit.** Documented as a no-op for local runs; cloud re-test pending.
 
 ### Opt 2 — Fused AdamW — APPLIED ✅
 

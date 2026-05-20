@@ -104,8 +104,14 @@ export interface PackInput {
   tunetRoot?: string
   /** Synthesized config object (will be YAML-dumped at the tarball root). */
   config:    Record<string, unknown>
-  /** Optional: name of the spark_start.sh inside the tarball. Defaults to 'spark_start.sh'. */
+  /** Optional: name of the entrypoint script inside the tarball. Defaults to 'spark_start.sh'. */
   startScriptName?: string
+  /**
+   * Optional: source filename to read from the repo root. Defaults to whatever
+   * `startScriptName` resolves to (i.e. same name in and out). Lets the export-
+   * onnx route pull `spark_export.sh` from the repo instead of `spark_start.sh`.
+   */
+  startScriptSourceName?: string
   /**
    * Optional: stage directory containing user-uploaded data folders.
    * If present, its subdirs (src/, dst/, val_src/, val_dst/, mask/) are
@@ -148,9 +154,11 @@ export async function packInputTarball(input: PackInput): Promise<PackResult> {
   if (!fs.existsSync(path.join(tunetRoot, 'train.py'))) {
     throw new Error(`tunet repo not found at ${tunetRoot} (no train.py). Set ${REPO_ENV} env var.`)
   }
-  const startScriptSrc = path.join(tunetRoot, 'spark_start.sh')
+  const startScriptDestName = input.startScriptName ?? 'spark_start.sh'
+  const startScriptSrcName  = input.startScriptSourceName ?? startScriptDestName
+  const startScriptSrc = path.join(tunetRoot, startScriptSrcName)
   if (!fs.existsSync(startScriptSrc)) {
-    throw new Error(`spark_start.sh not found at ${startScriptSrc}`)
+    throw new Error(`${startScriptSrcName} not found at ${startScriptSrc}`)
   }
 
   // Stage everything into a temp directory so tar.create can pack it as a
@@ -182,7 +190,7 @@ export async function packInputTarball(input: PackInput): Promise<PackResult> {
     // .gitattributes also forces LF on .sh files; this is the belt-and-
     // suspenders backstop for the case where it doesn't take effect (fresh
     // contributor, broken autocrlf, .gitattributes stripped, etc.).
-    const startDest = path.join(stageDir, input.startScriptName ?? 'spark_start.sh')
+    const startDest = path.join(stageDir, startScriptDestName)
     const startBody = await fs.promises.readFile(startScriptSrc, 'utf8')
     await fs.promises.writeFile(startDest, startBody.replace(/\r\n/g, '\n').replace(/\r/g, '\n'), {
       encoding: 'utf8',

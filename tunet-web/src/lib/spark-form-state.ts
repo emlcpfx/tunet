@@ -64,6 +64,7 @@ export interface SerializedFormState {
     email:           string
     plateau:         boolean
     diverging:       boolean
+    spot:            boolean
   }
   /**
    * Manual ShareSync paths (only meaningful when no folder was picked).
@@ -94,6 +95,7 @@ export interface FormStateBuildInput {
     email:     string
     plateau:   boolean
     diverging: boolean
+    spot:      boolean
   }
   manual?: SerializedFormState['manual']
 }
@@ -158,6 +160,7 @@ export function parseFormState(raw: string | undefined | null): SerializedFormSt
         email:     parsed.alerts?.email     ?? '',
         plateau:   parsed.alerts?.plateau   ?? true,
         diverging: parsed.alerts?.diverging ?? true,
+        spot:      parsed.alerts?.spot      ?? true,
       },
       ...(parsed.manual ? { manual: parsed.manual } : {}),
     }

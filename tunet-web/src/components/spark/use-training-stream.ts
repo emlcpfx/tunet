@@ -10,9 +10,11 @@
  * time), but parallel SSE connections multiply Spark API load AND every
  * subscriber re-runs the regex on every line. Sharing keeps it linear.
  *
- * Parses tunet's training format (matches training_monitor.py:1041):
- *   "Epoch[3] Step[42](125/500) L1:0.0142 LPIPS:0.0089 T/Step:0.069s"
+ * Parses tunet's training format (matches train.py:1617):
+ *   "Epoch[3] Step[42] (125/500), L1:0.0142 ..., LPIPS:0.0089 ..., T/Step:0.069s"
  *   "Val Epoch[3] Step[42] Val_L1:0.0156 Val_LPIPS:0.0091 PSNR:31.2dB SSIM:0.94"
+ * Note the space + comma around the (stepIn/stepTot) group — the regex below
+ * tolerates optional whitespace there.
  */
 
 import { useEffect, useState } from 'react'
@@ -31,15 +33,23 @@ export interface TrainingStreamState {
   series:    Series
   scalars:   ScalarSeries
   status:    'connecting' | 'streaming' | 'closed' | 'error'
+  /**
+   * Most recently observed `iterations_per_epoch` from a train log line's
+   * `(stepIn/stepTot)` suffix. Null until the first such line lands. Used
+   * by callers that need to convert per-step quantities (e.g. step time,
+   * per-step cost) into per-epoch quantities.
+   */
+  iterationsPerEpoch: number | null
 }
 
 const EMPTY_STREAM: TrainingStreamState = {
   series:  { train: [], val: [], trainLpips: [], valLpips: [] },
   scalars: { stepTimeS: [], valPsnr: [], valSsim: [] },
   status:  'connecting',
+  iterationsPerEpoch: null,
 }
 
-const TRAIN_RE = /Epoch\[(\d+)\]\s*Step\[(\d+)\](?:\((\d+)\/(\d+)\))?.*?\b(L1|L2|BCE\+Dice):([\d.]+)/
+const TRAIN_RE = /Epoch\[(\d+)\]\s*Step\[(\d+)\]\s*(?:\((\d+)\/(\d+)\))?.*?\b(L1|L2|BCE\+Dice):([\d.]+)/
 const LPIPS_RE = /LPIPS:([\d.]+)/
 const TIME_RE  = /T\/Step:([\d.]+)s/
 const VAL_RE   = /Val Epoch\[(\d+)\].*?Val_(L1|L2|BCE\+Dice):([\d.]+)/
@@ -114,7 +124,12 @@ function openStream(jobId: string) {
       const tt = line.match(TIME_RE)
       if (tt) scalars = { ...scalars, stepTimeS: [...scalars.stepTimeS, { x, y: parseFloat(tt[1]) }] }
 
-      emit(store, { ...cur, series, scalars })
+      // Track iterations-per-epoch from the (stepIn/stepTot) suffix. Spark
+      // training emits this on every line; we just keep the latest value
+      // because progressive_resolution can change it mid-run.
+      const iterationsPerEpoch = stepTot && stepTot > 0 ? stepTot : cur.iterationsPerEpoch
+
+      emit(store, { ...cur, series, scalars, iterationsPerEpoch })
       return
     }
 

@@ -345,8 +345,15 @@ export function buildConfig(
       stop:     overrides.es_stop     ?? false,
     },
     auto_export: {
-      interval: overrides.auto_export_interval ?? 0,
-      flame:    overrides.auto_export_flame    ?? false,
+      // Default to exporting ONNX every 10 epochs during training. The
+      // training job's GPU already has the model loaded, so an export costs
+      // ~5-10s of GPU time vs. spawning a fresh ~$0.02 / 3-min Spark job
+      // later via the "Export now" button. With this on by default, the
+      // Downloads panel surfaces a ready-to-use .onnx as soon as the first
+      // interval lands — and the on-demand export route short-circuits to
+      // the existing file when it's recent enough.
+      interval: overrides.auto_export_interval ?? 10,
+      flame:    overrides.auto_export_flame    ?? true,
       nuke:     overrides.auto_export_nuke     ?? false,
     },
     dataloader: {

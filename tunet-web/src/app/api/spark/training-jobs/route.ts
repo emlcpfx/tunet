@@ -100,6 +100,7 @@ interface Body {
     email?:     string   // recipient
     plateau?:   boolean  // notify on plateau / "consider stopping"
     diverging?: boolean  // notify when loss is going up
+    spot?:      boolean  // notify on SmartCompute spot interruption
   }
   /**
    * Serialized full form state — stashed verbatim in env.TUNET_FORM_STATE so a
@@ -390,6 +391,7 @@ export async function POST(req: Request) {
                   TUNET_ALERT_EMAIL:     body.alerts.email.trim(),
                   ...(body.alerts.plateau   ? { TUNET_ALERT_PLATEAU:   '1' } : {}),
                   ...(body.alerts.diverging ? { TUNET_ALERT_DIVERGING: '1' } : {}),
+                  ...(body.alerts.spot      ? { TUNET_ALERT_SPOT:      '1' } : {}),
                 }
               : {}),
             // Full form state for "Clone job" rehydration. Trainer ignores this.
