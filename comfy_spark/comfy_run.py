@@ -62,6 +62,8 @@ import urllib.request
 HOST = "127.0.0.1"
 # INPUT_TYPES whose first element marks a settable widget rather than a wired slot.
 WIDGET_SCALARS = {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"}
+# control_after_generate appends one of these keyword values to widgets_values.
+CONTROL_VALUES = {"fixed", "increment", "decrement", "randomize"}
 
 
 def env(name, default=None):
@@ -184,15 +186,6 @@ def _is_widget(definition):
     return isinstance(t, list) or t in WIDGET_SCALARS
 
 
-def _has_control_after_generate(name, definition):
-    """Some INT widgets (seeds, primitives) emit an extra control value
-    ("fixed"/"randomize"/…) into widgets_values that has no API input."""
-    opts = definition[1] if len(definition) > 1 and isinstance(definition[1], dict) else {}
-    if opts.get("control_after_generate"):
-        return True
-    return definition[0] == "INT" and name in {"seed", "noise_seed", "rand_seed"}
-
-
 def ui_to_api(graph, object_info):
     """Convert a ComfyUI UI/graph export to API (/prompt) format using the live
     node schema. Mirrors the frontend's graphToPrompt for the cases this tool
@@ -237,19 +230,51 @@ def ui_to_api(graph, object_info):
                 if name in valid and name not in connected:
                     inputs[name] = val
         elif isinstance(wv, list):
+            # Positional widget mapping. Two graphToPrompt subtleties:
+            #  (a) a widget converted to an input socket usually leaves its stale
+            #      value in widgets_values; if the array carries a value for EVERY
+            #      widget (incl. converted ones) we must consume the connected
+            #      ones so the free widgets line up. We detect this by length.
+            #  (b) seed/INT widgets with control_after_generate append a keyword
+            #      ("fixed"/"randomize"/…) that is not an API input — skip it.
+            widget_inputs = [(n, d) for n, d in ordered if _is_widget(d)]
+            n_all = len(widget_inputs)
+            n_free = sum(1 for n, _ in widget_inputs if n not in connected)
+            stale_present = len(wv) >= n_all > n_free
             idx = 0
-            for name, definition in ordered:
-                if name in connected or not _is_widget(definition):
+            for name, definition in widget_inputs:
+                if name in connected:
+                    if stale_present and idx < len(wv):
+                        idx += 1  # consume the converted widget's stale value
                     continue
                 if idx >= len(wv):
                     break
                 inputs[name] = wv[idx]
                 idx += 1
-                if _has_control_after_generate(name, definition):
-                    idx += 1
+                if idx < len(wv) and isinstance(wv[idx], str) and wv[idx] in CONTROL_VALUES:
+                    idx += 1  # control_after_generate companion
         api[nid] = {"class_type": ct, "inputs": inputs}
     if skipped:
         log(f"Skipped {len(skipped)} muted/bypassed node(s): {skipped}")
+    # Prune to nodes reachable from output nodes — graphToPrompt drops dead-ends
+    # (loggers, previews, anything not feeding a save/output node). Including them
+    # only invites validation errors on nodes that wouldn't even execute.
+    output_ids = [nid for nid, n in api.items()
+                  if (object_info.get(n["class_type"]) or {}).get("output_node")]
+    if output_ids:
+        keep, stack = set(), list(output_ids)
+        while stack:
+            nid = stack.pop()
+            if nid in keep or nid not in api:
+                continue
+            keep.add(nid)
+            for v in api[nid]["inputs"].values():
+                if isinstance(v, list) and len(v) == 2 and isinstance(v[0], str):
+                    stack.append(v[0])
+        dropped = [nid for nid in api if nid not in keep]
+        if dropped:
+            log(f"Pruned {len(dropped)} node(s) not feeding an output: {dropped}")
+        api = {nid: n for nid, n in api.items() if nid in keep}
     log(f"Converted UI graph → API format ({len(api)} nodes).")
     return api
 
@@ -275,6 +300,42 @@ def apply_patch(workflow, node_id, dotted_path, value):
 
 
 # ── prompt lifecycle ──────────────────────────────────────────────────────────
+
+# Model-name COMBO inputs whose "value not in list" errors are expected on
+# convert-only (the weights aren't downloaded), so they're filtered from validation.
+MODEL_INPUTS = {"unet_name", "vae_name", "clip_name", "clip_name1", "clip_name2",
+                "lora_name", "ckpt_name", "model_name", "style_model_name",
+                "control_net_name", "gguf_name"}
+
+
+def validate_graph(port, workflow):
+    """Submit to /prompt purely to surface conversion errors, then bail. Models
+    aren't present on convert-only, so the expected 'value not in list' errors
+    for model-name inputs are filtered; anything else is a real conversion bug."""
+    try:
+        resp = http_json(f"http://{HOST}:{port}/prompt", method="POST",
+                         payload={"prompt": workflow, "client_id": "validate"})
+    except urllib.error.HTTPError as e:
+        try:
+            resp = json.loads(e.read().decode())
+        except Exception:  # noqa: BLE001
+            resp = {}
+    except Exception as e:  # noqa: BLE001
+        log(f"validation: could not reach /prompt ({e})")
+        return
+    real = {}
+    for nid, info in (resp.get("node_errors") or {}).items():
+        kept = [er for er in info.get("errors", [])
+                if not (er.get("type") == "value_not_in_list"
+                        and (er.get("extra_info") or {}).get("input_name") in MODEL_INPUTS)]
+        if kept:
+            real[nid] = {"class_type": info.get("class_type"), "errors": kept}
+    if real:
+        log("VALIDATION FAILED — the converted graph still has problems:")
+        log(json.dumps(real, indent=1)[:3000])
+    else:
+        log("VALIDATION OK — /prompt accepted the graph (model files aside).")
+
 
 def queue_prompt(port, workflow, client_id):
     resp = http_json(f"http://{HOST}:{port}/prompt", method="POST",
@@ -395,6 +456,7 @@ def main():
                 print(blob[i:i + 120], flush=True)
             print("===WF_API_B64_END===", flush=True)
             log("COMFY_CONVERT_ONLY set — emitted graph (to /output and log), skipping render.")
+            validate_graph(port, workflow)
             hold_for_sync()
             return 0
 
