@@ -52,7 +52,7 @@ export default async function DemoDashboard() {
         <div className="px-4 py-3 bg-[#FEF2F2] border border-[#fecaca] rounded-lg text-sm text-[#EF4444]">
           <strong>Couldn&apos;t load Spark jobs:</strong> {fetchError}
           <p className="text-xs mt-1 text-[#6b7280]">
-            Check <code className="bg-white px-1 rounded">SPARK_EMAIL</code> / <code className="bg-white px-1 rounded">SPARK_PASSWORD</code> in <code className="bg-white px-1 rounded">.env.local</code>.
+            Your session may have expired — try signing out and back in.
           </p>
         </div>
       )}

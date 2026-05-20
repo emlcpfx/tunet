@@ -2,7 +2,6 @@
  * Spark Compute v1 client — server-side only.
  *
  * Endpoints (verified live against api.prod.aapse1.sparkcloud.studio):
- *   POST   /auth/login                              email/password → JWT
  *   GET    /api/compute/skus                        eligible instance types
  *   GET    /api/compute/jobs                        list jobs
  *   POST   /api/compute/jobs                        submit job (auto-prepare)
@@ -16,11 +15,16 @@
  * Detail/list response shape (snake_case):
  *   { id, status, instance_type_name, image, started_running_at, terminal_at, exit_code, ... }
  *
- * IMPORTANT: This module is server-only. The JWT is cached per-process and
- * never reaches the browser. All client UI calls our /api/spark/* routes.
+ * IMPORTANT: This module is server-only. Spark calls are authenticated with
+ * the *caller's* Keycloak access token (Spark + TuNet share a realm), decoded
+ * server-side from the encrypted Auth.js session cookie — it never reaches the
+ * browser. There is no shared service account. All client UI calls our
+ * /api/spark/* routes.
  */
 
 import 'server-only'
+import { cookies } from 'next/headers'
+import { getToken as getJwt } from 'next-auth/jwt'
 
 export const SPARK_API = 'https://api.prod.aapse1.sparkcloud.studio'
 
@@ -52,48 +56,44 @@ export const GPU_TYPES = {
 
 export type GpuKey = keyof typeof GPU_TYPES
 
-// ── Auth — lazy JWT cached per server process ────────────────────────────────
+// ── Auth — forward the caller's Keycloak access token ────────────────────────
 
-let _token: string | null = null
-let _expiresAt = 0
+// Prod is https, so Auth.js writes the secure-prefixed cookie; dev (http) is
+// unprefixed. getToken needs to look for the right name to find + decrypt it.
+const useSecureCookie =
+  (process.env.AUTH_URL ?? '').startsWith('https://') ||
+  process.env.NODE_ENV === 'production'
 
-function creds() {
-  const email    = process.env.SPARK_EMAIL
-  const password = process.env.SPARK_PASSWORD
-  if (!email || !password) {
-    throw new Error('SPARK_EMAIL / SPARK_PASSWORD not configured (.env.local)')
-  }
-  return { email, password }
-}
-
-function jwtExpiry(token: string): number {
-  try {
-    const payload = JSON.parse(
-      Buffer.from(token.split('.')[1], 'base64url').toString(),
-    )
-    return (payload.exp ?? 0) * 1000
-  } catch {
-    return 0
-  }
-}
-
+/**
+ * The caller's Spark bearer token.
+ *
+ * Spark and TuNet share a Keycloak realm, so the user's Keycloak access token
+ * authenticates directly against Spark's API (confirmed by Spark). The token
+ * lives in the encrypted Auth.js session cookie; we decode it server-side with
+ * next-auth's getToken (which also reassembles chunked cookies) so it never
+ * reaches the browser. Auth.js refreshes it before expiry in the jwt callback
+ * (src/auth.ts) and middleware runs on every request, so the cookie we read is
+ * normally fresh.
+ *
+ * Throws when there's no signed-in session. Every Spark call now runs in a
+ * request context for an authenticated user — the one prior exception, the
+ * training-alerts cron, was removed.
+ */
 export async function getToken(): Promise<string> {
-  if (_token && _expiresAt > Date.now() + 60_000) return _token
-  const { email, password } = creds()
-  const res = await fetch(`${SPARK_API}/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
-    cache: 'no-store',
+  const cookieStore = await cookies()
+  const cookieHeader = cookieStore
+    .getAll()
+    .map((c) => `${c.name}=${c.value}`)
+    .join('; ')
+  const jwt = await getJwt({
+    req: { headers: { cookie: cookieHeader } },
+    secret: process.env.AUTH_SECRET,
+    secureCookie: useSecureCookie,
   })
-  if (!res.ok) {
-    throw new Error(`Spark auth failed: HTTP ${res.status}`)
+  const tok = jwt?.accessToken
+  if (!tok) {
+    throw new Error('Not signed in — no Spark access token on the session')
   }
-  const data = await res.json()
-  const tok = (data.token ?? data.access_token) as string | undefined
-  if (!tok) throw new Error('Spark auth: no token in response')
-  _token = tok
-  _expiresAt = jwtExpiry(tok)
   return tok
 }
 
