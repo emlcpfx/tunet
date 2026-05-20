@@ -246,6 +246,8 @@ def ui_to_api(graph, object_info):
                 if name in connected:
                     if stale_present and idx < len(wv):
                         idx += 1  # consume the converted widget's stale value
+                        if idx < len(wv) and isinstance(wv[idx], str) and wv[idx] in CONTROL_VALUES:
+                            idx += 1  # ...and its control_after_generate keyword
                     continue
                 if idx >= len(wv):
                     break
@@ -323,11 +325,21 @@ def validate_graph(port, workflow):
     except Exception as e:  # noqa: BLE001
         log(f"validation: could not reach /prompt ({e})")
         return
+    def _expected(er):
+        # Errors that are artifacts of convert-only (no weights, no input clip),
+        # not conversion bugs: model COMBO files absent, and the input video/image
+        # files absent.
+        t = er.get("type")
+        name = (er.get("extra_info") or {}).get("input_name")
+        if t == "value_not_in_list" and name in MODEL_INPUTS:
+            return True
+        if t == "custom_validation_failed" and name in {"video", "audio", "image"}:
+            return True
+        return False
+
     real = {}
     for nid, info in (resp.get("node_errors") or {}).items():
-        kept = [er for er in info.get("errors", [])
-                if not (er.get("type") == "value_not_in_list"
-                        and (er.get("extra_info") or {}).get("input_name") in MODEL_INPUTS)]
+        kept = [er for er in info.get("errors", []) if not _expected(er)]
         if kept:
             real[nid] = {"class_type": info.get("class_type"), "errors": kept}
     if real:
