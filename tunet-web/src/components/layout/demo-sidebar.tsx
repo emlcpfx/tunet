@@ -1,7 +1,7 @@
 'use client'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { formatCredits } from '@/types'
+import { signOut } from 'next-auth/react'
 
 const navItems = [
   {
@@ -48,11 +48,11 @@ function SparkLogo() {
 }
 
 interface DemoSidebarProps {
-  creditBalance?: number
   userName?: string
+  authenticated?: boolean
 }
 
-export function DemoSidebar({ creditBalance = 5250, userName = 'Eric Levy' }: DemoSidebarProps) {
+export function DemoSidebar({ userName = 'Demo User', authenticated = false }: DemoSidebarProps) {
   const pathname = usePathname()
 
   function isActive(item: { href: string; exact: boolean }) {
@@ -88,23 +88,26 @@ export function DemoSidebar({ creditBalance = 5250, userName = 'Eric Levy' }: De
         })}
       </div>
 
-      {creditBalance !== undefined && (
-        <div className="mx-3 mb-2 px-3 py-2.5 bg-[#F7F4FC] rounded-lg">
-          <p className="text-xs text-[#6b7280]">Credits</p>
-          <p className="text-base font-bold text-[#ae69f4]">{formatCredits(creditBalance)}</p>
-        </div>
-      )}
-
-      <div className="border-t border-[#e5e7eb] px-3 py-3">
+      <div className="border-t border-[#e5e7eb] px-3 py-3 space-y-1">
         <div className="flex items-center gap-2.5 px-2 py-1.5">
           <div className="w-7 h-7 rounded-full bg-[#ae69f4] flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">
             {userName[0]?.toUpperCase() ?? 'U'}
           </div>
-          <span className="text-sm text-[#374151] truncate">{userName}</span>
+          <span className="text-sm text-[#374151] truncate flex-1">{userName}</span>
         </div>
-        <div className="px-2 py-1 mt-1">
-          <span className="text-xs text-[#9ca3af] italic">Demo mode</span>
-        </div>
+        {authenticated ? (
+          <button
+            type="button"
+            onClick={() => void signOut({ callbackUrl: '/sign-in' })}
+            className="w-full text-left px-2 py-1.5 text-xs text-[#6b7280] hover:text-[#374151] hover:bg-[#F9FAFB] rounded-md transition-colors"
+          >
+            Log out
+          </button>
+        ) : (
+          <div className="px-2 py-1 mt-1">
+            <span className="text-xs text-[#9ca3af] italic">Demo mode</span>
+          </div>
+        )}
       </div>
     </nav>
   )

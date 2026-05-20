@@ -32,6 +32,10 @@ export interface SparkJob {
   idle_hold_seconds?:       number
   input_share_sync_path?:   string
   name?:                    string
+  // Rolling pre-billing compute-cost estimate (USD, string, 4dp), summed
+  // across retry attempts. null until the first attempt completes. An
+  // estimate — NOT the authoritative billed amount (Spark Fuse v1.17 §13.5.2).
+  total_attempted_compute_cost_usd_estimate?: string | null
 }
 
 export const ACTIVE_STATUSES = new Set(['queued', 'provisioning', 'running'])

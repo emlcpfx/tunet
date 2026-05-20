@@ -160,6 +160,10 @@ export interface SparkJob {
   input_share_sync_path?:      string
   // Spark API doesn't echo `name` back; UI falls back to the id prefix.
   name?:                       string
+  // Rolling pre-billing compute-cost estimate (USD, string, 4dp), summed
+  // across retry attempts. null until the first attempt completes. An
+  // estimate — NOT the authoritative billed amount (Spark Fuse v1.17 §13.5.2).
+  total_attempted_compute_cost_usd_estimate?: string | null
 }
 
 export interface SubmitJobResponse {
