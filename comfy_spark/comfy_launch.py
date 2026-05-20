@@ -44,7 +44,7 @@ import tarfile
 import tempfile
 import time
 import xml.etree.ElementTree as ET
-from urllib.parse import urljoin, urlparse, unquote
+from urllib.parse import urljoin, urlparse, unquote, quote
 
 import requests
 
@@ -204,6 +204,34 @@ def webdav_list(url):
         is_dir = resp.find(f".//{_DAV}collection") is not None
         entries.append((unquote(path.split("/")[-1]), full, is_dir))
     return entries
+
+
+def _space_base(any_dav_url):
+    """Extract the ShareSync space root (…/dav/spaces/<space>) from any DAV URL,
+    so we can rebuild an output URL from a job's output_share_sync_path."""
+    u = urlparse(any_dav_url)
+    parts = u.path.split("/")
+    if len(parts) >= 4 and parts[1] == "dav" and parts[2] == "spaces":
+        return f"{u.scheme}://{u.netloc}/" + "/".join(parts[1:4])
+    return None
+
+
+def _encode_path(p):
+    return "/".join(quote(seg) for seg in p.strip("/").split("/") if seg)
+
+
+def resolve_output_url(resp, job_id, upload_url):
+    """Best-effort full WebDAV URL for a job's output folder. Prefer the submit
+    response; fall back to the job detail's output_share_sync_path rebuilt onto
+    the space root from the input upload URL."""
+    out_url = (resp.get("output") or {}).get("shareSyncBaseUrl")
+    if out_url:
+        return out_url
+    opath = (get_job(job_id) or {}).get("output_share_sync_path")
+    base = _space_base(upload_url or "")
+    if opath and base:
+        return f"{base}/{_encode_path(opath)}/"
+    return None
 
 
 def download_outputs(base_url, dest_dir, _rel=""):
@@ -596,15 +624,21 @@ def main():
             print(f"\nWatch:  python comfy_spark/comfy_launch.py --logs {job_id}")
             print(f"Cancel: python comfy_spark/comfy_launch.py --cancel {job_id}")
         if args.download:
+            # Create the target dir up front so it always exists.
+            os.makedirs(args.download, exist_ok=True)
             # Always confirm the job is really done before harvesting (a tail
             # may have been detached with Ctrl+C, or --no-tail was used).
             print("[download] waiting for the job to finish...")
             status = wait_for_terminal(job_id)
-            print(f"[download] job {status}; pulling outputs -> {args.download}")
-            if not out_url:
-                print("[download] no output URL in submit response; nothing to fetch")
+            dl_url = resolve_output_url(resp, job_id, upload_url)
+            print(f"[download] job {status}; pulling outputs -> {os.path.abspath(args.download)}")
+            if not dl_url:
+                print("[download] could not resolve the output URL.")
+                print(f"[download] submit 'output' block was: {resp.get('output')}")
+                print("[download] grab the file from the ShareSync web UI instead.")
             else:
-                count = download_outputs(out_url, args.download)
+                print(f"[download] source: {dl_url}")
+                count = download_outputs(dl_url, args.download)
                 print(f"[download] {count} file(s) -> {os.path.abspath(args.download)}")
     finally:
         try:
