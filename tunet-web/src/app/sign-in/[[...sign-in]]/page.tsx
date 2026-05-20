@@ -1,21 +1,32 @@
 'use client'
 
-import { Suspense, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { signIn } from 'next-auth/react'
 
 function SignInForm() {
   const searchParams = useSearchParams()
-  const [busy, setBusy] = useState(false)
 
   const raw = searchParams.get('callbackUrl') ?? ''
   const safe =
     raw.startsWith('/') && !raw.startsWith('//') ? raw : '/dashboard'
 
+  // The middleware appends a callbackUrl when it bounces an unauthenticated
+  // user off a protected page; signOut sends them here without one. So treat
+  // "callbackUrl present (and no auth error)" as the signal to auto-redirect
+  // to Keycloak — a signed-out user keeps the manual button instead of being
+  // silently re-authenticated through Keycloak's SSO session.
+  const autoRedirect = raw !== '' && !searchParams.get('error')
+  const [busy, setBusy] = useState(autoRedirect)
+
   async function onContinue() {
     setBusy(true)
     await signIn('keycloak', { callbackUrl: safe })
   }
+
+  useEffect(() => {
+    if (autoRedirect) void signIn('keycloak', { callbackUrl: safe })
+  }, [autoRedirect, safe])
 
   return (
     <>
