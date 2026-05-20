@@ -457,6 +457,8 @@ def main():
     # what to clone/download onto the node at startup.
     if preset.get("comfy_home"):
         env_vars["COMFY_HOME"] = preset["comfy_home"]
+    if preset.get("comfy_bundle"):
+        env_vars["COMFY_BUNDLE"] = preset["comfy_bundle"]
     if preset.get("node_packs"):
         env_vars["COMFY_FETCH_NODES"] = json.dumps(preset["node_packs"])
     if preset.get("models"):
@@ -488,9 +490,11 @@ def main():
         return
 
     # ── pack, submit, upload, tail ────────────────────────────────────────────
-    # bash -c mirrors the proven quickstart invocation and dodges PATH/entrypoint
-    # quirks across public ComfyUI base images.
-    command = ["bash", "-c", "python3 /input/comfy_run.py"]
+    # Run under the image's real interpreter (preset "python", e.g. python3.13 on
+    # yanwk — that's the one with pip + torch + ComfyUI deps; bare python3 has
+    # none). bash -c also dodges PATH/entrypoint quirks across base images.
+    python_bin = preset.get("python", "python3")
+    command = ["bash", "-c", f"{python_bin} /input/comfy_run.py"]
     tar_path = build_tar(workflow, input_files, patches_to_pack)
     try:
         resp = submit_job(job_name, instance_type, image, command, env_vars,

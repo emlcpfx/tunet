@@ -36,6 +36,11 @@ Environment (set by comfy_launch.py):
     COMFY_CONVERT_ONLY  "1" = convert + emit api.json, don't render
 
   No-build path (assemble the environment on the node, public base image):
+    COMFY_BUNDLE        dir holding a pristine ComfyUI (with main.py) to seed
+                        COMFY_HOME from if it's empty (e.g. the yanwk image's
+                        /default-comfyui-bundle/ComfyUI). Run comfy_run.py under
+                        the image's real interpreter (python3.13 for yanwk) so
+                        pip + torch + ComfyUI deps resolve — see comfy_launch.py.
     COMFY_FETCH_NODES   JSON list of git repo URLs to clone into custom_nodes
                         (+ pip install requirements.txt). Always fetched.
     COMFY_FETCH_MODELS  JSON list of {"url","dest"} (dest relative to COMFY_HOME,
@@ -83,6 +88,21 @@ def download(url, dest, label="file"):
     with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
         shutil.copyfileobj(r, f, length=1024 * 1024)
     log(f"  {label} done ({os.path.getsize(dest) / 1024 / 1024:.1f} MB)")
+
+
+def ensure_comfyui(comfy_home, bundle):
+    """Some public images ship ComfyUI in a pristine bundle dir and copy it into
+    place via their entrypoint (which our command override bypasses). If
+    COMFY_HOME has no main.py but a bundle does, seed it (matches the image's own
+    `cp --archive --update=none`, so it won't clobber already-cloned nodes)."""
+    if os.path.isfile(os.path.join(comfy_home, "main.py")):
+        return
+    if bundle and os.path.isfile(os.path.join(bundle, "main.py")):
+        log(f"seeding ComfyUI from bundle: {bundle} -> {comfy_home}")
+        os.makedirs(comfy_home, exist_ok=True)
+        subprocess.run(["cp", "--archive", "--update=none", f"{bundle}/.", f"{comfy_home}/"])
+    if not os.path.isfile(os.path.join(comfy_home, "main.py")):
+        log(f"WARNING: no ComfyUI main.py at {comfy_home} and no usable COMFY_BUNDLE")
 
 
 def fetch_nodes(comfy_home, repos):
@@ -306,10 +326,12 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     # 1. Assemble the environment (no-build path) ------------------------------
+    # Seed ComfyUI from the image's bundle if needed, then clone node packs.
     # Node packs are always needed (ComfyUI must register the classes, and
     # /object_info drives UI->API conversion). Weights + LoRA are only needed to
     # actually render, so skip them on convert-only to keep that step fast.
     try:
+        ensure_comfyui(comfy_home, env("COMFY_BUNDLE"))
         fetch_nodes(comfy_home, json.loads(env("COMFY_FETCH_NODES", "[]")))
         if not convert_only:
             fetch_models(comfy_home, json.loads(env("COMFY_FETCH_MODELS", "[]")))

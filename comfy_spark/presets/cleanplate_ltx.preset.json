@@ -6,6 +6,8 @@
 
   "image": "yanwk/comfyui-boot:cu130-slim-v2",
   "comfy_home": "/root/ComfyUI",
+  "comfy_bundle": "/default-comfyui-bundle/ComfyUI",
+  "python": "python3.13",
   "gpu": "rtxpro6000",
   "mode": "instant",
   "extra_args": "",
