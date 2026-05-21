@@ -1,4 +1,4 @@
-# TuNet Cloud — Tech Stack & Architecture
+# Spark Flint — Tech Stack & Architecture
 
 ## Stack
 

@@ -1,8 +1,8 @@
-# TuNet Cloud — Product Requirements Document
+# Spark Flint — Product Requirements Document
 
 ## Overview
 
-TuNet Cloud is a multi-user SaaS platform for launching and monitoring TuNet neural network
+Spark Flint is a multi-user SaaS platform for launching and monitoring TuNet neural network
 training jobs on RunPod GPU infrastructure. The platform operator owns one RunPod account,
 bills users via Stripe credits, and marks up GPU compute to cover costs and generate margin.
 

@@ -167,7 +167,7 @@ export interface BootstrapConfig {
 export function buildBootstrapScript(cfg: BootstrapConfig): string {
   const script = `#!/bin/bash
 set -e
-echo "=== TuNet Cloud Bootstrap ==="
+echo "=== Spark Flint Bootstrap ==="
 
 # Install bootstrap deps
 pip install -q pyyaml

@@ -1,5 +1,5 @@
 """
-job_worker.py — SSH-based fallback worker for TuNet Cloud
+job_worker.py — SSH-based fallback worker for Spark Flint
 
 This worker is ONLY needed if RunPod's startScript API field is unavailable.
 It polls the Supabase jobs table for pending jobs and provisions them via SSH
@@ -292,7 +292,7 @@ PYEOF"""
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main():
-    print(f"[worker] TuNet Cloud job worker starting...")
+    print(f"[worker] Spark Flint job worker starting...")
     print(f"[worker] Polling every {POLL_INTERVAL}s for pending jobs")
     print(f"[worker] Supabase: {SUPABASE_URL}")
     print(f"[worker] SSH key:  {SSH_KEY_PATH}")

@@ -1,5 +1,5 @@
 -- ============================================================
--- TuNet Cloud — Job alerts (training plateau / done notifications)
+-- Spark Flint — Job alerts (training plateau / done notifications)
 -- Apply via Supabase SQL editor.
 -- ============================================================
 

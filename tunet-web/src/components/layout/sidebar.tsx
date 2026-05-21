@@ -2,22 +2,13 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useSession, signOut } from 'next-auth/react'
+import { SparkLogo } from '@/components/brand/spark-logo'
 
 interface NavItem {
   href: string
   label: string
   icon: React.ReactNode
   exact?: boolean
-}
-
-function SparkLogo() {
-  return (
-    <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-8 h-8">
-      <circle cx="16" cy="16" r="14" fill="#ae69f4"/>
-      <path d="M12 10c0-1 1.5-2 4-2s4 1 4 2c0 2-4 3-4 5 0 1.5 0 2 0 2m0 3v1"
-        stroke="#fff" strokeWidth="2" strokeLinecap="round"/>
-    </svg>
-  )
 }
 
 const navItems: NavItem[] = [
@@ -79,8 +70,8 @@ export function Sidebar() {
       {/* Logo */}
       <div className="flex items-center gap-2.5 px-4 py-5 border-b border-[#e5e7eb]">
         <SparkLogo />
-        <span className="text-lg font-bold text-[#111827]">TuNet</span>
-        <span className="text-xs text-[#9ca3af] mt-0.5">Cloud</span>
+        <span className="text-lg font-bold text-[#111827]">Spark</span>
+        <span className="text-xs text-[#9ca3af] mt-0.5">Flint</span>
       </div>
 
       {/* Nav */}

@@ -1,5 +1,5 @@
 -- ============================================================
--- TuNet Cloud — Supabase / Postgres Schema
+-- Spark Flint — Supabase / Postgres Schema
 -- Run this in the Supabase SQL editor (Dashboard → SQL → New query)
 -- ============================================================
 

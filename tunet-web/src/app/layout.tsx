@@ -3,7 +3,7 @@ import './globals.css'
 import { AuthSessionProvider } from '@/components/providers/session-provider'
 
 export const metadata: Metadata = {
-  title: 'TuNet Cloud',
+  title: 'Spark Flint',
   description: 'Managed GPU training for TuNet models',
 }
 
