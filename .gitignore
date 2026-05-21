@@ -80,3 +80,5 @@ scripts/bench_results.jsonl
 # Scratch files
 aws_gpu_pricing.html
 tunet-web/deploy/tunet-web.env
+
+comfy_spark/_dl

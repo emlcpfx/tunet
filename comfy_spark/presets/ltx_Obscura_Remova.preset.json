@@ -1,0 +1,86 @@
+{
+  "description": "LTX-2.3 (distilled fp8) video-to-video occlusion / foreground removal using the Obscura Remova LoRA. Graph: axiomgraph/ComfyUIWorkflow 'LTX 2.3 Obscura_Remova'.",
+
+  "_HOWITRUNS": "No-build path: a public ComfyUI base image (image) runs comfy_run.py, which on startup clones node_packs into custom_nodes and downloads models + the LoRA onto the Spark node, then converts ltx_Obscura_Remova.workflow.json (UI graph) to API format via /object_info and renders. Nothing is built or pushed; nothing large touches your computer. Trade-off: ~30 GB is fetched on each COLD start (use --idle-hold to keep a warm node between iterations). --convert-only skips the model download (only node classes are needed for conversion), so it's quick.",
+  "_PARAMS": "Node ids come from the UI graph and are preserved through conversion; patches apply post-conversion, so paths target API format. Primitive nodes (432/302) use input name 'value' by convention; if a patch warns 'not in graph' or inputs look wrong, pull the converted workflow_api.json (written to ShareSync) and check field names.",
+  "_LORASTACK": "Obscura is the built-in LoRA on node 427 (the workflow's purpose). Extra Tier-1 LoRAs from --lora are chained AFTER it via lora_chain (anchor 427): 326(UNET) -> 427(Obscura) -> your stack -> CFGGuider. Mostly useful for layering a style/effect on top of the cleanplate; for plain generation+effects use the ltx2_generate preset.",
+
+  "base": "ltx2.3-22b",
+  "lora_catalog": "ltx2.loras.json",
+  "lora_chain": { "anchor": "427", "slot": 0 },
+
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "comfy_home": "/root/ComfyUI",
+  "comfy_bundle": "/default-comfyui-bundle/ComfyUI",
+  "python": "python3.13",
+  "gpu": "rtxpro6000",
+  "mode": "instant",
+  "extra_args": "",
+
+  "workflow": "ltx_Obscura_Remova.workflow.json",
+
+  "node_packs": [
+    "https://github.com/Lightricks/ComfyUI-LTXVideo",
+    "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite",
+    "https://github.com/kijai/ComfyUI-KJNodes",
+    "https://github.com/rgthree/rgthree-comfy",
+    "https://github.com/yolain/ComfyUI-Easy-Use",
+    "https://github.com/evanspearman/ComfyMath",
+    "https://github.com/ltdrdata/ComfyUI-Inspire-Pack"
+  ],
+
+  "models": [
+    { "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/diffusion_models/ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors",
+      "dest": "models/diffusion_models/ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors" },
+    { "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors",
+      "dest": "models/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors" },
+    { "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/text_encoders/ltx-2.3_text_projection_bf16.safetensors",
+      "dest": "models/text_encoders/ltx-2.3_text_projection_bf16.safetensors" },
+    { "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_video_vae_bf16.safetensors",
+      "dest": "models/vae/LTX23_video_vae_bf16.safetensors" },
+    { "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_audio_vae_bf16.safetensors",
+      "dest": "models/vae/LTX23_audio_vae_bf16.safetensors" }
+  ],
+
+  "lora_default": "https://huggingface.co/WepeNerd/Obscura_Remova/resolve/main/LTX23_Obscura_Remova_v1.safetensors",
+  "lora_name": "LTX23_Obscura_Remova_v1.safetensors",
+
+  "ui": {
+    "title": "LTX-2.3 Cleanplate — occlusion / foreground removal (Obscura Remova)",
+    "primary_input": {
+      "label": "Input video",
+      "tooltip": "The clip to clean up. Obscura regenerates occluded/foreground regions from the surrounding video.",
+      "filetypes": [["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]
+    }
+  },
+
+  "params": {
+    "prompt":   { "node": "432", "path": "inputs.value",
+      "default": "Remove the wooden fence from the foreground.",
+      "ui": { "label": "Prompt", "widget": "multiline", "section": "Main", "order": 1,
+              "tooltip": "Obscura's model card format: \"Remove the [object] from the foreground.\" Card examples: 'Remove the window curtains / wooden planks / green plant from the foreground.' If the model must invent the hidden background, describe it too. (src: huggingface.co/WepeNerd/Obscura_Remova model card)" } },
+    "negative": { "node": "315", "path": "inputs.text",
+      "default": "blurry, warped, distorted, ghosting, artifacts",
+      "ui": { "label": "Negative prompt", "widget": "multiline", "section": "Main", "order": 2,
+              "tooltip": "Obscura's card specifies NO negative — removal rarely needs one. This is a generic video-quality negative; trim it if results soften. (src: model card has none documented)" } },
+    "strength": { "node": "427", "path": "inputs.strength_model", "default": 2.3,
+      "ui": { "label": "Obscura strength", "widget": "slider", "min": 0.0, "max": 3.0, "step": 0.1,
+              "section": "Main", "order": 3,
+              "tooltip": "Obscura's model card: START ~1.3 and raise for COMPLEX removals; this bundled axiomgraph workflow ships 2.3. Lower if the kept subject distorts. (src: model card recommends ~1.3; graph default 2.3)" } },
+    "fps":      { "node": "302", "path": "inputs.value", "default": 24,
+      "ui": { "label": "Frame rate (fps)", "widget": "number", "min": 1, "max": 60, "step": 1,
+              "section": "Advanced", "order": 1,
+              "tooltip": "Output frame rate; also drives the input loader and output mux." } },
+    "width":    { "node": "314", "path": "inputs.value", "default": 720,
+      "ui": { "label": "Width", "widget": "number", "min": 256, "max": 2048, "step": 32,
+              "section": "Advanced", "order": 2, "tooltip": "Output width in px (graph 720)." } },
+    "height":   { "node": "301", "path": "inputs.value", "default": 1280,
+      "ui": { "label": "Height", "widget": "number", "min": 256, "max": 2048, "step": 32,
+              "section": "Advanced", "order": 3, "tooltip": "Output height in px (graph 1280)." } },
+    "length":   { "node": "303", "path": "inputs.value", "default": 81,
+      "ui": { "label": "Frames (length)", "widget": "number", "min": 9, "max": 257, "step": 8,
+              "section": "Advanced", "order": 4, "tooltip": "Number of frames to generate (graph 81)." } },
+    "video":    { "node": "372", "path": "inputs.video" },
+    "lora":     { "node": "427", "path": "inputs.lora_name" }
+  }
+}

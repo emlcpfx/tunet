@@ -1,5 +1,5 @@
 # ComfyUI image for Spark Fuse batch jobs (comfy_launch.py / comfy_run.py),
-# sized for the LTX-2.3 Obscura_Remova v2v graph (presets/cleanplate_ltx.*).
+# sized for the LTX-2.3 Obscura_Remova v2v graph (presets/ltx_Obscura_Remova.*).
 #
 # Two things you must get right: (a) the custom-node packs the graph uses, and
 # (b) getting the LTX-2.3 weights into the image (or a Spark model cache) so jobs

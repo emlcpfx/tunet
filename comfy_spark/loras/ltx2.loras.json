@@ -1,0 +1,69 @@
+{
+  "_schema": "comfy_spark LoRA catalog v1. Maps a friendly name -> spec for a Tier-1 'drop-in' LTX-2 LoRA: one that only patches the MODEL (loaded with LoraLoaderModelOnly) and can therefore be STACKED freely. comfy_launch.py reads this for --lora <name>[:<strength>] and --list-loras; the tkinter UI reads it to populate the LoRA picker. You can also pass a raw .safetensors URL to --lora directly (no catalog entry needed) — that's the escape hatch for the long tail of community LoRAs. Control / IC-LoRAs (depth, pose, canny, inpaint, ...) are NOT here: they need conditioning wired in and ship as their own presets instead.",
+
+  "_fields": {
+    "url": "direct .safetensors download URL (HF 'resolve/main/...' or any host)",
+    "file": "filename to save as under models/loras (must be unique per stack)",
+    "base": "compatible base model — must match the preset's model (e.g. ltx2.3-22b). A mismatch is warned about loudly.",
+    "kind": "effect | style | camera | motion | edit  (all drop-in/stackable)",
+    "task": "t2v | i2v | v2v | any  (what input the LoRA expects; advisory)",
+    "trigger": "phrase auto-appended to the prompt unless --no-triggers (omit/empty = none)",
+    "strength": "recommended default strength_model (LTX docs: 0.9-1.6, ~1.2-1.4 balanced; keep a stack's combined strength under ~2.0)",
+    "source": "HF repo for provenance",
+    "note": "human-readable usage hint (shown by --list-loras and as a UI tooltip)",
+    "prompt_example": "a ready-to-use starting prompt for this LoRA (do NOT include the trigger — that's auto-appended). Shown by --list-loras and in the UI picker."
+  },
+
+  "base": "ltx2.3-22b",
+
+  "loras": {
+    "transition": {
+      "url": "https://huggingface.co/joyfox/LTX-2.3-Transition-LORA/resolve/main/ltx2.3-transition.safetensors",
+      "file": "ltx2.3-transition.safetensors",
+      "base": "ltx2.3-22b",
+      "kind": "effect",
+      "task": "i2v",
+      "trigger": "zhuanchang",
+      "strength": 1.0,
+      "source": "joyfox/LTX-2.3-Transition-LORA",
+      "note": "Morph / transition between subjects or scenes. Works for i2v and first-to-last-frame. Describe the transformation in the prompt; the 'zhuanchang' trigger is auto-appended. Model-card template: [shot+camera]. [subject+scene]. [the transformation in detail]. [lighting/texture/atmosphere].",
+      "prompt_example": "Close-up shot, soft window light. A young woman stands still, then slowly morphs into an elegant white fox as fur spreads across her face, the camera holding steady. Cinematic, shallow depth of field."
+    },
+    "vbvr": {
+      "url": "https://huggingface.co/LiconStudio/Ltx2.3-VBVR-lora-I2V/resolve/main/VBVR-official-comfyui.safetensors",
+      "file": "ltx2.3-vbvr-i2v.safetensors",
+      "base": "ltx2.3-22b",
+      "kind": "effect",
+      "task": "i2v",
+      "trigger": "",
+      "strength": 1.0,
+      "source": "LiconStudio/Ltx2.3-VBVR-lora-I2V",
+      "note": "VBVR image-to-video motion/style effect. Start at 1.0; lower toward 0.8 if it overpowers the source image. (No trigger/prompt documented on the model card; the example below is a generic i2v motion starter.)",
+      "prompt_example": "The subject comes alive with natural motion - hair and fabric drift, subtle weight shifts - the camera holds steady, soft cinematic lighting."
+    },
+    "anime2real": {
+      "url": "https://huggingface.co/Alissonerdx/LTX-LoRAs/resolve/main/ltx23_anime2real_rank64_v1_4500.safetensors",
+      "file": "ltx23_anime2real.safetensors",
+      "base": "ltx2.3-22b",
+      "kind": "style",
+      "task": "any",
+      "trigger": "",
+      "strength": 1.0,
+      "source": "Alissonerdx/LTX-LoRAs",
+      "note": "Restyle anime input toward photoreal. Describe the realistic look in the prompt; ease strength down if faces drift. (No trigger documented; the example is a style-descriptor starter.)",
+      "prompt_example": "photorealistic live-action footage, natural skin texture, realistic lighting and soft shadows, shallow depth of field, cinematic color grade"
+    },
+    "real2anime": {
+      "url": "https://huggingface.co/Alissonerdx/LTX-LoRAs/resolve/main/ltx23_real2anime_rank64_v1_5000.safetensors",
+      "file": "ltx23_real2anime.safetensors",
+      "base": "ltx2.3-22b",
+      "kind": "style",
+      "task": "any",
+      "trigger": "",
+      "strength": 1.0,
+      "source": "Alissonerdx/LTX-LoRAs",
+      "note": "Restyle photoreal input toward anime. Pairs well with a style description in the prompt. (No trigger documented; the example is a style-descriptor starter.)",
+      "prompt_example": "anime style, cel-shaded, vivid saturated colors, expressive features, clean hand-drawn 2D linework"
+    }
+  }
+}

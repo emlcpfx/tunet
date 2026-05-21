@@ -1,0 +1,64 @@
+{
+  "description": "LTX-2.3 22B structural control via the 'LTX-2.3-22b-IC-LoRA-Union-Control' IC-LoRA — canny / depth / pose conditioning from a reference video. You give it a control/reference clip; on Spark it extracts canny edges (CannyEdgePreprocessor), depth (VideoDepthAnything), and pose (DWPreprocessor), and the union IC-LoRA steers generation to follow that structure. TIER-2 / IC-LoRA: rides a model patch + a guide-conditioning path, so it's its own preset (not a stackable catalog LoRA). Graph: Lightricks/ComfyUI-LTXVideo example 'LTX-2.3_ICLoRA_Union_Control_Distilled'.",
+
+  "_TEMPLATE": "SKETCH / TEMPLATE. The three SHARED LTX-2.3 base weights (dev checkpoint, gemma text encoder, distilled-lora-384) are REPLACE_ placeholders — fill the real HF URLs (same three as ltx2_generate / ltx_hdr). The Union-Control IC-LoRA URL is REAL/verified. RUN --convert-only FIRST: it skips the weight pull and surfaces any missing node classes, which is how you confirm the preprocessor node_packs below are right.",
+  "_CONTROL": "The graph wires ALL THREE preprocessors (canny 4991, pose 4986 DWPreprocessor, depth 5060/5061 VideoDepthAnything) into the union guide. Which one(s) drive the output depends on the graph's guide wiring; to favor one control type, mute the others or tune the guide via --set after pulling the converted workflow_api.json. Preprocessor MODELS (yolox_l.onnx + dw-ll_ucoco for pose, video_depth_anything_vits.pth for depth) are normally auto-downloaded by their node packs on first run; if a node errors 'model not found', add it to the models list.",
+  "_HOWITRUNS": "No-build path: public base image, comfy_run.py clones node_packs (incl. the controlnet-aux + depth-anything preprocessors), downloads weights, converts UI->API, applies patches, optionally splices a Tier-1 --lora stack onto the checkpoint (anchor 3940), and renders. Heaviest cold start of the presets (base weights + preprocessor models).",
+
+  "base": "ltx2.3-22b",
+  "lora_catalog": "ltx2.loras.json",
+  "lora_chain": { "anchor": "3940", "slot": 0 },
+  "requires_input": true,
+
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "comfy_home": "/root/ComfyUI",
+  "comfy_bundle": "/default-comfyui-bundle/ComfyUI",
+  "python": "python3.13",
+  "gpu": "rtxpro6000",
+  "mode": "instant",
+  "extra_args": "",
+
+  "workflow": "ltx_control.workflow.json",
+
+  "node_packs": [
+    "https://github.com/Lightricks/ComfyUI-LTXVideo",
+    "https://github.com/ClownsharkBatwing/RES4LYF",
+    "https://github.com/kijai/ComfyUI-KJNodes",
+    "https://github.com/cubiq/ComfyUI_essentials",
+    "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite",
+    "https://github.com/Fannovel16/comfyui_controlnet_aux",
+    "https://github.com/kijai/ComfyUI-DepthAnythingV2"
+  ],
+
+  "models": [
+    { "url": "REPLACE_WITH_DEV_CHECKPOINT_URL/ltx-2.3-22b-dev.safetensors",
+      "dest": "models/checkpoints/ltx-2.3-22b-dev.safetensors" },
+    { "url": "REPLACE_WITH_GEMMA_TEXT_ENCODER_URL/comfy_gemma_3_12B_it.safetensors",
+      "dest": "models/text_encoders/comfy_gemma_3_12B_it.safetensors" },
+    { "url": "REPLACE_WITH_DISTILL_LORA_URL/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+      "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-distilled-lora-384-1.1.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control/resolve/main/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors",
+      "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors" }
+  ],
+
+  "ui": {
+    "title": "LTX-2.3 Control — canny / depth / pose from a reference clip (IC-LoRA)",
+    "primary_input": {
+      "label": "Control reference video",
+      "tooltip": "The clip whose structure (edges/depth/pose) the output should follow. Preprocessing happens on Spark.",
+      "filetypes": [["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]
+    }
+  },
+
+  "params": {
+    "prompt":   { "node": "2483", "path": "inputs.text",
+      "default": "A knight in ornate plate armor walks through a misty forest at dawn, shafts of warm light cutting through the trees. Slow tracking shot, shallow depth of field, the soft crunch of footsteps on leaves.",
+      "ui": { "label": "Prompt", "widget": "multiline", "section": "Main", "order": 1,
+              "tooltip": "Describe the OUTPUT scene you want — the structure (edges/depth/pose) is taken from the reference clip, NOT the prompt. Same LTX-2.3 single-paragraph style as generation (shot, lighting, action, camera, audio). (src: Union-Control example workflow + LTX-2.3 prompt guide)" } },
+    "negative": { "node": "2612", "path": "inputs.text",
+      "default": "pc game, console game, video game, cartoon, childish, ugly",
+      "ui": { "label": "Negative prompt", "widget": "multiline", "section": "Main", "order": 2,
+              "tooltip": "Lightricks' shipped LTX-2 negative (same one used across their example workflows)." } },
+    "video":    { "node": "5001", "path": "inputs.file" }
+  }
+}

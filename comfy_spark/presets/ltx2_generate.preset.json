@@ -1,0 +1,68 @@
+{
+  "description": "LTX-2.3 22B image-to-video (and text-to-video) GENERATION — the natural home for stacking Tier-1 effect/style/camera LoRAs from the catalog. Graph: Lightricks/ComfyUI-LTXVideo example 'LTX-2.3_T2V_I2V_Single_Stage_Distilled_Full' (the cloud GemmaAPITextEncode nodes are bypassed; the local CLIPTextEncode + LTXAVTextEncoderLoader path is active, so no external API key is needed).",
+
+  "_TEMPLATE": "This preset ships as a TEMPLATE: the three model URLs below are REPLACE_ placeholders because the exact HF paths for the 'dev' checkpoint, the gemma text encoder, and the distilled-lora-384 weren't pinned. comfy_launch.py refuses to submit until you fill them in. Find them with the ComfyUI Manager / model downloader for this workflow (or the LTX-2 HF repos), drop the real 'resolve/main/...' URLs in, then run --convert-only ONCE to validate the converted graph before a paid render.",
+  "_HOWITRUNS": "Same no-build path as cleanplate: a public ComfyUI base image runs comfy_run.py, which seeds ComfyUI, clones node_packs, downloads the weights, converts the UI graph to API via /object_info, applies patches, splices the --lora stack onto the checkpoint's MODEL output (lora_chain anchor 3940 -> affects both the CFGGuider and MultimodalGuider passes), and renders. Heavier cold start than cleanplate (the dev checkpoint is large).",
+  "_LORASTACK": "All --lora entries chain onto the checkpoint (anchor 3940) BEFORE the built-in distillation LoRAs' consumers, so a stacked effect/style LoRA layers with the distill LoRAs across both sampler passes. Effect LoRAs are i2v/t2v, which is exactly what this graph does — e.g. `--lora transition:1.0 shot.png --prompt '...'`.",
+
+  "base": "ltx2.3-22b",
+  "lora_catalog": "ltx2.loras.json",
+  "lora_chain": { "anchor": "3940", "slot": 0 },
+  "requires_input": true,
+
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "comfy_home": "/root/ComfyUI",
+  "comfy_bundle": "/default-comfyui-bundle/ComfyUI",
+  "python": "python3.13",
+  "gpu": "rtxpro6000",
+  "mode": "instant",
+  "extra_args": "",
+
+  "workflow": "ltx2_generate.workflow.json",
+
+  "node_packs": [
+    "https://github.com/Lightricks/ComfyUI-LTXVideo",
+    "https://github.com/ClownsharkBatwing/RES4LYF",
+    "https://github.com/kijai/ComfyUI-KJNodes",
+    "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite"
+  ],
+
+  "models": [
+    { "url": "REPLACE_WITH_DEV_CHECKPOINT_URL/ltx-2.3-22b-dev.safetensors",
+      "dest": "models/checkpoints/ltx-2.3-22b-dev.safetensors" },
+    { "url": "REPLACE_WITH_GEMMA_TEXT_ENCODER_URL/comfy_gemma_3_12B_it.safetensors",
+      "dest": "models/text_encoders/comfy_gemma_3_12B_it.safetensors" },
+    { "url": "REPLACE_WITH_DISTILL_LORA_URL/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+      "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-distilled-lora-384-1.1.safetensors" }
+  ],
+
+  "ui": {
+    "title": "LTX-2.3 Generate — image/text-to-video (stack effect LoRAs here)",
+    "primary_input": {
+      "label": "Init image (i2v)",
+      "tooltip": "Starting frame for image-to-video. Add catalog effect LoRAs with the LoRA picker below.",
+      "filetypes": [["Image", "*.png *.jpg *.jpeg *.webp"], ["All files", "*.*"]]
+    }
+  },
+
+  "params": {
+    "prompt":   { "node": "2483", "path": "inputs.text",
+      "default": "A marketplace vendor arranges colorful spices in metal bowls as two customers browse nearby. The camera slowly pans across the display while ambient chatter fills the air.",
+      "ui": { "label": "Prompt", "widget": "multiline", "section": "Main", "order": 1,
+              "tooltip": "LTX-2.3 works best as ONE flowing present-tense paragraph covering: shot type, scene + lighting, action over time, character details, camera move, and audio. Longer prompts fill longer clips; understood terms include 'slow dolly in', 'golden hour', 'shallow depth of field'. LoRA trigger words are auto-appended. (src: LTX-2.3 prompt guide, ltx.io)" } },
+    "negative": { "node": "2612", "path": "inputs.text",
+      "default": "pc game, console game, video game, cartoon, childish, ugly",
+      "ui": { "label": "Negative prompt", "widget": "multiline", "section": "Main", "order": 2,
+              "tooltip": "Lightricks' shipped LTX-2 negative (from their official example workflow). The prompt guide also says to AVOID putting readable text/logos, emotional labels, and complex physics in the positive prompt." } },
+    "width":    { "node": "3059", "path": "inputs.width", "default": 960,
+      "ui": { "label": "Width", "widget": "number", "min": 256, "max": 2048, "step": 32,
+              "section": "Advanced", "order": 1, "tooltip": "Output width in px (graph 960)." } },
+    "height":   { "node": "3059", "path": "inputs.height", "default": 544,
+      "ui": { "label": "Height", "widget": "number", "min": 256, "max": 2048, "step": 32,
+              "section": "Advanced", "order": 2, "tooltip": "Output height in px (graph 544)." } },
+    "length":   { "node": "3059", "path": "inputs.length", "default": 121,
+      "ui": { "label": "Frames (length)", "widget": "number", "min": 9, "max": 257, "step": 8,
+              "section": "Advanced", "order": 3, "tooltip": "Number of frames (graph 121)." } },
+    "video":    { "node": "2004", "path": "inputs.image" }
+  }
+}

@@ -8,7 +8,7 @@ A generic runner with a "preset" layer on top:
   * PRESET:   a named bundle (presets/<name>.preset.json) that supplies the
               image / GPU / workflow + maps friendly flags (--prompt, --lora,
               --strength, ...) onto specific workflow nodes. Ships with a
-              `cleanplate_ltx` template for LTX-2.3 + Obscura Remova v2v.
+              `ltx_Obscura_Remova` template for LTX-2.3 + Obscura Remova v2v.
 
 It mirrors spark_launch.py's submit→pack→upload→tail flow, but the job command
 runs comfy_run.py (the headless ComfyUI driver) inside the container instead of
@@ -23,7 +23,7 @@ Usage:
         --set 6.inputs.text="remove the curtains"
 
     # preset (cleanplate)
-    python comfy_spark/comfy_launch.py --preset cleanplate_ltx \
+    python comfy_spark/comfy_launch.py --preset ltx_Obscura_Remova \
         clip.mp4 --prompt "remove the window curtains" --strength 1.3
 
     # housekeeping
@@ -472,6 +472,8 @@ def print_catalog(catalog):
               f"base={e.get('base','?')}  str~{e.get('strength', 1.0)}{trig}")
         if e.get("note"):
             print(f"                 {e['note']}")
+        if e.get("prompt_example"):
+            print(f"                 e.g. prompt: \"{e['prompt_example']}\"")
 
 
 # ── Tarball builder ───────────────────────────────────────────────────────────
@@ -507,7 +509,7 @@ def build_tar(workflow_obj, input_files, patches=None):
 def main():
     ap = argparse.ArgumentParser(description="Run a ComfyUI workflow on Spark Fuse")
     ap.add_argument("video", nargs="?", help="(preset mode) primary input media file")
-    ap.add_argument("--preset", help="named preset under presets/ (e.g. cleanplate_ltx)")
+    ap.add_argument("--preset", help="named preset under presets/ (e.g. ltx_Obscura_Remova)")
     ap.add_argument("--workflow", help="(generic) path to an API-format workflow JSON")
     ap.add_argument("--input", action="append", default=[],
                     help="media file to upload (repeatable). Referenced by basename in the workflow")
@@ -637,7 +639,7 @@ def main():
     if args.preset:
         if preset.get("requires_input", True) and not args.video and not args.convert_only:
             sys.exit("ERROR: preset mode needs a primary input file, e.g. "
-                     "`... --preset cleanplate_ltx clip.mp4` (or --convert-only)")
+                     "`... --preset ltx_Obscura_Remova clip.mp4` (or --convert-only)")
         if args.video:
             input_files.insert(0, args.video)
         if args.mask:

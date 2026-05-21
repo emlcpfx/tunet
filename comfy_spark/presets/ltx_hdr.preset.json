@@ -1,0 +1,61 @@
+{
+  "description": "LTX-2.3 22B HDR enhancement via the IC-LoRA 'LTX-2.3-22b-IC-LoRA-HDR'. Video-to-video: feed an SDR clip, get an HDR-graded look. Graph: Lightricks/ComfyUI-LTXVideo example 'LTX-2.3_ICLoRA_HDR_Distilled' (cloud GemmaAPITextEncode bypassed → local encoder path). This is a TIER-2 / IC-LoRA preset: the IC-LoRA rides a model patch (LTXICLoRALoaderModelOnly) AND a guide-conditioning path (LTXAddVideoICLoRAGuide), so unlike Tier-1 catalog LoRAs it cannot be free-stacked — it ships as its own preset.",
+
+  "_TEMPLATE": "SKETCH / TEMPLATE. The three SHARED LTX-2.3 base weights (dev checkpoint, gemma text encoder, distilled-lora-384) are REPLACE_ placeholders — the SAME three as ltx2_generate; fill them once you've pinned the real HF URLs (comfy_launch.py blocks submit until then). The HDR IC-LoRA URL itself is REAL/verified. Run --convert-only FIRST (skips the weight pull) to confirm the graph converts and to discover any missing node_packs from the validation errors, then fill weights and render.",
+  "_HOWITRUNS": "Same no-build path as the other presets: public base image, comfy_run.py clones node_packs, downloads weights, converts the UI graph to API, applies patches, optionally splices a Tier-1 --lora stack onto the checkpoint (anchor 3940), and renders.",
+
+  "base": "ltx2.3-22b",
+  "lora_catalog": "ltx2.loras.json",
+  "lora_chain": { "anchor": "3940", "slot": 0 },
+  "requires_input": true,
+
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "comfy_home": "/root/ComfyUI",
+  "comfy_bundle": "/default-comfyui-bundle/ComfyUI",
+  "python": "python3.13",
+  "gpu": "rtxpro6000",
+  "mode": "instant",
+  "extra_args": "",
+
+  "workflow": "ltx_hdr.workflow.json",
+
+  "node_packs": [
+    "https://github.com/Lightricks/ComfyUI-LTXVideo",
+    "https://github.com/ClownsharkBatwing/RES4LYF",
+    "https://github.com/kijai/ComfyUI-KJNodes",
+    "https://github.com/cubiq/ComfyUI_essentials",
+    "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite"
+  ],
+
+  "models": [
+    { "url": "REPLACE_WITH_DEV_CHECKPOINT_URL/ltx-2.3-22b-dev.safetensors",
+      "dest": "models/checkpoints/ltx-2.3-22b-dev.safetensors" },
+    { "url": "REPLACE_WITH_GEMMA_TEXT_ENCODER_URL/comfy_gemma_3_12B_it.safetensors",
+      "dest": "models/text_encoders/comfy_gemma_3_12B_it.safetensors" },
+    { "url": "REPLACE_WITH_DISTILL_LORA_URL/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+      "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-distilled-lora-384-1.1.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-HDR/resolve/main/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors",
+      "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors" }
+  ],
+
+  "ui": {
+    "title": "LTX-2.3 HDR — convert an SDR clip to an HDR look (IC-LoRA)",
+    "primary_input": {
+      "label": "Input video (SDR)",
+      "tooltip": "The clip to re-grade. The HDR IC-LoRA enhances dynamic range / color from the surrounding video.",
+      "filetypes": [["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]
+    }
+  },
+
+  "params": {
+    "prompt":   { "node": "2483", "path": "inputs.text",
+      "default": "HDR footage",
+      "ui": { "label": "Prompt", "widget": "multiline", "section": "Main", "order": 1,
+              "tooltip": "Keep it SHORT — Lightricks' shipped example for this graph is literally 'HDR footage'. Add a brief scene descriptor only if needed; the IC-LoRA derives the look from the input video, not a long prompt. (src: LTX-2.3 IC-LoRA HDR example workflow)" } },
+    "negative": { "node": "2612", "path": "inputs.text",
+      "default": "pc game, console game, video game, ugly, still, static, slow",
+      "ui": { "label": "Negative prompt", "widget": "multiline", "section": "Main", "order": 2,
+              "tooltip": "Lightricks' shipped HDR negative — note it adds 'still, static, slow' (vs the base negative) to keep motion alive. (src: HDR example workflow)" } },
+    "video":    { "node": "5106", "path": "inputs.file" }
+  }
+}

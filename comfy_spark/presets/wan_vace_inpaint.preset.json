@@ -1,0 +1,60 @@
+{
+  "description": "Wan2.1 VACE 14B video inpainting / object removal. A masked region is regenerated from the text prompt + surrounding video (no reference image = removal, not replacement). Graph: ComfyUI core template 'video_wan_vace_inpainting', reference_image disconnected. Accelerated with the CausVid LoRA (4 steps, cfg 1).",
+
+  "_HOWITRUNS": "No-build path: a public ComfyUI base image runs comfy_run.py, which seeds ComfyUI from the image bundle, downloads the 4 weights + CausVid LoRA onto the Spark node, converts the chosen workflow (UI graph) to API format via /object_info, applies the patches, and renders. All node types are CORE ComfyUI (no node_packs) — but they are RECENT core nodes (WanVaceToVideo, LoadVideo, CreateVideo), so the base image must ship a current ComfyUI; the cu130 yanwk tag does. ~42 GB is fetched on each COLD start (use --idle-hold to keep a warm node). --convert-only skips the model download.",
+  "_MASKMODES": "Mask supports BOTH a static image and a per-frame mask video, auto-selected by --mask extension. A video extension (.mp4/.mov/.webm/...) switches to 'workflow_mask_video' and remaps the mask param to the LoadVideo 'file' input (mask_video_param). White = the region to inpaint/remove; the mask should match the source video's frame count and resolution.",
+  "_PARAMS": "Node ids come from the UI graph and survive conversion; patches target API format post-conversion. If a patch warns 'not in graph' or output looks wrong, pull the converted workflow_api.json (written to ShareSync each run) and check field names. KSampler is preset for CausVid (4 steps, cfg 1, uni_pc/simple); for the base model without CausVid use steps ~20, cfg ~6 (--set 3.inputs.steps=20 --set 3.inputs.cfg=6 and --strength 0).",
+
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "comfy_home": "/root/ComfyUI",
+  "comfy_bundle": "/default-comfyui-bundle/ComfyUI",
+  "python": "python3.13",
+  "gpu": "rtxpro6000",
+  "mode": "instant",
+  "extra_args": "",
+
+  "workflow": "wan_vace_inpaint.workflow.json",
+  "workflow_mask_video": "wan_vace_inpaint_maskvid.workflow.json",
+
+  "node_packs": [],
+
+  "models": [
+    { "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_vace_14B_fp16.safetensors",
+      "dest": "models/diffusion_models/wan2.1_vace_14B_fp16.safetensors" },
+    { "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "dest": "models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" },
+    { "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors",
+      "dest": "models/vae/wan_2.1_vae.safetensors" }
+  ],
+
+  "lora_default": "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Wan21_CausVid_14B_T2V_lora_rank32.safetensors",
+  "lora_name": "Wan21_CausVid_14B_T2V_lora_rank32.safetensors",
+
+  "ui": {
+    "title": "Wan2.1 VACE — masked video inpainting / object removal",
+    "primary_input": {
+      "label": "Input video",
+      "tooltip": "The source clip. The masked region (white in the mask) is regenerated from the prompt + surrounding video.",
+      "filetypes": [["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]
+    }
+  },
+
+  "params": {
+    "prompt":   { "node": "6",   "path": "inputs.text",
+      "default": "an empty cobblestone street, clean background, consistent lighting and perspective",
+      "ui": { "label": "Prompt", "widget": "multiline", "section": "Main", "order": 1,
+              "tooltip": "For REMOVAL, describe the CLEAN result that should fill the masked area — naming the surrounding scene/surface ('empty cobblestone street') works better than 'background, empty'. For REPLACEMENT, describe the new object. (src: Wan VACE community guidance / ComfyUI docs)" } },
+    "negative": { "node": "7",   "path": "inputs.text",
+      "default": "the removed object, people, blur, ghosting, warping, flicker, seams, artifacts",
+      "ui": { "label": "Negative prompt", "widget": "multiline", "section": "Main", "order": 2,
+              "tooltip": "Discourage re-introducing the removed content and common inpaint artifacts. Wan's official negative is a long Chinese quality string; this English one targets clean removal." } },
+    "video":    { "node": "209", "path": "inputs.file" },
+    "mask":     { "node": "215", "path": "inputs.image" },
+    "lora":     { "node": "154", "path": "inputs.lora_name" },
+    "strength": { "node": "154", "path": "inputs.strength_model", "default": 0.3,
+      "ui": { "label": "CausVid strength", "widget": "slider", "min": 0.0, "max": 1.0, "step": 0.05,
+              "section": "Advanced", "order": 1,
+              "tooltip": "CausVid acceleration LoRA strength (4-step, cfg 1). Try 0.3–0.7. Set 0 to run the base model instead — then bump steps ~20 / cfg ~6 via --set." } }
+  },
+  "mask_video_param": { "node": "215", "path": "inputs.file" }
+}
