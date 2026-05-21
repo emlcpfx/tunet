@@ -32,6 +32,7 @@ import {
   writeDiscoveredFilesBase, GPU_TYPES, DEFAULT_IMAGE,
   propfindDir,
 } from '@/lib/spark'
+import * as fs from 'node:fs'
 import { packInputTarball } from '@/lib/spark-packer'
 import { uploadInputTarball } from '@/lib/spark'
 
@@ -207,9 +208,11 @@ export async function POST(
 
   // ── Upload tarball ───────────────────────────────────────────────────────
   try {
-    await uploadInputTarball(submitResp.input.uploadUrl, pack.buffer)
+    await uploadInputTarball(submitResp.input.uploadUrl, pack.tarballPath)
   } catch (e) {
     return jsonError(`upload failed: ${e instanceof Error ? e.message : 'unknown'}`, 502)
+  } finally {
+    await fs.promises.rm(pack.tarballPath, { force: true }).catch(() => {})
   }
 
   return new Response(JSON.stringify({

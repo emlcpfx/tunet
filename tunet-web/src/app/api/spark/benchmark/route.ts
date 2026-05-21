@@ -269,7 +269,8 @@ export async function POST(req: Request) {
       },
     })
 
-    await uploadInputTarball(submitResp.input.uploadUrl, pack.buffer)
+    await uploadInputTarball(submitResp.input.uploadUrl, pack.tarballPath)
+    await fs.promises.rm(pack.tarballPath, { force: true }).catch(() => {})
 
     if (submitResp.output?.shareSyncBaseUrl) {
       try {

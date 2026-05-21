@@ -24,6 +24,7 @@ import * as path from 'node:path'
 import * as os from 'node:os'
 import * as tar from 'tar'
 import * as zlib from 'node:zlib'
+import { pipeline } from 'node:stream/promises'
 import { stringify as yamlStringify } from 'yaml'
 
 // ── Tunet repo location ──────────────────────────────────────────────────────
@@ -127,14 +128,16 @@ export interface PackInput {
    *                runs, so the trainer's auto-resume picks it up).
    *   - Fine-tune: relPath = `finetune.pth` and config.training.finetune_from
    *                points at `/input/finetune.pth`.
-   * Buffers are written verbatim, no exclude logic.
+   * Copied verbatim from disk (streamed by the OS — never read into RAM),
+   * no exclude logic.
    */
-  extraFiles?: { relPath: string; data: Buffer }[]
+  extraFiles?: { relPath: string; srcPath: string }[]
 }
 
 export interface PackResult {
-  /** Compressed tar.gz buffer ready to PUT to the Spark uploadUrl. */
-  buffer:        Buffer
+  /** Path to the compressed tar.gz on disk, ready to stream to the Spark
+   *  uploadUrl. The CALLER owns it and must delete it after upload. */
+  tarballPath:    string
   /** Compressed size (bytes). */
   compressedSize: number
   /** Number of files in the tarball. */
@@ -225,35 +228,34 @@ export async function packInputTarball(input: PackInput): Promise<PackResult> {
         }
         const dest = path.join(stageDir, rel)
         await fs.promises.mkdir(path.dirname(dest), { recursive: true })
-        await fs.promises.writeFile(dest, f.data)
+        // Copy from disk (OS-streamed) — never read the file into memory. A
+        // resume .pth can be hundreds of MB; readFile here OOM-killed the box.
+        await fs.promises.copyFile(f.srcPath, dest)
         fileCount += 1
       }
     }
 
-    // 4. tar -czf - .
-    // tar.create accepts a string of patterns relative to `cwd`. Listing
-    // them explicitly keeps the archive tidy (no leading "./").
+    // 4. Stream tar.create → a temp .tar.gz on disk. We never accumulate the
+    // archive in memory: the old chunks/Buffer.concat held the whole tarball
+    // (plus a momentary doubling) in RAM, which OOM-killed the ~1 GB box once a
+    // real .pth rode along. The tarball lives OUTSIDE stageDir so the finally
+    // cleanup below won't delete it; the CALLER deletes it after upload.
     const entries = await fs.promises.readdir(stageDir)
-
-    const chunks: Buffer[] = []
-    await new Promise<void>((resolve, reject) => {
-      const stream = tar.create(
+    const tarballPath = path.join(os.tmpdir(), `tunet-spark-tarball-${stamp}-${process.pid}.tar.gz`)
+    await pipeline(
+      tar.create(
         {
           gzip: { level: 6 },
           cwd:  stageDir,
-          // Don't follow symlinks; preserve mtimes for cache friendliness
-          follow: false,
-          portable: true,
+          follow: false,    // don't follow symlinks
+          portable: true,   // preserve mtimes for cache friendliness
         },
         entries,
-      )
-      stream.on('data', (chunk: Buffer) => chunks.push(chunk))
-      stream.on('end', () => resolve())
-      stream.on('error', (err: unknown) => reject(err))
-    })
-
-    const buffer = Buffer.concat(chunks)
-    return { buffer, compressedSize: buffer.length, fileCount }
+      ),
+      fs.createWriteStream(tarballPath),
+    )
+    const compressedSize = (await fs.promises.stat(tarballPath)).size
+    return { tarballPath, compressedSize, fileCount }
   } finally {
     // Cleanup
     await fs.promises.rm(stageDir, { recursive: true, force: true }).catch(() => {})
@@ -303,11 +305,16 @@ export async function dryRunPackSize(config: Record<string, unknown>): Promise<{
   rawKB: number
 }> {
   const result = await packInputTarball({ config })
-  // Estimate raw size by inflating
-  const raw = zlib.gunzipSync(result.buffer)
-  return {
-    fileCount:    result.fileCount,
-    compressedKB: Math.round(result.buffer.length / 1024),
-    rawKB:        Math.round(raw.length / 1024),
+  try {
+    // Estimate raw size by inflating the on-disk tarball
+    const gz  = await fs.promises.readFile(result.tarballPath)
+    const raw = zlib.gunzipSync(gz)
+    return {
+      fileCount:    result.fileCount,
+      compressedKB: Math.round(result.compressedSize / 1024),
+      rawKB:        Math.round(raw.length / 1024),
+    }
+  } finally {
+    await fs.promises.rm(result.tarballPath, { force: true }).catch(() => {})
   }
 }

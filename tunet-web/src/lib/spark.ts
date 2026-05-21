@@ -298,23 +298,29 @@ export async function submitJob(input: SubmitJobInput): Promise<SubmitJobRespons
 }
 
 /**
- * Upload a packed tarball to the uploadUrl returned by submitJob.
- * Single-sign-on: the same Bearer token works on both api.* and files.*
+ * Upload a packed tarball (a file on disk) to the uploadUrl returned by
+ * submitJob. Streams the file from disk so we never hold it in memory —
+ * Content-Length is set explicitly (from the file size) so the PUT isn't
+ * chunked. Single-sign-on: the same Bearer token works on both api.* and files.*
  */
 export async function uploadInputTarball(
-  uploadUrl: string,
-  body: Buffer | Blob | ArrayBuffer,
+  uploadUrl:   string,
+  tarballPath: string,
 ): Promise<void> {
-  const tok = await getToken()
+  const tok  = await getToken()
+  const size = (await fs.promises.stat(tarballPath)).size
+  // Node Readable as a streaming request body + `duplex: 'half'` are valid under
+  // undici but not in the DOM RequestInit types — cast the whole init through.
   const res = await fetch(uploadUrl, {
     method: 'PUT',
     headers: {
-      'Authorization': `Bearer ${tok}`,
-      'Content-Type':  'application/octet-stream',
+      'Authorization':  `Bearer ${tok}`,
+      'Content-Type':   'application/octet-stream',
+      'Content-Length': String(size),
     },
-    // @ts-expect-error — Buffer is BodyInit-compatible in Node runtime
-    body,
-  })
+    body:   fs.createReadStream(tarballPath),
+    duplex: 'half',
+  } as unknown as RequestInit)
   if (!res.ok) {
     const text = await res.text().catch(() => '')
     throw new Error(`Upload failed HTTP ${res.status}: ${text.slice(0, 200)}`)

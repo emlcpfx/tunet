@@ -18,6 +18,9 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
+import * as crypto from 'node:crypto'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import {
   submitJob, uploadInputTarball, GPU_TYPES, DEFAULT_IMAGE, type GpuKey,
   writeDiscoveredFilesBase, getJob, fetchOutputFile, shareSyncBaseUrl,
@@ -172,8 +175,12 @@ export async function POST(req: Request) {
   }
 
   let resumeOutputSubdir: string | null = null  // for resume mode, the *source* job's output subdir
-  let extraFiles: { relPath: string; data: Buffer }[] | undefined
+  let extraFiles: { relPath: string; srcPath: string }[] | undefined
   let finetunePath: string | null = body.inputs?.finetune_from ?? null
+  // For Spark-source resume we stream the .pth to a temp file (not RAM); track
+  // it so the stream's finally can delete it. Local-upload .pth stays in its
+  // stage dir and is cleaned with the rest of the stage.
+  let tempCkptPath: string | null = null
 
   if (mode === 'resume' || mode === 'finetune') {
     if (!body.source?.jobId)          return jsonError(`mode='${mode}' requires source.jobId`, 400)
@@ -192,7 +199,10 @@ export async function POST(req: Request) {
     const localStageId = typeof body.source.localCheckpointStageId === 'string'
       ? body.source.localCheckpointStageId
       : null
-    let ckptBuf: Buffer
+    // Path to the .pth ON DISK (never read into a Buffer — a big checkpoint
+    // OOM-killed the box). Local-upload: the staged file. Spark-source: a temp
+    // file we stream the ShareSync download into.
+    let ckptSrcPath: string
     let sourceSubdir: string
 
     if (localStageId) {
@@ -205,11 +215,7 @@ export async function POST(req: Request) {
           400,
         )
       }
-      try {
-        ckptBuf = await fs.promises.readFile(ckptPath)
-      } catch (e) {
-        return jsonError(`read local checkpoint failed: ${e instanceof Error ? e.message : 'unknown'}`, 500)
-      }
+      ckptSrcPath = ckptPath
       // For local resume there's no prior Spark job to inherit an output
       // subdir from. Use the new job's safeName so the seeded .pth lands at
       // /output/<safeName>/ and train.py's auto-resume picks it up there.
@@ -253,7 +259,22 @@ export async function POST(req: Request) {
           upstream.status === 404 ? 404 : 502,
         )
       }
-      ckptBuf = Buffer.from(await upstream.arrayBuffer())
+      if (!upstream.body) {
+        return jsonError(`checkpoint ${body.source.checkpointName} returned an empty body`, 502)
+      }
+      // Stream the download straight to a temp file — never buffer the whole
+      // .pth in memory.
+      tempCkptPath = path.join(os.tmpdir(), `tunet-ckpt-${crypto.randomBytes(8).toString('hex')}.pth`)
+      try {
+        await pipeline(
+          Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]),
+          fs.createWriteStream(tempCkptPath),
+        )
+      } catch (e) {
+        await fs.promises.rm(tempCkptPath, { force: true }).catch(() => {})
+        return jsonError(`fetch checkpoint failed: ${e instanceof Error ? e.message : 'unknown'}`, 502)
+      }
+      ckptSrcPath = tempCkptPath
     }
 
     if (mode === 'resume') {
@@ -278,12 +299,12 @@ export async function POST(req: Request) {
       resumeOutputSubdir = sourceSubdir
       extraFiles = [{
         relPath: `output/${sourceSubdir}/${seededName}`,
-        data:    ckptBuf,
+        srcPath: ckptSrcPath,
       }]
     } else {
       // Fine-tune: drop the .pth at /input/finetune.pth and let buildConfig
       // wire training.finetune_from to it. Optimizer + step counter reset.
-      extraFiles = [{ relPath: 'finetune.pth', data: ckptBuf }]
+      extraFiles = [{ relPath: 'finetune.pth', srcPath: ckptSrcPath }]
       finetunePath = '/input/finetune.pth'
     }
   }
@@ -326,6 +347,8 @@ export async function POST(req: Request) {
         try { controller.enqueue(encoder.encode(': keepalive\n\n')) } catch { /* closed */ }
       }, 15_000)
 
+      // Temp tarball the packer writes to disk; deleted in finally after upload.
+      let packTarballPath: string | null = null
       try {
         send({ phase: 'validate', status: 'done' })
 
@@ -337,6 +360,7 @@ export async function POST(req: Request) {
           stageDir:   stageDir ?? undefined,
           extraFiles: extraFiles,
         })
+        packTarballPath = pack.tarballPath
         send({
           phase:  'pack',
           status: 'done',
@@ -447,7 +471,7 @@ export async function POST(req: Request) {
         }, 1500)
 
         try {
-          await uploadInputTarball(submitResp.input.uploadUrl, pack.buffer)
+          await uploadInputTarball(submitResp.input.uploadUrl, pack.tarballPath)
         } finally {
           clearTimeout(halfwayTimer)
         }
@@ -481,6 +505,10 @@ export async function POST(req: Request) {
         })
       } finally {
         clearInterval(heartbeat)
+        // Delete temp artifacts streamed to disk: the tarball, and the
+        // Spark-source .pth temp (local-upload stage is cleaned on success above).
+        if (packTarballPath) await fs.promises.rm(packTarballPath, { force: true }).catch(() => {})
+        if (tempCkptPath)    await fs.promises.rm(tempCkptPath,    { force: true }).catch(() => {})
         controller.close()
       }
     },
