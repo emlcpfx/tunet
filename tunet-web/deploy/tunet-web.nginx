@@ -1,5 +1,5 @@
 server {
-    server_name tunet.cleanplatefx.com;
+    server_name flint.thevfxtools.com;
 
     # Matches next.config.ts experimental.serverActions.bodySizeLimit
     client_max_body_size 2g;
@@ -38,21 +38,21 @@ server {
 
     listen [::]:443 ssl; # managed by Certbot
     listen 443 ssl; # managed by Certbot
-    ssl_certificate /etc/letsencrypt/live/tunet.cleanplatefx.com/fullchain.pem; # managed by Certbot
-    ssl_certificate_key /etc/letsencrypt/live/tunet.cleanplatefx.com/privkey.pem; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/flint.thevfxtools.com/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/flint.thevfxtools.com/privkey.pem; # managed by Certbot
     include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
 
 }
 server {
-    if ($host = tunet.cleanplatefx.com) {
+    if ($host = flint.thevfxtools.com) {
         return 301 https://$host$request_uri;
     } # managed by Certbot
 
 
     listen 80;
     listen [::]:80;
-    server_name tunet.cleanplatefx.com;
+    server_name flint.thevfxtools.com;
     return 404; # managed by Certbot
 
 

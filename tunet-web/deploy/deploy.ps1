@@ -1,4 +1,4 @@
-# Deploy tunet-web to VPS (149.28.38.9 -> https://tunet.cleanplatefx.com).
+# Deploy tunet-web to VPS (149.28.38.9 -> https://flint.thevfxtools.com).
 #
 # Default behavior: build web, push web + python repo, restart service.
 #
@@ -22,7 +22,7 @@
 #   5. Extracts web into /opt/tunet-web, repo into /opt/tunet-web/repo
 #   6. chowns everything to tunet:tunet
 #   7. Restarts the systemd service
-#   8. Smoke-tests https://tunet.cleanplatefx.com (expects 307 -> /sign-in)
+#   8. Smoke-tests https://flint.thevfxtools.com (expects 307 -> /sign-in)
 
 [CmdletBinding()]
 param(
@@ -207,9 +207,9 @@ if ($webTar)  { Remove-Item $webTar  -ErrorAction SilentlyContinue }
 if ($repoTar) { Remove-Item $repoTar -ErrorAction SilentlyContinue }
 
 # ── Smoke test ───────────────────────────────────────────────────────────────
-Step 'Smoke-testing https://tunet.cleanplatefx.com'
+Step 'Smoke-testing https://flint.thevfxtools.com'
 try {
-  $resp = Invoke-WebRequest -Uri 'https://tunet.cleanplatefx.com/' -MaximumRedirection 0 -UseBasicParsing
+  $resp = Invoke-WebRequest -Uri 'https://flint.thevfxtools.com/' -MaximumRedirection 0 -UseBasicParsing
   $loc  = $resp.Headers['Location']
   Write-Host "    HTTP $($resp.StatusCode)    Location: $loc"
   if ($resp.StatusCode -ne 307 -and $resp.StatusCode -ne 200) {
@@ -220,4 +220,4 @@ try {
 }
 
 Write-Host ''
-Write-Host 'Done. Live at https://tunet.cleanplatefx.com' -ForegroundColor Green
+Write-Host 'Done. Live at https://flint.thevfxtools.com' -ForegroundColor Green
