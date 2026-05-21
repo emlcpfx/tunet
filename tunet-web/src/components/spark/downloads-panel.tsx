@@ -33,7 +33,7 @@ type ExportPhase =
   | { kind: 'idle' }
   | { kind: 'submitting' }
   | { kind: 'converting'; jobId: string }
-  | { kind: 'done';       file: string }
+  | { kind: 'ready';      path: string }   // file is in ShareSync — show a Download link
   | { kind: 'timeout';    jobId: string }
   | { kind: 'error';      msg: string }
 
@@ -150,8 +150,8 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
       if (data.fromCache && data.downloadPath) {
-        triggerDownload(data.downloadPath)
-        setPhase(fmt, { kind: 'done', file: data.exportName ?? data.downloadPath.split('/').pop() })
+        triggerDownload(data.downloadPath)            // best-effort (within the click's gesture window)
+        setPhase(fmt, { kind: 'ready', path: data.downloadPath })
         void refreshFiles()
         return
       }
@@ -187,8 +187,11 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
         ? (fresh.find(f => f.name.endsWith('.cat')) ?? fresh.find(f => f.name.endsWith('.pt')))
         :  fresh.find(f => f.name.endsWith('.onnx'))
       if (primary) {
+        // Best-effort auto-download; browsers block downloads fired long after a
+        // click (no user gesture), so the card also shows a Download link — that
+        // click is a real gesture and always works.
         triggerDownload(primary.name)
-        setPhase(fmt, { kind: 'done', file: primary.name.split('/').pop() ?? primary.name })
+        setPhase(fmt, { kind: 'ready', path: primary.name })
         return
       }
       if (Date.now() > deadline) { setPhase(fmt, { kind: 'timeout', jobId }); return }
@@ -233,8 +236,8 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
       <p className="text-xs text-[#6b7280] mb-3">
         Latest checkpoint and on-demand exports. Pick a checkpoint, then{' '}
         <span className="font-semibold">Export for Flame / AE</span> (ONNX) or{' '}
-        <span className="font-semibold">Nuke</span> (TorchScript) — a small CPU job converts it
-        (~2 min, ~$0.02) and the file downloads automatically when it&apos;s ready.
+        <span className="font-semibold">Nuke</span> (TorchScript) — a CPU job converts it
+        (~2-3 min, ~$0.02); when it&apos;s ready the card shows a <span className="font-semibold">Download</span> link.
       </p>
 
       {/* ── Checkpoint picker (drives both export cards) ───────────────────── */}
@@ -276,7 +279,7 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
           ckptLabel={ckptLabel}
           jobsBase={jobsBase}
           onExport={() => void runExport('flame')}
-          onDownloadExisting={flameOnnx ? () => triggerDownload(flameOnnx.name) : undefined}
+          onDownload={triggerDownload}
         />
         <ExportCard
           title="Export for Nuke"
@@ -288,7 +291,7 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
           ckptLabel={ckptLabel}
           jobsBase={jobsBase}
           onExport={() => void runExport('nuke')}
-          onDownloadExisting={nukePrimary ? () => triggerDownload(nukePrimary.name) : undefined}
+          onDownload={triggerDownload}
         />
       </div>
 
@@ -405,7 +408,7 @@ function DownloadCard({
  * when an export already exists so you can grab it without re-converting.
  */
 function ExportCard({
-  title, hint, phase, existing, extraCount, canExport, ckptLabel, jobsBase, onExport, onDownloadExisting,
+  title, hint, phase, existing, extraCount, canExport, ckptLabel, jobsBase, onExport, onDownload,
 }: {
   title: string
   hint: string
@@ -416,13 +419,14 @@ function ExportCard({
   ckptLabel: string
   jobsBase: string
   onExport: () => void
-  onDownloadExisting?: () => void
+  onDownload: (relPath: string) => void
 }) {
-  const busy = phase.kind === 'submitting' || phase.kind === 'converting'
+  const busy  = phase.kind === 'submitting' || phase.kind === 'converting'
+  const ready = phase.kind === 'ready'
 
   return (
     <div className={`flex items-center gap-3 p-3 rounded-md border transition-colors ${
-      busy ? 'border-[#e9d5ff] bg-[#faf5ff]' : 'border-[#e5e7eb]'
+      busy ? 'border-[#e9d5ff] bg-[#faf5ff]' : ready ? 'border-[#bbf7d0] bg-[#f0fdf4]' : 'border-[#e5e7eb]'
     } ${!canExport ? 'opacity-50' : ''}`}>
       <button
         type="button"
@@ -430,10 +434,12 @@ function ExportCard({
         disabled={!canExport || busy}
         className="flex items-center gap-3 min-w-0 flex-1 text-left disabled:cursor-not-allowed"
       >
-        <div className="w-9 h-9 rounded flex items-center justify-center flex-shrink-0 bg-[#f3e8ff] text-[#7E3AF2]">
+        <div className={`w-9 h-9 rounded flex items-center justify-center flex-shrink-0 ${
+          ready ? 'bg-[#16a34a] text-white' : 'bg-[#f3e8ff] text-[#7E3AF2]'
+        }`}>
           {busy
             ? <span className="w-4 h-4 border-2 border-[#7E3AF2] border-t-transparent rounded-full animate-spin" />
-            : phase.kind === 'done'
+            : ready
               ? <CheckIcon />
               : <ConvertIcon />}
         </div>
@@ -444,8 +450,8 @@ function ExportCard({
               ? <>Convert <span className="font-mono">{ckptLabel}</span> → {hint}</>
               : 'Waiting for the first checkpoint…')}
             {phase.kind === 'submitting' && 'Starting export job…'}
-            {phase.kind === 'converting' && 'Converting on Spark… (~2 min) — downloads when ready'}
-            {phase.kind === 'done'    && <span className="text-[#16a34a]">Downloaded {phase.file} ✓ · click to re-export</span>}
+            {phase.kind === 'converting' && 'Converting on Spark… (~2-3 min)'}
+            {phase.kind === 'ready'    && <span className="text-[#16a34a]">Ready — download it →  ·  click to re-export</span>}
             {phase.kind === 'timeout' && 'Still running — see progress, then download from the list below'}
             {phase.kind === 'error'   && <span className="text-[#EF4444]">{phase.msg}</span>}
             {phase.kind === 'idle' && existing && <span className="text-[#9ca3af]"> · last: {existing.name.split('/').pop()}{extraCount ? ` (+${extraCount})` : ''}</span>}
@@ -458,8 +464,17 @@ function ExportCard({
             progress →
           </Link>
         )}
-        {existing && onDownloadExisting && !busy && (
-          <button type="button" onClick={onDownloadExisting} className="text-[10px] text-[#7E3AF2] hover:underline">
+        {ready && (
+          <button
+            type="button"
+            onClick={() => onDownload(phase.path)}
+            className="text-xs font-semibold px-2.5 py-1 rounded-md bg-[#16a34a] text-white hover:bg-[#15803d]"
+          >
+            Download ↓
+          </button>
+        )}
+        {existing && !busy && !ready && (
+          <button type="button" onClick={() => onDownload(existing.name)} className="text-[10px] text-[#7E3AF2] hover:underline">
             ↓ latest
           </button>
         )}
