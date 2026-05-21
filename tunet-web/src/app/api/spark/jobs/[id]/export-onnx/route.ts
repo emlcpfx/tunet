@@ -43,7 +43,32 @@ export const maxDuration = 60
 interface Body {
   /** Optional override — defaults to the latest checkpoint in the source dir. */
   checkpointName?: string
+  /**
+   * Which deliverable the caller wants back. The conversion job always writes
+   * BOTH (flame .onnx + nuke .pt/.nk/.cat) — this only selects which one the
+   * fast-path cache check looks for and which file we name in the response.
+   * Defaults to 'flame' for back-compat with the old single "Export now" button.
+   */
+  format?: 'flame' | 'nuke'
+  /**
+   * Skip the cache fast-path and always spawn a fresh conversion of the picked
+   * checkpoint. The Downloads panel sets this because the user explicitly picks
+   * a .pth and expects *that* one exported (the cache returns the newest export,
+   * which may be a different epoch).
+   */
+  force?: boolean
 }
+
+// Per-format: which exports/ subdir to scan and how to pick the primary file.
+//   flame → the .onnx (Flame / AE deliverable)
+//   nuke  → prefer the .cat (Cattery model), else the .pt (TorchScript)
+const FORMAT_SPEC = {
+  flame: { dir: 'flame', pick: (es: { name: string }[]) => es.filter(e => e.name.endsWith('.onnx')) },
+  nuke:  { dir: 'nuke',  pick: (es: { name: string }[]) => {
+    const cat = es.filter(e => e.name.endsWith('.cat'))
+    return cat.length ? cat : es.filter(e => e.name.endsWith('.pt'))
+  } },
+} as const
 
 export async function POST(
   req: Request,
@@ -53,6 +78,7 @@ export async function POST(
 
   let body: Body = {}
   try { body = await req.json() } catch { /* empty body is fine */ }
+  const format: 'flame' | 'nuke' = body.format === 'nuke' ? 'nuke' : 'flame'
 
   const source = await getJob(id)
   if (!source) return jsonError('source job not found', 404)
@@ -104,35 +130,39 @@ export async function POST(
   if (!base) return jsonError('no resolvable base URL', 503)
   const checkpointUrl = `${base}/${encodeURIComponent(picked.name)}`
 
-  // ── Fast path: did auto_export already produce an .onnx? ─────────────────
-  // Training jobs default to `auto_export.interval = 10`, so most jobs have
-  // an .onnx waiting in <base>/exports/flame/. We hand back the latest one
-  // unconditionally — the filename embeds the epoch (e.g. `myrun_epoch_0040_
-  // 052026_1530.onnx`) so the user can read what they got, and the
-  // alternative (spawning a CPU job that takes ~3 min + ~$0.02) is strictly
-  // worse than handing them a few-epoch-stale checkpoint that's already on
-  // disk. If the user wants the absolute latest .pth re-exported, that's a
-  // separate "force re-export" flow we can add later. Best-effort: any error
-  // here just falls through to the slow path.
-  try {
-    const flameEntries = await propfindDir(`${base}/exports/flame`)
-    const onnxEntries = flameEntries.filter(e => !e.isDir && e.name.endsWith('.onnx'))
-    const latestOnnx = pickLatest(onnxEntries)
-    if (latestOnnx) {
-      return new Response(JSON.stringify({
-        fromCache:    true,
-        downloadUrl:  `${base}/exports/flame/${encodeURIComponent(latestOnnx.name)}`,
-        checkpoint:   picked.name,
-        exportName:   latestOnnx.name,
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      })
+  // ── Fast path: did auto_export already produce the requested deliverable? ─
+  // Training jobs default to `auto_export.interval = 10`, so a job may have an
+  // export waiting in <base>/exports/<flame|nuke>/. We hand back the latest one
+  // — the filename embeds the epoch (e.g. `myrun_epoch_0040_052026_1530.onnx`)
+  // so the user can read what they got. We skip this entirely when `force` is
+  // set: the Downloads panel forces a fresh convert because the user explicitly
+  // picks a .pth and expects *that* epoch, not whatever's newest on disk.
+  // `downloadPath` is the job-relative path the client feeds to the files proxy
+  // (the raw ShareSync URL needs a bearer the browser doesn't have). Best-effort:
+  // any error here just falls through to the slow path.
+  const spec = FORMAT_SPEC[format]
+  if (!body.force) {
+    try {
+      const subEntries = await propfindDir(`${base}/exports/${spec.dir}`)
+      const candidates = spec.pick(subEntries.filter(e => !e.isDir))
+      const latest = pickLatest(candidates as PthEntry[])
+      if (latest) {
+        return new Response(JSON.stringify({
+          fromCache:    true,
+          format,
+          checkpoint:   picked.name,
+          exportName:   latest.name,
+          downloadPath: `exports/${spec.dir}/${latest.name}`,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+    } catch {
+      // Sub-dir PROPFIND failed (network, auth, malformed XML). Don't penalize
+      // the user — fall through to the slow path and they get the same outcome
+      // they would have gotten before this fast-path existed.
     }
-  } catch {
-    // Sub-dir PROPFIND failed (network, auth, malformed XML). Don't penalize
-    // the user — fall through to the slow path and they get the same outcome
-    // they would have gotten before this fast-path existed.
   }
 
   // ── Recover the per-job subdir so the export job writes to the same place ─
@@ -217,6 +247,10 @@ export async function POST(
 
   return new Response(JSON.stringify({
     fromCache:    false,
+    format,
+    // Where the deliverable will land once the job finishes — the client polls
+    // the files listing for new entries under this dir and auto-downloads.
+    exportDir:    `exports/${FORMAT_SPEC[format].dir}`,
     jobId:        submitResp.jobId,
     checkpoint:   picked.name,
     checkpointKB: Math.round(picked.size / 1024),

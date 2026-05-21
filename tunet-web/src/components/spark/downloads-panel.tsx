@@ -1,13 +1,18 @@
 'use client'
 
 /**
- * Downloads panel — lists output files (checkpoints + ONNX exports) from
- * ShareSync and offers download buttons. Mirrors the four canonical exports
- * from gui/__init__.py (Latest .pth for fine-tune, Flame/AE ONNX, Nuke ONNX,
- * Preview JPGs). Lists per-epoch .pth files in a collapsed sub-list.
+ * Downloads panel — lists output files (checkpoints + exports) from ShareSync
+ * and offers downloads. Mirrors the local Export tab (gui/export_tab.py): the
+ * "Export for Flame / AE" and "Export for Nuke" cards are *actions*, not passive
+ * links — pick a checkpoint, click, and a small CPU Spark job converts the .pth
+ * (Flame ONNX / Nuke TorchScript) and the file auto-downloads when it lands.
+ * Recent auto-exports are also surfaced as direct downloads. Per-epoch .pth and
+ * the full exports/ tree live in collapsible sub-lists.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import Link from 'next/link'
+import { usePathname } from 'next/navigation'
 import type { SparkJob } from '@/lib/spark-types'
 
 interface FileEntry {
@@ -20,19 +25,37 @@ interface DownloadsPanelProps {
   job: SparkJob
 }
 
+type ExportFormat = 'flame' | 'nuke'
+
+// Per-format export lifecycle. Each card tracks its own — the convert job emits
+// both deliverables, but the user clicks them independently.
+type ExportPhase =
+  | { kind: 'idle' }
+  | { kind: 'submitting' }
+  | { kind: 'converting'; jobId: string }
+  | { kind: 'done';       file: string }
+  | { kind: 'timeout';    jobId: string }
+  | { kind: 'error';      msg: string }
+
+const POLL_MS       = 5_000
+const POLL_DEADLINE = 7 * 60_000   // give the ~2-3 min CPU job generous headroom
+
 export function DownloadsPanel({ job }: DownloadsPanelProps) {
-  const [files, setFiles]   = useState<FileEntry[] | null>(null)
+  const pathname  = usePathname()
+  // The panel renders on /demo/jobs/[id] (and /jobs/[id] if ever wired there);
+  // link export-job progress to whichever surface we're on.
+  const jobsBase  = pathname.startsWith('/demo/') ? '/demo/jobs' : '/jobs'
+
+  const [files, setFiles]     = useState<FileEntry[] | null>(null)
   const [pending, setPending] = useState(false)
-  const [error, setError]   = useState<string | null>(null)
-  const [loading, setLoad]  = useState(true)
-  const [expanded, setExp]  = useState(false)
-  const [exportState, setExportState] = useState<
-    | { kind: 'idle' }
-    | { kind: 'submitting' }
-    | { kind: 'submitted'; jobId: string; checkpoint: string }
-    | { kind: 'ready';     downloadUrl: string; checkpoint: string; exportName: string }
-    | { kind: 'error';     msg: string }
-  >({ kind: 'idle' })
+  const [error, setError]     = useState<string | null>(null)
+  const [loading, setLoad]    = useState(true)
+  const [expanded, setExp]    = useState(false)
+  const [selectedCkpt, setSelectedCkpt] = useState('')
+  const [phases, setPhases]   = useState<Record<ExportFormat, ExportPhase>>({
+    flame: { kind: 'idle' }, nuke: { kind: 'idle' },
+  })
+  const cancelledRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
@@ -54,6 +77,125 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
     load()
     return () => { cancelled = true }
   }, [job.id])
+
+  // Stop any in-flight export polling if the panel unmounts.
+  useEffect(() => () => { cancelledRef.current = true }, [])
+
+  // ── Classify (memoized so the picker effect can depend on pthLatest) ────────
+  // Exports land under exports/<flame|nuke>/… (the files route descends one
+  // level), so classify by that subfolder and surface the most-recent.
+  const flameOnnx = useMemo(
+    () => (files ?? []).filter(f => /(^|\/)flame\//i.test(f.name) && f.name.endsWith('.onnx')).sort(byModifiedDesc)[0] ?? null,
+    [files],
+  )
+  // Nuke's deliverable is a trio (.cat Cattery model + .nk node + .pt
+  // TorchScript). Group them, surface the .cat as primary.
+  const nukeFiles = useMemo(
+    () => (files ?? []).filter(f => /(^|\/)nuke\//i.test(f.name) && /\.(cat|nk|pt)$/i.test(f.name)).sort(byModifiedDesc),
+    [files],
+  )
+  const nukePrimary = useMemo(() => nukeFiles.find(f => f.name.endsWith('.cat')) ?? nukeFiles[0] ?? null, [nukeFiles])
+  const allExports  = useMemo(() => (files ?? []).filter(f => f.name.startsWith('exports/')).sort(byModifiedDesc), [files])
+  const pthAll      = useMemo(() => (files ?? []).filter(f => f.name.endsWith('.pth')).sort(byModifiedDesc), [files])
+  const pthLatest   = useMemo(
+    () => (files ?? []).find(f => /_latest\.pth$/.test(f.name)) ?? pthAll[0] ?? null,
+    [files, pthAll],
+  )
+  const pthEpochs   = useMemo(() => pthAll.filter(f => f.name !== pthLatest?.name), [pthAll, pthLatest])
+  const previewJpgs = useMemo(() => (files ?? []).filter(f => /preview/i.test(f.name) && /\.jpe?g$/i.test(f.name)), [files])
+  const trainingLog = useMemo(() => (files ?? []).find(f => f.name === 'training.log') ?? null, [files])
+  const otherLogs   = useMemo(() => (files ?? []).filter(f => f.name.endsWith('.log') && f.name !== 'training.log'), [files])
+
+  // Default the picker to the latest checkpoint once files load.
+  useEffect(() => {
+    if (!selectedCkpt && pthLatest) setSelectedCkpt(pthLatest.name)
+  }, [pthLatest, selectedCkpt])
+
+  const canExport = !!pthLatest
+
+  function setPhase(fmt: ExportFormat, p: ExportPhase) {
+    setPhases(prev => ({ ...prev, [fmt]: p }))
+  }
+
+  // Programmatic download through the files proxy (the raw ShareSync URL needs a
+  // bearer the browser doesn't have; the proxy adds it server-side).
+  function triggerDownload(relPath: string) {
+    const a = document.createElement('a')
+    a.href = `/api/spark/jobs/${job.id}/files?path=${encodeURIComponent(relPath)}&download=1`
+    a.download = relPath.split('/').pop() ?? 'download'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  }
+
+  // Click handler for an export card: convert the *selected* .pth and (when the
+  // resulting file lands) download it automatically.
+  async function runExport(fmt: ExportFormat) {
+    const ckpt = selectedCkpt || pthLatest?.name
+    if (!ckpt) return
+    const subdir = fmt === 'nuke' ? 'nuke' : 'flame'
+    // Snapshot existing files for this format so we can spot the one the job
+    // writes (filenames embed epoch + timestamp, so a fresh convert is new).
+    const before = new Set((files ?? []).filter(f => f.name.startsWith(`exports/${subdir}/`)).map(f => f.name))
+
+    setPhase(fmt, { kind: 'submitting' })
+    try {
+      const res = await fetch(`/api/spark/jobs/${job.id}/export-onnx`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // force: convert exactly the picked checkpoint (don't hand back a
+        // newer cached export from a different epoch).
+        body:    JSON.stringify({ checkpointName: ckpt, format: fmt, force: true }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
+      if (data.fromCache && data.downloadPath) {
+        triggerDownload(data.downloadPath)
+        setPhase(fmt, { kind: 'done', file: data.exportName ?? data.downloadPath.split('/').pop() })
+        void refreshFiles()
+        return
+      }
+      setPhase(fmt, { kind: 'converting', jobId: data.jobId })
+      void pollForExport(fmt, data.jobId, subdir, before)
+    } catch (e) {
+      setPhase(fmt, { kind: 'error', msg: e instanceof Error ? e.message : 'export failed' })
+    }
+  }
+
+  async function refreshFiles(): Promise<FileEntry[]> {
+    try {
+      const res = await fetch(`/api/spark/jobs/${job.id}/files`, { cache: 'no-store' })
+      const data = await res.json()
+      if (res.ok) {
+        const entries = (data.entries ?? []) as FileEntry[]
+        setFiles(entries)
+        return entries
+      }
+    } catch { /* keep prior listing */ }
+    return files ?? []
+  }
+
+  // Poll the listing until the convert job's deliverable appears, then download
+  // it. The job emits both formats; we wait for the one this card asked for.
+  async function pollForExport(fmt: ExportFormat, jobId: string, subdir: string, before: Set<string>) {
+    const deadline = Date.now() + POLL_DEADLINE
+    const tick = async () => {
+      if (cancelledRef.current) return
+      const entries = await refreshFiles()
+      const fresh = entries.filter(f => f.name.startsWith(`exports/${subdir}/`) && !before.has(f.name))
+      const primary = fmt === 'nuke'
+        ? (fresh.find(f => f.name.endsWith('.cat')) ?? fresh.find(f => f.name.endsWith('.pt')))
+        :  fresh.find(f => f.name.endsWith('.onnx'))
+      if (primary) {
+        triggerDownload(primary.name)
+        setPhase(fmt, { kind: 'done', file: primary.name.split('/').pop() ?? primary.name })
+        return
+      }
+      if (Date.now() > deadline) { setPhase(fmt, { kind: 'timeout', jobId }); return }
+      setTimeout(() => { void tick() }, POLL_MS)
+    }
+    setTimeout(() => { void tick() }, POLL_MS)
+  }
 
   if (loading && !files) {
     return (
@@ -83,125 +225,32 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
     )
   }
 
-  // Classify. Exports land under exports/<flame|nuke>/… (the files route
-  // descends one level into them), so classify by that subfolder rather than
-  // the basename — and surface the most-recent when several epochs exist.
-  const flameOnnx = files.filter(f => /(^|\/)flame\//i.test(f.name) && f.name.endsWith('.onnx'))
-                         .sort(byModifiedDesc)[0] ?? null
-  // Nuke's deliverable is a trio — .cat (Cattery model) + .nk (node) + .pt
-  // (TorchScript) — NOT an .onnx. Group them and surface the .cat as primary.
-  const nukeFiles = files.filter(f => /(^|\/)nuke\//i.test(f.name) && /\.(cat|nk|pt)$/i.test(f.name))
-                         .sort(byModifiedDesc)
-  const nukePrimary = nukeFiles.find(f => f.name.endsWith('.cat')) ?? nukeFiles[0] ?? null
-  const allExports  = files.filter(f => f.name.startsWith('exports/')).sort(byModifiedDesc)
-  const pthLatest = files.find(f => /_latest\.pth$/.test(f.name))
-                ?? files.filter(f => f.name.endsWith('.pth')).sort(byModifiedDesc)[0]
-  const pthEpochs = files.filter(f => f.name.endsWith('.pth') && f.name !== pthLatest?.name)
-                         .sort(byModifiedDesc)
-  const previewJpgs = files.filter(f => /preview/i.test(f.name) && /\.jpe?g$/i.test(f.name))
-  const trainingLog = files.find(f => f.name === 'training.log')
-  const otherLogs   = files.filter(f => f.name.endsWith('.log') && f.name !== 'training.log')
-
-  // "Export now" handler — POSTs to /api/spark/jobs/:id/export-onnx.
-  // Two possible success shapes:
-  //   { fromCache: true,  downloadUrl, … }  → auto-export already produced
-  //     a fresh .onnx; we surface a direct download link, no new compute.
-  //   { fromCache: false, jobId, … }        → no fresh export available;
-  //     a tiny Spark job was spawned, link to its progress page.
-  async function handleExport() {
-    setExportState({ kind: 'submitting' })
-    try {
-      const res = await fetch(`/api/spark/jobs/${job.id}/export-onnx`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({}),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
-      if (data.fromCache) {
-        setExportState({
-          kind:        'ready',
-          downloadUrl: data.downloadUrl,
-          checkpoint:  data.checkpoint,
-          exportName:  data.exportName,
-        })
-      } else {
-        setExportState({
-          kind:       'submitted',
-          jobId:      data.jobId,
-          checkpoint: data.checkpoint,
-        })
-      }
-    } catch (e) {
-      setExportState({ kind: 'error', msg: e instanceof Error ? e.message : 'submit failed' })
-    }
-  }
-
-  // The export-onnx route needs a real .pth to read from ShareSync. Until
-  // the first epoch lands the button is dead weight, so disable it.
-  const canExport = !!pthLatest
+  const ckptLabel = (selectedCkpt || pthLatest?.name || '').split('/').pop() ?? ''
 
   return (
     <div className="bg-white border border-[#e5e7eb] rounded-lg p-4">
       <h3 className="text-sm font-semibold text-[#111827] mb-1">Downloads</h3>
       <p className="text-xs text-[#6b7280] mb-3">
-        Latest checkpoint and exports. <span className="font-semibold">Export now</span> grabs the
-        most recent auto-exported ONNX from training (instant download) — or if none exists yet, falls
-        back to a tiny CPU job (~2 min, ~$0.02) that converts on demand.
+        Latest checkpoint and on-demand exports. Pick a checkpoint, then{' '}
+        <span className="font-semibold">Export for Flame / AE</span> (ONNX) or{' '}
+        <span className="font-semibold">Nuke</span> (TorchScript) — a small CPU job converts it
+        (~2 min, ~$0.02) and the file downloads automatically when it&apos;s ready.
       </p>
 
-      {/* ── Export now action row ─────────────────────────────────────────── */}
-      <div className="flex items-center gap-2 mb-3 p-2 rounded-md bg-[#faf5ff] border border-[#e9d5ff]">
-        <button
-          onClick={handleExport}
-          disabled={
-            !canExport ||
-            exportState.kind === 'submitting' ||
-            exportState.kind === 'submitted' ||
-            exportState.kind === 'ready'
-          }
-          className={`text-xs font-semibold px-3 py-1.5 rounded-md transition-colors ${
-            !canExport || exportState.kind === 'submitting' || exportState.kind === 'submitted' || exportState.kind === 'ready'
-              ? 'bg-[#e5e7eb] text-[#9ca3af] cursor-not-allowed'
-              : 'bg-[#7E3AF2] text-white hover:bg-[#6D28D9] cursor-pointer'
-          }`}
-        >
-          {exportState.kind === 'submitting' ? 'Checking…' : 'Export now'}
-        </button>
-        <div className="text-xs text-[#6b7280] min-w-0 flex-1">
-          {exportState.kind === 'idle' && (canExport
-            ? <>Convert <span className="font-mono text-[#374151]">{pthLatest?.name}</span> → ONNX + TorchScript</>
-            : 'Waiting for the first checkpoint…')}
-          {exportState.kind === 'submitting' && 'Looking for a ready export…'}
-          {exportState.kind === 'ready' && (
-            <>
-              Ready from training:{' '}
-              <a
-                href={exportState.downloadUrl}
-                download={exportState.exportName}
-                className="text-[#7E3AF2] hover:underline font-semibold"
-              >
-                Download {exportState.exportName} ↓
-              </a>
-            </>
-          )}
-          {exportState.kind === 'submitted' && (
-            <>
-              No fresh auto-export — spawned a job from <span className="font-mono text-[#374151]">{exportState.checkpoint}</span>.{' '}
-              <a
-                href={`/demo/jobs/${exportState.jobId}`}
-                className="text-[#7E3AF2] hover:underline font-semibold"
-              >
-                View progress →
-              </a>{' '}
-              Files will appear here when it completes.
-            </>
-          )}
-          {exportState.kind === 'error' && (
-            <span className="text-[#EF4444]">Failed: {exportState.msg}</span>
-          )}
+      {/* ── Checkpoint picker (drives both export cards) ───────────────────── */}
+      {canExport && (
+        <div className="flex items-center gap-2 mb-3 p-2 rounded-md bg-[#faf5ff] border border-[#e9d5ff]">
+          <label className="text-xs font-semibold text-[#374151] whitespace-nowrap">Checkpoint to export</label>
+          <select
+            value={selectedCkpt}
+            onChange={e => setSelectedCkpt(e.target.value)}
+            className="flex-1 min-w-0 text-xs font-mono border border-[#e9d5ff] rounded px-2 py-1.5 bg-white focus:border-[#7E3AF2] focus:outline-none"
+          >
+            {pthLatest && <option value={pthLatest.name}>{pthLatest.name} (latest)</option>}
+            {pthEpochs.map(f => <option key={f.name} value={f.name}>{f.name}</option>)}
+          </select>
         </div>
-      </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         <DownloadCard
@@ -213,29 +262,37 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
         />
         <DownloadCard
           jobId={job.id}
-          file={flameOnnx}
-          title="Export for Flame / After Effects"
-          subtitle="No export yet — use Export now"
-        />
-        <DownloadCard
-          jobId={job.id}
-          file={nukePrimary}
-          title="Export for Nuke"
-          subtitle="No export yet — use Export now"
-          extraDownloadFiles={nukeFiles.filter(f => f !== nukePrimary)}
-        />
-        <DownloadCard
-          jobId={job.id}
           file={previewJpgs[0] ?? null}
           title="Preview images"
           subtitle={previewJpgs.length > 0 ? `${previewJpgs.length} files (download all from list below)` : 'Not generated yet'}
           extraDownloadFiles={previewJpgs.length > 1 ? previewJpgs.slice(1) : undefined}
         />
+        <ExportCard
+          title="Export for Flame / After Effects"
+          hint="ONNX (.onnx + .json)"
+          phase={phases.flame}
+          existing={flameOnnx}
+          canExport={canExport}
+          ckptLabel={ckptLabel}
+          jobsBase={jobsBase}
+          onExport={() => void runExport('flame')}
+          onDownloadExisting={flameOnnx ? () => triggerDownload(flameOnnx.name) : undefined}
+        />
+        <ExportCard
+          title="Export for Nuke"
+          hint="TorchScript (.cat + .nk + .pt)"
+          phase={phases.nuke}
+          existing={nukePrimary}
+          extraCount={Math.max(0, nukeFiles.length - 1)}
+          canExport={canExport}
+          ckptLabel={ckptLabel}
+          jobsBase={jobsBase}
+          onExport={() => void runExport('nuke')}
+          onDownloadExisting={nukePrimary ? () => triggerDownload(nukePrimary.name) : undefined}
+        />
       </div>
 
-      {/* Every file in the exports/ tree — Flame .onnx/.json, Nuke .cat/.nk/.pt,
-          across all exported epochs — each individually downloadable. The two
-          cards above are just quick links to the latest of each. */}
+      {/* Every file in the exports/ tree — each individually downloadable. */}
       {allExports.length > 0 && (
         <div className="mt-3">
           <p className="text-xs font-semibold text-[#374151] mb-1">All exports ({allExports.length})</p>
@@ -327,11 +384,7 @@ function DownloadCard({
       <div className={`w-9 h-9 rounded flex items-center justify-center flex-shrink-0 ${
         accent ? 'bg-[#7E3AF2] text-white' : 'bg-[#f3e8ff] text-[#7E3AF2]'
       }`}>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-          <polyline points="7 10 12 15 17 10" />
-          <line x1="12" x2="12" y1="15" y2="3" />
-        </svg>
+        <DownloadIcon />
       </div>
       <div className="min-w-0 flex-1">
         <div className="text-sm font-semibold text-[#111827]">{title}</div>
@@ -346,6 +399,75 @@ function DownloadCard({
   )
 }
 
+/**
+ * Action card for an on-demand export. The whole card is the convert button
+ * (mirrors the local Export tab); a secondary "download latest" link appears
+ * when an export already exists so you can grab it without re-converting.
+ */
+function ExportCard({
+  title, hint, phase, existing, extraCount, canExport, ckptLabel, jobsBase, onExport, onDownloadExisting,
+}: {
+  title: string
+  hint: string
+  phase: ExportPhase
+  existing: FileEntry | null
+  extraCount?: number
+  canExport: boolean
+  ckptLabel: string
+  jobsBase: string
+  onExport: () => void
+  onDownloadExisting?: () => void
+}) {
+  const busy = phase.kind === 'submitting' || phase.kind === 'converting'
+
+  return (
+    <div className={`flex items-center gap-3 p-3 rounded-md border transition-colors ${
+      busy ? 'border-[#e9d5ff] bg-[#faf5ff]' : 'border-[#e5e7eb]'
+    } ${!canExport ? 'opacity-50' : ''}`}>
+      <button
+        type="button"
+        onClick={onExport}
+        disabled={!canExport || busy}
+        className="flex items-center gap-3 min-w-0 flex-1 text-left disabled:cursor-not-allowed"
+      >
+        <div className="w-9 h-9 rounded flex items-center justify-center flex-shrink-0 bg-[#f3e8ff] text-[#7E3AF2]">
+          {busy
+            ? <span className="w-4 h-4 border-2 border-[#7E3AF2] border-t-transparent rounded-full animate-spin" />
+            : phase.kind === 'done'
+              ? <CheckIcon />
+              : <ConvertIcon />}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold text-[#111827]">{title}</div>
+          <div className="text-[11px] text-[#6b7280] truncate">
+            {phase.kind === 'idle' && (canExport
+              ? <>Convert <span className="font-mono">{ckptLabel}</span> → {hint}</>
+              : 'Waiting for the first checkpoint…')}
+            {phase.kind === 'submitting' && 'Starting export job…'}
+            {phase.kind === 'converting' && 'Converting on Spark… (~2 min) — downloads when ready'}
+            {phase.kind === 'done'    && <span className="text-[#16a34a]">Downloaded {phase.file} ✓ · click to re-export</span>}
+            {phase.kind === 'timeout' && 'Still running — see progress, then download from the list below'}
+            {phase.kind === 'error'   && <span className="text-[#EF4444]">{phase.msg}</span>}
+            {phase.kind === 'idle' && existing && <span className="text-[#9ca3af]"> · last: {existing.name.split('/').pop()}{extraCount ? ` (+${extraCount})` : ''}</span>}
+          </div>
+        </div>
+      </button>
+      <div className="flex flex-col items-end gap-1 flex-shrink-0">
+        {(phase.kind === 'converting' || phase.kind === 'timeout') && (
+          <Link href={`${jobsBase}/${phase.jobId}`} className="text-[10px] text-[#7E3AF2] hover:underline">
+            progress →
+          </Link>
+        )}
+        {existing && onDownloadExisting && !busy && (
+          <button type="button" onClick={onDownloadExisting} className="text-[10px] text-[#7E3AF2] hover:underline">
+            ↓ latest
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function DownloadLink({ jobId, file, label }: { jobId: string; file: FileEntry; label?: string }) {
   return (
     <a
@@ -354,6 +476,35 @@ function DownloadLink({ jobId, file, label }: { jobId: string; file: FileEntry; 
     >
       {label ?? 'Download'}
     </a>
+  )
+}
+
+function DownloadIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" x2="12" y1="15" y2="3" />
+    </svg>
+  )
+}
+
+function ConvertIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 2v6h-6" />
+      <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+      <path d="M3 22v-6h6" />
+      <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+    </svg>
+  )
+}
+
+function CheckIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
   )
 }
 
