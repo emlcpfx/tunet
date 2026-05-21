@@ -54,6 +54,14 @@ export function patchMaxAbsDiff(
  * x^(1/2.2). The skip metric is computed in 8-bit space so this lossy curve
  * is sufficient — true sRGB OETF would be more expensive without changing
  * which patches get filtered.
+ *
+ * Vertical flip: parse-exr (THREE.EXRLoader lineage) emits scanlines bottom-up
+ * because it targets WebGL textures, whose origin is bottom-left — it writes
+ * image row `y` to buffer row `height - 1 - y` regardless of the file's
+ * lineOrder (parse-exr/index.js:2108). We treat the buffer as a top-down image
+ * (row 0 = top), the same convention createImageBitmap gives us for JPEG/PNG,
+ * so we flip back here. Without this, EXR previews render upside-down while
+ * JPEGs look correct (and EXR↔JPEG pairs would mis-align in the diff metric).
  */
 export function exrFloatRgbaToRgb8(src: Float32Array, w: number, h: number): Uint8Array {
   if (src.length !== w * h * 4) {
@@ -61,10 +69,16 @@ export function exrFloatRgbaToRgb8(src: Float32Array, w: number, h: number): Uin
   }
   const out = new Uint8Array(w * h * 3)
   const invGamma = 1 / 2.2
-  for (let i = 0, j = 0; i < src.length; i += 4, j += 3) {
-    out[j]     = toByteGamma(src[i],     invGamma)
-    out[j + 1] = toByteGamma(src[i + 1], invGamma)
-    out[j + 2] = toByteGamma(src[i + 2], invGamma)
+  for (let y = 0; y < h; y++) {
+    let i = (h - 1 - y) * w * 4   // source row, bottom-up
+    let j = y * w * 3             // dest row, top-down
+    for (let x = 0; x < w; x++) {
+      out[j]     = toByteGamma(src[i],     invGamma)
+      out[j + 1] = toByteGamma(src[i + 1], invGamma)
+      out[j + 2] = toByteGamma(src[i + 2], invGamma)
+      i += 4
+      j += 3
+    }
   }
   return out
 }
