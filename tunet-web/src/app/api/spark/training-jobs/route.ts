@@ -23,9 +23,10 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import {
   submitJob, uploadInputTarball, GPU_TYPES, DEFAULT_IMAGE, type GpuKey,
-  writeDiscoveredFilesBase, getJob, fetchOutputFile, shareSyncBaseUrl,
+  writeDiscoveredFilesBase, getJob, fetchOutputFile, shareSyncBaseUrl, getToken,
 } from '@/lib/spark'
 import { packInputTarball } from '@/lib/spark-packer'
+import { putControlFile, outputDavUrl } from '@/lib/sharesync'
 import {
   PRESETS, buildConfig, type PresetKey, type AdvancedOverrides, type JobInputs,
 } from '@/lib/spark-presets'
@@ -378,6 +379,11 @@ export async function POST(req: Request) {
         send({ phase: 'submit', status: 'start' })
         const tSubmit = Date.now()
         const filesBase = process.env.SPARK_FILES_BASE_URL?.replace(/\/+$/, '')
+        // Live-export control channel: the running job polls _tunet_control/<key>
+        // for export requests and self-uploads results. Needs a bearer + its own
+        // output-subdir key in env. Only when ShareSync is configured.
+        const controlKey   = outputDir.split('/').filter(Boolean).pop() ?? safeName
+        const controlToken = filesBase ? await getToken() : ''
         const computeMode: ComputeMode = body.computeMode === 'smart' ? 'smart' : 'instant'
         const maxRetriesOnInterrupt = computeMode === 'smart'
           ? Math.max(0, Math.min(5, Math.floor(body.maxRetriesOnInterrupt ?? 2)))
@@ -407,7 +413,11 @@ export async function POST(req: Request) {
             ...(mode !== 'new' ? { TUNET_MODE: mode } : {}),
             ...(body.source?.jobId          ? { TUNET_SOURCE_JOB_ID:    body.source.jobId          } : {}),
             ...(body.source?.checkpointName ? { TUNET_SOURCE_CHECKPOINT: body.source.checkpointName } : {}),
-            ...(filesBase ? { TUNET_FILES_BASE: filesBase } : {}),
+            ...(filesBase ? {
+              TUNET_FILES_BASE:  filesBase,
+              TUNET_BEARER:      controlToken,
+              TUNET_CONTROL_KEY: controlKey,
+            } : {}),
             // Training alert prefs (read by api/cron/training-alerts).
             // Only include if email is set — empty email = opted out.
             ...(body.alerts?.email?.trim()
@@ -449,6 +459,16 @@ export async function POST(req: Request) {
             submitResp.output.shareSyncBaseUrl,
             submitResp.output.shareSyncPath ?? submitResp.outputShareSyncPath,
           )
+        }
+
+        // Tell the running job where to self-upload on-demand exports — it can't
+        // know its own Spark-assigned output path otherwise. Best-effort.
+        if (filesBase) {
+          const outputDav = outputDavUrl(submitResp.output?.shareSyncPath ?? submitResp.outputShareSyncPath)
+          if (outputDav) {
+            try { await putControlFile(controlKey, 'meta.json', { outputDav }) }
+            catch { /* non-fatal: export will still land in /output and sync at exit */ }
+          }
         }
 
         // ── Upload ──────────────────────────────────────────────────────

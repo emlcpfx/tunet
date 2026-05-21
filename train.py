@@ -1682,6 +1682,18 @@ def train(config):
                     _pending_ckpt_thread.join()
                 dist.barrier()  # All ranks wait for rank 0 to finish writing checkpoint
 
+            # --- On-demand export (live control channel) ---
+            # tunet-web can request an export from THIS running job (the model is
+            # already on the GPU). Poll once per epoch; export + self-upload
+            # inline if asked. No-op for local training (env unset).
+            if is_main_process() and epoch_end_now:
+                try:
+                    from exporters.export_control import maybe_handle_export_request
+                    _exp_res = current_training_res if config.training.progressive_resolution else config.data.resolution
+                    maybe_handle_export_request(model, config, ckpt_prefix, _exp_res, global_step // iter_epoch)
+                except Exception as e:
+                    logging.warning(f"[export-control] poll failed: {e}")
+
             # --- Auto Export ---
             if is_main_process() and epoch_end_now and config.auto_export.interval > 0:
                 # Ensure async checkpoint is written before we copy it for export
