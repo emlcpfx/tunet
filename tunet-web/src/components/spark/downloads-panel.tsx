@@ -32,19 +32,26 @@ type ExportFormat = 'flame' | 'nuke'
 type ExportPhase =
   | { kind: 'idle' }
   | { kind: 'submitting' }
-  | { kind: 'converting'; jobId: string }
+  | { kind: 'requested' }                  // running job is exporting inline on its training node
+  | { kind: 'converting'; jobId: string }  // spawned CPU job is converting
   | { kind: 'ready';      path: string }   // file is in ShareSync — show a Download link
-  | { kind: 'timeout';    jobId: string }
+  | { kind: 'timeout';    jobId?: string }
   | { kind: 'error';      msg: string }
 
-const POLL_MS       = 5_000
-const POLL_DEADLINE = 7 * 60_000   // give the ~2-3 min CPU job generous headroom
+const POLL_MS          = 5_000
+const POLL_DEADLINE    = 7 * 60_000    // spawned CPU job: ~2-3 min, give headroom
+const REQUEST_DEADLINE = 20 * 60_000   // inline export waits for the next epoch boundary
 
 export function DownloadsPanel({ job }: DownloadsPanelProps) {
   const pathname  = usePathname()
   // The panel renders on /demo/jobs/[id] (and /jobs/[id] if ever wired there);
   // link export-job progress to whichever surface we're on.
   const jobsBase  = pathname.startsWith('/demo/') ? '/demo/jobs' : '/jobs'
+
+  // A live job can export on its own training node (no new machine); a finished
+  // one can't (model unloaded), so it falls back to a spawned convert job.
+  const jobLive = !['succeeded', 'completed', 'failed', 'cancelled', 'stopped', 'error']
+    .includes(String(job.status ?? '').toLowerCase())
 
   const [files, setFiles]     = useState<FileEntry[] | null>(null)
   const [pending, setPending] = useState(false)
@@ -128,23 +135,50 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
     a.remove()
   }
 
-  // Click handler for an export card: convert the *selected* .pth and (when the
-  // resulting file lands) download it automatically.
+  // Click handler for an export card. Preferred path for a RUNNING job: ask its
+  // training node to export the current model inline (it already holds the
+  // weights — no new machine), then poll for the file and surface a download.
+  // Finished job: fall back to a spawned CPU job that loads the picked .pth.
   async function runExport(fmt: ExportFormat) {
-    const ckpt = selectedCkpt || pthLatest?.name
-    if (!ckpt) return
     const subdir = fmt === 'nuke' ? 'nuke' : 'flame'
-    // Snapshot existing files for this format so we can spot the one the job
-    // writes (filenames embed epoch + timestamp, so a fresh convert is new).
+    // Snapshot existing files for this format so we can spot the one the export
+    // writes (filenames embed epoch + timestamp, so a fresh export is new).
     const before = new Set((files ?? []).filter(f => f.name.startsWith(`exports/${subdir}/`)).map(f => f.name))
-
     setPhase(fmt, { kind: 'submitting' })
+
+    if (jobLive) {
+      try {
+        const res = await fetch(`/api/spark/jobs/${job.id}/request-export`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ flame: fmt === 'flame', nuke: fmt === 'nuke' }),
+        })
+        const data = await res.json()
+        if (res.ok) {
+          // The training loop picks up the request at its next epoch boundary
+          // and self-uploads the export. Poll the listing for it.
+          setPhase(fmt, { kind: 'requested' })
+          void pollForExport(fmt, null, subdir, before)
+          return
+        }
+        // notLive (409) means the job finished between render and click — drop
+        // to the spawn path. Anything else is a real error.
+        if (!(res.status === 409 && data.notLive)) {
+          throw new Error(data.error ?? `HTTP ${res.status}`)
+        }
+      } catch (e) {
+        setPhase(fmt, { kind: 'error', msg: e instanceof Error ? e.message : 'export request failed' })
+        return
+      }
+    }
+
+    // Spawn path: load the picked checkpoint on a fresh CPU job and convert it.
+    const ckpt = selectedCkpt || pthLatest?.name
+    if (!ckpt) { setPhase(fmt, { kind: 'error', msg: 'no checkpoint to export' }); return }
     try {
       const res = await fetch(`/api/spark/jobs/${job.id}/export-onnx`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        // force: convert exactly the picked checkpoint (don't hand back a
-        // newer cached export from a different epoch).
         body:    JSON.stringify({ checkpointName: ckpt, format: fmt, force: true }),
       })
       const data = await res.json()
@@ -177,8 +211,8 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
 
   // Poll the listing until the convert job's deliverable appears, then download
   // it. The job emits both formats; we wait for the one this card asked for.
-  async function pollForExport(fmt: ExportFormat, jobId: string, subdir: string, before: Set<string>) {
-    const deadline = Date.now() + POLL_DEADLINE
+  async function pollForExport(fmt: ExportFormat, jobId: string | null, subdir: string, before: Set<string>) {
+    const deadline = Date.now() + (jobId ? POLL_DEADLINE : REQUEST_DEADLINE)
     const tick = async () => {
       if (cancelledRef.current) return
       const entries = await refreshFiles()
@@ -194,7 +228,7 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
         setPhase(fmt, { kind: 'ready', path: primary.name })
         return
       }
-      if (Date.now() > deadline) { setPhase(fmt, { kind: 'timeout', jobId }); return }
+      if (Date.now() > deadline) { setPhase(fmt, { kind: 'timeout', jobId: jobId ?? undefined }); return }
       setTimeout(() => { void tick() }, POLL_MS)
     }
     setTimeout(() => { void tick() }, POLL_MS)
@@ -240,8 +274,17 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
         (~2-3 min, ~$0.02); when it&apos;s ready the card shows a <span className="font-semibold">Download</span> link.
       </p>
 
-      {/* ── Checkpoint picker (drives both export cards) ───────────────────── */}
-      {canExport && (
+      {/* ── Export source ──────────────────────────────────────────────────── */}
+      {/* Running job: export runs on its training node (current model, no new
+          machine), so the picker doesn't apply. Finished job: pick which saved
+          .pth a spawned convert job should load. */}
+      {canExport && jobLive && (
+        <div className="flex items-center gap-2 mb-3 p-2 rounded-md bg-[#faf5ff] border border-[#e9d5ff] text-xs text-[#6b7280]">
+          <span className="text-[#7E3AF2] font-semibold">●</span>
+          Running job — export runs on the training node (current model), no new machine.
+        </div>
+      )}
+      {canExport && !jobLive && (
         <div className="flex items-center gap-2 mb-3 p-2 rounded-md bg-[#faf5ff] border border-[#e9d5ff]">
           <label className="text-xs font-semibold text-[#374151] whitespace-nowrap">Checkpoint to export</label>
           <select
@@ -276,6 +319,7 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
           phase={phases.flame}
           existing={flameOnnx}
           canExport={canExport}
+          jobLive={jobLive}
           ckptLabel={ckptLabel}
           jobsBase={jobsBase}
           onExport={() => void runExport('flame')}
@@ -288,6 +332,7 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
           existing={nukePrimary}
           extraCount={Math.max(0, nukeFiles.length - 1)}
           canExport={canExport}
+          jobLive={jobLive}
           ckptLabel={ckptLabel}
           jobsBase={jobsBase}
           onExport={() => void runExport('nuke')}
@@ -408,7 +453,7 @@ function DownloadCard({
  * when an export already exists so you can grab it without re-converting.
  */
 function ExportCard({
-  title, hint, phase, existing, extraCount, canExport, ckptLabel, jobsBase, onExport, onDownload,
+  title, hint, phase, existing, extraCount, canExport, jobLive, ckptLabel, jobsBase, onExport, onDownload,
 }: {
   title: string
   hint: string
@@ -416,13 +461,19 @@ function ExportCard({
   existing: FileEntry | null
   extraCount?: number
   canExport: boolean
+  jobLive: boolean
   ckptLabel: string
   jobsBase: string
   onExport: () => void
   onDownload: (relPath: string) => void
 }) {
-  const busy  = phase.kind === 'submitting' || phase.kind === 'converting'
+  const busy  = phase.kind === 'submitting' || phase.kind === 'requested' || phase.kind === 'converting'
   const ready = phase.kind === 'ready'
+  // Only the spawned-job paths have a job to link to (inline export has none).
+  const progressJobId =
+    phase.kind === 'converting' ? phase.jobId
+    : phase.kind === 'timeout'  ? phase.jobId
+    : undefined
 
   return (
     <div className={`flex items-center gap-3 p-3 rounded-md border transition-colors ${
@@ -447,20 +498,23 @@ function ExportCard({
           <div className="text-sm font-semibold text-[#111827]">{title}</div>
           <div className="text-[11px] text-[#6b7280] truncate">
             {phase.kind === 'idle' && (canExport
-              ? <>Convert <span className="font-mono">{ckptLabel}</span> → {hint}</>
+              ? (jobLive
+                  ? <>Export current model on the training node → {hint}</>
+                  : <>Convert <span className="font-mono">{ckptLabel}</span> → {hint}</>)
               : 'Waiting for the first checkpoint…')}
-            {phase.kind === 'submitting' && 'Starting export job…'}
+            {phase.kind === 'submitting' && 'Requesting export…'}
+            {phase.kind === 'requested'  && 'Exporting on the training node — ready at the next epoch (usually ~1-2 min)…'}
             {phase.kind === 'converting' && 'Converting on Spark… (~2-3 min)'}
             {phase.kind === 'ready'    && <span className="text-[#16a34a]">Ready — download it →  ·  click to re-export</span>}
-            {phase.kind === 'timeout' && 'Still running — see progress, then download from the list below'}
+            {phase.kind === 'timeout' && 'Still working — appears here when it completes'}
             {phase.kind === 'error'   && <span className="text-[#EF4444]">{phase.msg}</span>}
             {phase.kind === 'idle' && existing && <span className="text-[#9ca3af]"> · last: {existing.name.split('/').pop()}{extraCount ? ` (+${extraCount})` : ''}</span>}
           </div>
         </div>
       </button>
       <div className="flex flex-col items-end gap-1 flex-shrink-0">
-        {(phase.kind === 'converting' || phase.kind === 'timeout') && (
-          <Link href={`${jobsBase}/${phase.jobId}`} className="text-[10px] text-[#7E3AF2] hover:underline">
+        {progressJobId && (
+          <Link href={`${jobsBase}/${progressJobId}`} className="text-[10px] text-[#7E3AF2] hover:underline">
             progress →
           </Link>
         )}
