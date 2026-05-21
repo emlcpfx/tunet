@@ -43,6 +43,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from urllib.parse import urljoin, urlparse, unquote, quote
 
@@ -81,7 +82,9 @@ GPU_TYPES = {
 }
 
 PRESETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "presets")
+LORAS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "loras")
 RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "comfy_run.py")
+DEFAULT_CATALOG = "ltx2.loras.json"
 
 # ── Auth (self-contained; same shape as spark_launch.py) ──────────────────────
 
@@ -335,7 +338,7 @@ def apply_set(workflow, node_id, dotted_path, value):
 
 
 def inspect(workflow_path):
-    with open(workflow_path) as f:
+    with open(workflow_path, encoding="utf-8") as f:
         wf = json.load(f)
     print(f"{workflow_path}: {len(wf)} nodes\n")
     for nid in sorted(wf, key=lambda x: (len(x), x)):
@@ -356,7 +359,7 @@ def load_preset(name):
         avail = [f[:-12] for f in os.listdir(PRESETS_DIR) if f.endswith(".preset.json")] \
             if os.path.isdir(PRESETS_DIR) else []
         sys.exit(f"ERROR: preset {name!r} not found. Available: {', '.join(avail) or '(none)'}")
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -386,6 +389,89 @@ def check_preset_finalized(preset):
             f"{', '.join(bad)}).\n       Edit the .preset.json with real node ids "
             f"(run --inspect on your exported workflow)."
         )
+
+
+def unfinalized_models(preset):
+    """Model entries whose URL is still a REPLACE_ placeholder (template preset)."""
+    return [m.get("dest", m.get("url", "?")) for m in preset.get("models", [])
+            if "REPLACE" in str(m.get("url", ""))]
+
+
+# ── LoRA catalog (Tier-1, stackable, drop-in) ─────────────────────────────────
+
+def load_catalog(name_or_path):
+    """Load a LoRA catalog by bare name (under loras/) or explicit path."""
+    path = name_or_path if os.path.isabs(name_or_path) or os.path.sep in name_or_path \
+        else os.path.join(LORAS_DIR, name_or_path)
+    if not os.path.isfile(path):
+        return {}
+    with open(path) as f:
+        return json.load(f).get("loras", {})
+
+
+def _parse_lora_arg(spec):
+    """'name', 'name:1.2', 'https://h/x.safetensors', 'https://h/x.safetensors:0.9'
+    -> (ref, strength_or_None). Splits a trailing :<float> off; URLs keep their
+    scheme colon because the right side of the split must parse as a number."""
+    ref, _, tail = spec.rpartition(":")
+    if ref and tail:
+        try:
+            return ref, float(tail)
+        except ValueError:
+            pass
+    return spec, None
+
+
+def _is_url(ref):
+    return ref.startswith("http://") or ref.startswith("https://")
+
+
+def resolve_loras(specs, catalog, preset_base):
+    """Turn --lora specs into [{name,url,file,strength,trigger,base,kind}].
+    A spec is a catalog name or a direct .safetensors URL, each with optional
+    :<strength>. Warns on base-model mismatch and a too-hot combined stack."""
+    resolved = []
+    for spec in specs:
+        ref, strength = _parse_lora_arg(spec)
+        if _is_url(ref):
+            file = unquote(urlparse(ref).path.split("/")[-1]) or "lora.safetensors"
+            entry = {"name": file, "url": ref, "file": file, "trigger": "",
+                     "base": None, "kind": "effect"}
+        else:
+            entry = catalog.get(ref)
+            if not entry:
+                avail = ", ".join(sorted(catalog)) or "(none)"
+                sys.exit(f"ERROR: LoRA {ref!r} not in catalog. Known: {avail}\n"
+                         f"       (or pass a direct .safetensors URL to --lora)")
+            entry = {"name": ref, **entry}
+        s = strength if strength is not None else entry.get("strength", 1.0)
+        resolved.append({
+            "name": entry["name"], "url": entry["url"], "file": entry["file"],
+            "strength": float(s), "trigger": entry.get("trigger") or "",
+            "base": entry.get("base"), "kind": entry.get("kind", "effect"),
+        })
+        if preset_base and entry.get("base") and entry["base"] != preset_base:
+            print(f"[comfy] WARN: LoRA {entry['name']!r} targets base {entry['base']!r} "
+                  f"but this preset's model is {preset_base!r} — it may not apply cleanly.")
+    total = sum(l["strength"] for l in resolved)
+    if total > 2.0:
+        print(f"[comfy] WARN: combined LoRA strength is {total:.1f} (LTX docs suggest "
+              f"keeping a stack under ~2.0); outputs may be over-cooked.")
+    return resolved
+
+
+def print_catalog(catalog):
+    if not catalog:
+        print("(catalog empty — pass a direct .safetensors URL to --lora instead)")
+        return
+    print(f"{len(catalog)} LoRA(s) in catalog:\n")
+    for name in sorted(catalog):
+        e = catalog[name]
+        trig = f"  trigger={e['trigger']!r}" if e.get("trigger") else ""
+        print(f"  {name:<14} [{e.get('kind','effect')}/{e.get('task','any')}] "
+              f"base={e.get('base','?')}  str~{e.get('strength', 1.0)}{trig}")
+        if e.get("note"):
+            print(f"                 {e['note']}")
 
 
 # ── Tarball builder ───────────────────────────────────────────────────────────
@@ -430,9 +516,19 @@ def main():
     # preset-friendly flags
     ap.add_argument("--prompt", help="(preset) positive prompt")
     ap.add_argument("--negative", help="(preset) negative prompt")
-    ap.add_argument("--lora", help="(preset) direct .safetensors URL for the LoRA (overrides preset default)")
-    ap.add_argument("--lora-name", help="(preset) filename to save the LoRA as")
-    ap.add_argument("--strength", type=float, help="(preset) LoRA strength")
+    ap.add_argument("--mask", help="(preset) mask file: a static image (.png/.jpg) OR a "
+                    "per-frame mask video (.mp4/.mov/...). A video auto-selects the preset's "
+                    "mask-video workflow. White = region to inpaint/remove")
+    ap.add_argument("--lora", action="append", default=[], metavar="NAME[:STR]",
+                    help="stack a Tier-1 LoRA: a catalog name or a direct .safetensors URL, "
+                         "with optional :<strength> (e.g. --lora transition:1.2). Repeatable.")
+    ap.add_argument("--no-triggers", action="store_true",
+                    help="don't auto-append catalog LoRA trigger words to the prompt")
+    ap.add_argument("--catalog", help="LoRA catalog file (name under loras/ or path; "
+                    "default per-preset or ltx2.loras.json)")
+    ap.add_argument("--lora-url", help="(preset) direct .safetensors URL for the built-in LoRA (overrides preset default)")
+    ap.add_argument("--lora-name", help="(preset) filename to save the built-in LoRA as")
+    ap.add_argument("--strength", type=float, help="(preset) built-in LoRA strength")
     ap.add_argument("--fps", type=int, help="(preset) output frame rate")
     # compute
     ap.add_argument("--image", help="ComfyUI Docker image (required unless preset supplies one)")
@@ -453,6 +549,7 @@ def main():
     # housekeeping
     ap.add_argument("--inspect", metavar="WORKFLOW", help="print node ids/types of a workflow and exit")
     ap.add_argument("--list-skus", action="store_true")
+    ap.add_argument("--list-loras", action="store_true", help="print the LoRA catalog and exit")
     ap.add_argument("--list-jobs", action="store_true")
     ap.add_argument("--logs", metavar="JOB_ID")
     ap.add_argument("--cancel", metavar="JOB_ID")
@@ -476,9 +573,26 @@ def main():
         return
     if args.logs:
         return stream_logs(args.logs)
+    if args.list_loras:
+        pre = load_preset(args.preset) if args.preset else {}
+        cat_name = args.catalog or pre.get("lora_catalog") or DEFAULT_CATALOG
+        print_catalog(load_catalog(cat_name))
+        return
 
     # ── resolve config from preset (if any) ───────────────────────────────────
     preset = load_preset(args.preset) if args.preset else {}
+
+    # A mask can be a static image or a per-frame mask video. A video extension
+    # switches to the preset's mask-video workflow and remaps the mask param onto
+    # that graph's video-loader input (mask_video_param).
+    VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".gif"}
+    mask_is_video = bool(args.mask) and os.path.splitext(args.mask)[1].lower() in VIDEO_EXTS
+    if args.preset and mask_is_video and preset.get("workflow_mask_video"):
+        preset = {**preset, "workflow": preset["workflow_mask_video"]}
+        if preset.get("mask_video_param"):
+            preset = {**preset, "params": {**preset.get("params", {}),
+                                           "mask": preset["mask_video_param"]}}
+
     image = args.image or preset.get("image")
     gpu = args.gpu or preset.get("gpu", "rtxpro6000")
     mode = args.mode or preset.get("mode", "instant")
@@ -493,25 +607,51 @@ def main():
         if not args.workflow:
             sys.exit("ERROR: pass --workflow <api.json> (generic) or --preset <name>")
         wf_path = args.workflow
-    with open(wf_path) as f:
+    with open(wf_path, encoding="utf-8") as f:
         workflow = json.load(f)
 
-    lora_url = args.lora or preset.get("lora_default")
+    lora_url = args.lora_url or preset.get("lora_default")
     lora_name = args.lora_name or preset.get("lora_name", "lora.safetensors")
     is_ui = isinstance(workflow, dict) and isinstance(workflow.get("nodes"), list)
+
+    # ── resolve the stackable Tier-1 LoRA stack (catalog or raw URLs) ─────────
+    # Each --lora adds a LoraLoaderModelOnly to a chain spliced in on Spark at the
+    # preset's lora_chain anchor. Catalog trigger words are folded into the prompt.
+    cat_name = args.catalog or preset.get("lora_catalog") or DEFAULT_CATALOG
+    catalog = load_catalog(cat_name)
+    lora_stack = resolve_loras(args.lora, catalog, preset.get("base")) if args.lora else []
+    if lora_stack and not preset.get("lora_chain"):
+        sys.exit("ERROR: --lora stacking needs the preset to declare a 'lora_chain' "
+                 "anchor (the node whose MODEL output the stack extends). This preset has none.")
+    triggers = [l["trigger"] for l in lora_stack if l["trigger"]]
+    effective_prompt = args.prompt
+    if triggers and not args.no_triggers:
+        base_prompt = args.prompt if args.prompt is not None \
+            else (preset.get("params", {}).get("prompt") or {}).get("default")
+        suffix = ", ".join(triggers)
+        effective_prompt = f"{base_prompt.rstrip().rstrip(',')}, {suffix}" if base_prompt else suffix
+        print(f"[comfy] auto-appended LoRA trigger(s) to prompt: {suffix}  (--no-triggers to disable)")
 
     # Collect patch ops (node, path, value) from the preset map + --set.
     patch_ops = []
     if args.preset:
-        if not args.video and not args.convert_only:
+        if preset.get("requires_input", True) and not args.video and not args.convert_only:
             sys.exit("ERROR: preset mode needs a primary input file, e.g. "
                      "`... --preset cleanplate_ltx clip.mp4` (or --convert-only)")
         if args.video:
             input_files.insert(0, args.video)
+        if args.mask:
+            input_files.append(args.mask)
+        # Presets that declare a `mask` param (e.g. VACE inpainting) need one to
+        # render — fail early with the static-vs-video hint rather than at execution.
+        if "mask" in preset.get("params", {}) and not args.mask and not args.convert_only:
+            sys.exit("ERROR: this preset needs a mask: pass --mask mask.png (one static "
+                     "region) or --mask mask.mp4 (per-frame mask video). White = inpaint area.")
         flag_values = {
-            "prompt": args.prompt, "negative": args.negative,
+            "prompt": effective_prompt, "negative": args.negative,
             "strength": args.strength, "fps": args.fps, "lora": lora_name,
             "video": os.path.basename(args.video) if args.video else None,
+            "mask": os.path.basename(args.mask) if args.mask else None,
         }
         for pname, spec in preset.get("params", {}).items():
             val = flag_values.get(pname)
@@ -547,12 +687,26 @@ def main():
         if str(image).startswith("REPLACE"):
             sys.exit("ERROR: preset 'image' is still a placeholder. Set it to your built "
                      "ComfyUI image in the .preset.json, or pass --image.")
+        # Convert-only doesn't fetch weights, so placeholder URLs are fine there
+        # (that's exactly the cheap path to validate a template's converted graph).
+        unset = unfinalized_models(preset)
+        if unset and not args.convert_only:
+            sys.exit(
+                "ERROR: preset has placeholder model URLs (still a template) for:\n        "
+                + "\n        ".join(unset)
+                + "\n       Fill in the real .safetensors download URLs in the .preset.json "
+                  "'models' list, then run --convert-only once to validate the converted graph.")
 
     job_name = args.name or (f"comfy-{args.preset}" if args.preset else "comfy-job")
 
     env_vars = {
         "COMFY_WORKFLOW": "/input/workflow.json",
         "COMFY_READY_TIMEOUT": str(args.ready_timeout),
+        # The Spark agent doesn't sync /output to ShareSync — so comfy_run uploads
+        # its own outputs via WebDAV. It finds its own job by this run-id marker
+        # and authenticates with this (long-lived) token.
+        "COMFY_RUN_ID": uuid.uuid4().hex,
+        "COMFY_UPLOAD_TOKEN": get_token(),
     }
     if patches_to_pack:
         env_vars["COMFY_PATCHES"] = "/input/patches.json"
@@ -561,6 +715,10 @@ def main():
     if lora_url:
         env_vars["COMFY_LORA_URL"] = lora_url
         env_vars["COMFY_LORA_NAME"] = lora_name
+    if lora_stack:
+        env_vars["COMFY_LORAS"] = json.dumps(
+            [{"url": l["url"], "file": l["file"], "strength": l["strength"]} for l in lora_stack])
+        env_vars["COMFY_LORA_CHAIN"] = json.dumps(preset["lora_chain"])
     if preset.get("extra_args"):
         env_vars["COMFY_EXTRA_ARGS"] = preset["extra_args"]
     # No-build path: tell comfy_run.py where ComfyUI lives in the base image and
@@ -582,6 +740,11 @@ def main():
     print(f"        tags      : {BILLING_TAG}, {GROUP_TAG}{''.join(', ' + t for t in args.tag)}")
     print(f"        inputs    : {[os.path.basename(p) for p in input_files] or '(none)'}")
     print(f"        format    : {'UI graph → converts on Spark' if is_ui else 'API (patched locally)'}")
+    if lora_stack:
+        anchor = preset["lora_chain"].get("anchor")
+        print(f"        lora stack: spliced on node {anchor} (MODEL) —")
+        for l in lora_stack:
+            print(f"          + {l['name']} @ {l['strength']}  ({l['file']})")
     if args.convert_only:
         print(f"        convert   : emit converted api.json to ShareSync, no render")
     print(f"        env       : {json.dumps(env_vars)}")

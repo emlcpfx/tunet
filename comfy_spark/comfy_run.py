@@ -29,8 +29,12 @@ Environment (set by comfy_launch.py):
     COMFY_PORT          port ComfyUI binds               (default 8188)
     COMFY_INPUT_DIR     ComfyUI input dir                (default /input)
     COMFY_OUTPUT_DIR    ComfyUI output dir               (default /output)
-    COMFY_LORA_URL      optional direct .safetensors URL to fetch
+    COMFY_LORA_URL      optional direct .safetensors URL to fetch (preset built-in)
     COMFY_LORA_NAME     filename to save the LoRA as     (default lora.safetensors)
+    COMFY_LORAS         JSON list of stackable Tier-1 LoRAs: [{"url","file","strength"}].
+                        Each is downloaded into models/loras and chained on Spark.
+    COMFY_LORA_CHAIN    JSON {"anchor": <node id>, "slot": <out idx, default 0>} —
+                        the MODEL output the LoRA stack is spliced onto.
     COMFY_EXTRA_ARGS    extra args appended to main.py
     COMFY_READY_TIMEOUT seconds to wait for startup      (default 300)
     COMFY_CONVERT_ONLY  "1" = convert + emit api.json, don't render
@@ -58,6 +62,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HOST = "127.0.0.1"
@@ -321,6 +326,55 @@ def apply_patch(workflow, node_id, dotted_path, value):
     cur[parts[-1]] = value
 
 
+# ── LoRA chain injection (Tier-1 stacking) ───────────────────────────────────
+
+def inject_lora_chain(workflow, loras, chain):
+    """Splice a series of LoraLoaderModelOnly nodes onto a node's MODEL output.
+
+    `chain` = {"anchor": <node id>, "slot": <output index, default 0>}. We build
+    anchor -> lora1 -> lora2 -> ... -> loraN, then repoint every OTHER consumer of
+    (anchor, slot) to loraN's output. That fan-out handling is why a node feeding
+    two guiders (the generate graph) and one feeding a single guider (cleanplate)
+    both work: all downstream consumers end up reading through the full stack."""
+    if not loras:
+        return workflow
+    anchor = str(chain.get("anchor"))
+    slot = int(chain.get("slot", 0))
+    if anchor not in workflow:
+        log(f"WARNING: lora_chain anchor {anchor} not in graph — skipping LoRA stack.")
+        return workflow
+
+    src = [anchor, slot]
+    new_ids = []
+    for i, lora in enumerate(loras):
+        nid = f"lorastk_{i}"
+        workflow[nid] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {
+                "model": list(src),
+                "lora_name": lora["file"],
+                "strength_model": float(lora.get("strength", 1.0)),
+            },
+        }
+        new_ids.append(nid)
+        src = [nid, 0]
+    tail = src  # [last new id, 0]
+
+    # Repoint existing consumers of (anchor, slot) to the chain tail. Skip the
+    # nodes we just added (the head must keep reading from the real anchor).
+    rewired = 0
+    for nid, node in workflow.items():
+        if nid in new_ids:
+            continue
+        for k, v in (node.get("inputs") or {}).items():
+            if isinstance(v, list) and len(v) == 2 and str(v[0]) == anchor and int(v[1]) == slot:
+                node["inputs"][k] = list(tail)
+                rewired += 1
+    log(f"Injected {len(loras)}-LoRA stack on node {anchor} (MODEL) -> rewired {rewired} consumer(s): "
+        + ", ".join(f"{l['file']}@{l.get('strength', 1.0)}" for l in loras))
+    return workflow
+
+
 # ── prompt lifecycle ──────────────────────────────────────────────────────────
 
 # Model-name COMBO inputs whose "value not in list" errors are expected on
@@ -492,6 +546,79 @@ def _report_outputs(outputs):
     log(f"{n} output file(s) in {env('COMFY_OUTPUT_DIR', '/output')}")
 
 
+# ── self-upload outputs to ShareSync (the Spark agent doesn't sync /output) ───
+
+def _api_get(url, token):
+    req = urllib.request.Request(url)
+    req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode())
+
+
+def _webdav(method, url, token, data=None):
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    return urllib.request.urlopen(req, timeout=900)
+
+
+def upload_outputs(output_dir):
+    """The Spark agent (v1.177) doesn't ship /output to ShareSync — only its log
+    archive. So upload our own outputs there via WebDAV PUT, into the job's own
+    output folder (the same place --download and the web UI read). We find that
+    folder by looking up our own job via the COMFY_RUN_ID marker. Best-effort:
+    logs failures, never raises."""
+    token, run_id = env("COMFY_UPLOAD_TOKEN"), env("COMFY_RUN_ID")
+    api = env("COMFY_SPARK_API", "https://api.prod.aapse1.sparkcloud.studio")
+    if not token or not run_id:
+        return
+    base = None
+    try:
+        jobs = _api_get(f"{api}/api/compute/jobs?tag=cpfx_comfy", token).get("jobs", [])
+        for j in jobs:
+            jid = j.get("id")
+            if not jid:
+                continue
+            if (j.get("env") or {}).get("COMFY_RUN_ID") != run_id \
+                    and j.get("status") not in ("running", "provisioning"):
+                continue
+            d = _api_get(f"{api}/api/compute/jobs/{jid}", token)
+            if (d.get("env") or {}).get("COMFY_RUN_ID") == run_id:
+                base = (d.get("output") or {}).get("shareSyncBaseUrl")
+                break
+    except Exception as e:  # noqa: BLE001
+        log(f"self-upload: couldn't resolve output URL ({e})")
+        return
+    if not base:
+        log("self-upload: own job/output URL not found; skipping")
+        return
+    base = base.rstrip("/")
+    try:                                         # agent creates the folder only at
+        _webdav("MKCOL", base + "/", token)      # job end, so make it ourselves now
+    except Exception:  # noqa: BLE001
+        pass
+    n = 0
+    for root, _, files in os.walk(output_dir):
+        for fn in files:
+            p = os.path.join(root, fn)
+            rel = os.path.relpath(p, output_dir).replace(os.sep, "/")
+            segs = [urllib.parse.quote(s) for s in rel.split("/")]
+            acc = base                            # MKCOL any intermediate dirs
+            for seg in segs[:-1]:
+                acc += "/" + seg
+                try:
+                    _webdav("MKCOL", acc + "/", token)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                with open(p, "rb") as f:
+                    _webdav("PUT", base + "/" + "/".join(segs), token, data=f.read())
+                log(f"  uploaded {rel} ({os.path.getsize(p) / 1048576:.1f} MB)")
+                n += 1
+            except Exception as e:  # noqa: BLE001
+                log(f"  upload FAILED {rel}: {e}")
+    log(f"self-uploaded {n} output file(s) to ShareSync")
+
+
 def main():
     comfy_home = env("COMFY_HOME", "/ComfyUI")
     workflow_path = env("COMFY_WORKFLOW", "/input/workflow.json")
@@ -522,6 +649,12 @@ def main():
             if lora_url:
                 download(lora_url, os.path.join(comfy_home, "models", "loras",
                                                 env("COMFY_LORA_NAME", "lora.safetensors")), "LoRA")
+            for lora in json.loads(env("COMFY_LORAS", "[]")):
+                dest = os.path.join(comfy_home, "models", "loras", lora["file"])
+                if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+                    log(f"LoRA present: {lora['file']}")
+                    continue
+                download(lora["url"], dest, f"LoRA {lora['file']}")
     except Exception as e:  # noqa: BLE001 — fail the job loudly
         sys.exit(f"ERROR: environment assembly failed: {e}")
 
@@ -557,6 +690,15 @@ def main():
                 apply_patch(workflow, op["node"], op["path"], op["value"])
             log(f"Applied {len(patches)} patch(es).")
 
+        # 5b. Splice the stackable Tier-1 LoRA chain onto the model path -------
+        lora_stack = json.loads(env("COMFY_LORAS", "[]"))
+        lora_chain = json.loads(env("COMFY_LORA_CHAIN", "null"))
+        if lora_stack and lora_chain:
+            workflow = inject_lora_chain(workflow, lora_stack, lora_chain)
+            # Re-emit so the saved/reusable api graph reflects the spliced stack.
+            with open(os.path.join(output_dir, "workflow_api.json"), "w") as f:
+                json.dump(workflow, f, indent=2)
+
         if convert_only:
             # Belt-and-suspenders: also emit the graph into the job log (which
             # uploads reliably even when the /output sync drops the file),
@@ -568,6 +710,7 @@ def main():
             print("===WF_API_B64_END===", flush=True)
             log("COMFY_CONVERT_ONLY set — emitted graph (to /output and log), skipping render.")
             validate_graph(port, workflow)
+            upload_outputs(output_dir)
             hold_for_sync()
             return 0
 
@@ -583,6 +726,7 @@ def main():
         ok = wait_for_completion(port, prompt_id)
         exit_code = 0 if ok else 1
         log("Done." if ok else "Failed.")
+        upload_outputs(output_dir)
         hold_for_sync()
     finally:
         if proc.poll() is None:
