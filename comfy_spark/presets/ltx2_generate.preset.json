@@ -42,7 +42,16 @@
       "label": "Init image (i2v)",
       "tooltip": "Starting frame for image-to-video. Add catalog effect LoRAs with the LoRA picker below.",
       "filetypes": [["Image", "*.png *.jpg *.jpeg *.webp"], ["All files", "*.*"]]
-    }
+    },
+    "resolutions": [
+      { "label": "1280x720 (16:9 HD)",   "width": 1280, "height": 720 },
+      { "label": "1920x1080 (16:9 FHD)", "width": 1920, "height": 1080 },
+      { "label": "960x544 (16:9)",       "width": 960,  "height": 544 },
+      { "label": "3840x2160 (16:9 4K)",  "width": 3840, "height": 2160 },
+      { "label": "720x1280 (9:16 HD)",   "width": 720,  "height": 1280 },
+      { "label": "1080x1920 (9:16 FHD)", "width": 1080, "height": 1920 },
+      { "label": "2160x3840 (9:16 4K)",  "width": 2160, "height": 3840 }
+    ]
   },
 
   "params": {
@@ -55,14 +64,17 @@
       "ui": { "label": "Negative prompt", "widget": "multiline", "section": "Main", "order": 2,
               "tooltip": "Lightricks' shipped LTX-2 negative (from their official example workflow). The prompt guide also says to AVOID putting readable text/logos, emotional labels, and complex physics in the positive prompt." } },
     "width":    { "node": "3059", "path": "inputs.width", "default": 960,
-      "ui": { "label": "Width", "widget": "number", "min": 256, "max": 2048, "step": 32,
-              "section": "Advanced", "order": 1, "tooltip": "Output width in px (graph 960)." } },
+      "ui": { "label": "Width", "widget": "number", "min": 256, "max": 3840, "step": 32,
+              "section": "Advanced", "order": 1,
+              "tooltip": "LTX-2.3 goes up to 4K / UHD (3840x2160); pick from the Resolution dropdown above for known-good sizes (custom values safest divisible by 32). Native portrait is 1080x1920. 720p-1080p is the sweet spot on a single GPU; 4K is heavy and only for clips <=10s. (src: LTX-2.3 docs)" } },
     "height":   { "node": "3059", "path": "inputs.height", "default": 544,
-      "ui": { "label": "Height", "widget": "number", "min": 256, "max": 2048, "step": 32,
-              "section": "Advanced", "order": 2, "tooltip": "Output height in px (graph 544)." } },
+      "ui": { "label": "Height", "widget": "number", "min": 256, "max": 3840, "step": 32,
+              "section": "Advanced", "order": 2,
+              "tooltip": "LTX-2.3 up to 4K / UHD; pick from the Resolution dropdown above for known-good sizes (custom values safest divisible by 32). For 9:16 use e.g. 1080x1920 (the model composes natively for vertical). (src: LTX-2.3 docs)" } },
     "length":   { "node": "3059", "path": "inputs.length", "default": 121,
-      "ui": { "label": "Frames (length)", "widget": "number", "min": 9, "max": 257, "step": 8,
-              "section": "Advanced", "order": 3, "tooltip": "Number of frames (graph 121)." } },
+      "ui": { "label": "Frames (length)", "widget": "number", "min": 9, "max": 497, "step": 8,
+              "section": "Advanced", "order": 3,
+              "tooltip": "Frame count; LTX REQUIRES 8*n+1 (..., 121, 161). Output container runs ~30fps here, so 121 frames ~= 4s. LTX-2.3 max ~10s @50fps (4K) or ~20s @25fps (1080p). (src: LTX-2.3 docs)" } },
     "video":    { "node": "2004", "path": "inputs.image" }
   }
 }

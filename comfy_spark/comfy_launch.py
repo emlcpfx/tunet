@@ -42,6 +42,7 @@ import os
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -114,10 +115,28 @@ def get_token():
     if _token and _token_expires_at > time.time() * 1000 + 60_000:
         return _token
     email, pw = _creds()
-    r = requests.post(f"{SPARK_API}/auth/login", json={"email": email, "password": pw}, timeout=15)
+    # NOTE: the live API serves auth at /auth/login (returns HTTP 201) — NOT the
+    # /api/auth/login that Spark Fuse API v1.18 §1.1 documents (that 404s). Doc
+    # bug, verified 2026-05-21. The success/resp handling below DOES follow §1.1:
+    # a failed login still returns 2xx with success=false / token=null, so branch
+    # on `success` and surface `resp` rather than trusting the status code alone.
+    r = None
+    for _attempt in range(4):                      # retry transient network blips
+        try:
+            r = requests.post(f"{SPARK_API}/auth/login",
+                              json={"email": email, "password": pw}, timeout=30)
+            break
+        except requests.exceptions.RequestException as e:
+            if _attempt == 3:
+                sys.exit(f"ERROR: can't reach Spark auth at {SPARK_API} after 4 tries "
+                         f"({e.__class__.__name__}). Network/VPN issue or API down — try again.")
+            time.sleep(2 * (_attempt + 1))
     if not r.ok:
         sys.exit(f"ERROR: Spark auth failed (HTTP {r.status_code}): {r.text[:200]}")
-    tok = r.json().get("token") or r.json().get("access_token")
+    data = r.json()
+    if not data.get("success", True):
+        sys.exit(f"ERROR: Spark auth failed: {data.get('resp', 'login unsuccessful')}")
+    tok = data.get("token") or data.get("access_token")
     if not tok:
         sys.exit("ERROR: Spark auth: no token in response")
     _token, _token_expires_at = tok, _jwt_expiry(tok)
@@ -157,8 +176,11 @@ def get_job(job_id):
     return spark("GET", f"/api/compute/jobs/{job_id}").json()
 
 
+# Terminal job states (Spark Fuse API v1.18 §11.1). `smartcompute-interrupted`
+# is the current name for a preempted smart-mode job; the old `spot-interrupted`
+# spelling is gone. `completed` isn't in the spec but is kept as a harmless alias.
 TERMINAL_STATUSES = {"succeeded", "completed", "failed", "cancelled",
-                     "spot-interrupted", "spot_interrupted"}
+                     "smartcompute-interrupted"}
 
 
 def wait_for_terminal(job_id, poll=5):
@@ -224,9 +246,14 @@ def _encode_path(p):
 
 
 def resolve_output_url(resp, job_id, upload_url):
-    """Best-effort full WebDAV URL for a job's output folder. Prefer the submit
-    response; fall back to the job detail's output_share_sync_path rebuilt onto
-    the space root from the input upload URL."""
+    """Full WebDAV URL for a job's output folder. Prefer the *job detail's*
+    shareSyncBaseUrl — it's the form that actually PROPFINDs (literal `$` in the
+    space id). The submit-response value can encode the `$` as %24 and resolve to
+    an empty/wrong path, which silently downloads 0 files. Fall back to the submit
+    response, then to rebuilding from output_share_sync_path + the space root."""
+    out_url = ((get_job(job_id) or {}).get("output") or {}).get("shareSyncBaseUrl")
+    if out_url:
+        return out_url
     out_url = (resp.get("output") or {}).get("shareSyncBaseUrl")
     if out_url:
         return out_url
@@ -783,28 +810,39 @@ def main():
         print(f"[comfy] Job submitted: {job_id}")
         if out_url:
             print(f"[comfy] Output folder (ShareSync): {out_url}")
-        if not args.no_tail:
-            stream_logs(job_id)
+        # Stream the live log. With --download, run the tail in a DAEMON THREAD
+        # and gate the download on job-status polling below — the SSE tail can
+        # hang (the stream doesn't always close when the job ends), which would
+        # otherwise block the download from ever running.
+        if args.download and not args.no_tail:
+            threading.Thread(target=stream_logs, args=(job_id,), daemon=True).start()
+        elif not args.no_tail:
+            stream_logs(job_id)            # plain blocking tail (no download to gate)
         elif not args.download:
             print(f"\nWatch:  python comfy_spark/comfy_launch.py --logs {job_id}")
             print(f"Cancel: python comfy_spark/comfy_launch.py --cancel {job_id}")
         if args.download:
-            # Create the target dir up front so it always exists.
-            os.makedirs(args.download, exist_ok=True)
+            # Per-job subfolder so renders don't overwrite each other (every job
+            # writes LTX2.3_00001.*). Name: <MMDDYY_MMSS>_<input basename>.
+            stamp = time.strftime("%m%d%y_%M%S")
+            base_in = os.path.splitext(os.path.basename(input_files[0]))[0] if input_files else job_name
+            safe = "".join(c if (c.isalnum() or c in "._-") else "_" for c in base_in)[:40] or "job"
+            dest = os.path.join(args.download, f"{stamp}_{safe}")
+            os.makedirs(dest, exist_ok=True)
             # Always confirm the job is really done before harvesting (a tail
             # may have been detached with Ctrl+C, or --no-tail was used).
             print("[download] waiting for the job to finish...")
             status = wait_for_terminal(job_id)
             dl_url = resolve_output_url(resp, job_id, upload_url)
-            print(f"[download] job {status}; pulling outputs -> {os.path.abspath(args.download)}")
+            print(f"[download] job {status}; pulling outputs -> {os.path.abspath(dest)}")
             if not dl_url:
                 print("[download] could not resolve the output URL.")
                 print(f"[download] submit 'output' block was: {resp.get('output')}")
                 print("[download] grab the file from the ShareSync web UI instead.")
             else:
                 print(f"[download] source: {dl_url}")
-                count = download_outputs(dl_url, args.download)
-                print(f"[download] {count} file(s) -> {os.path.abspath(args.download)}")
+                count = download_outputs(dl_url, dest)
+                print(f"[download] {count} file(s) -> {os.path.abspath(dest)}")
     finally:
         try:
             os.unlink(tar_path)

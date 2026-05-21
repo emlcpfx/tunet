@@ -42,7 +42,7 @@
     "title": "LTX-2.3 HDR — convert an SDR clip to an HDR look (IC-LoRA)",
     "primary_input": {
       "label": "Input video (SDR)",
-      "tooltip": "The clip to re-grade. The HDR IC-LoRA enhances dynamic range / color from the surrounding video.",
+      "tooltip": "The clip to re-grade; output resolution + fps follow the INPUT (v2v). LTX-2.3 supports up to 4K/UHD @ up to 50fps for clips <=10s (10-20s caps at 25fps/1080p); dims should be divisible by 32. The HDR IC-LoRA enhances dynamic range / color from the surrounding video.",
       "filetypes": [["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]
     }
   },

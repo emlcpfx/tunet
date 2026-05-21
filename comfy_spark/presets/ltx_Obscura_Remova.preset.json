@@ -51,7 +51,14 @@
       "label": "Input video",
       "tooltip": "The clip to clean up. Obscura regenerates occluded/foreground regions from the surrounding video.",
       "filetypes": [["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]
-    }
+    },
+    "_RESNOTE": "This graph auto-orients output to the SOURCE clip's aspect (nodes 425/397/398), so sizes are short-edge x long-edge, NOT width x height. Landscape source -> long x short; portrait -> short x long. One tier per row (16:9 magnitudes); orientation follows the input.",
+    "resolutions": [
+      { "label": "544p  (long edge 960, fast)", "short": 544,  "long": 960 },
+      { "label": "720p  (long edge 1280)",      "short": 720,  "long": 1280 },
+      { "label": "1080p (long edge 1920)",      "short": 1080, "long": 1920 },
+      { "label": "4K UHD (long edge 3840)",     "short": 2160, "long": 3840 }
+    ]
   },
 
   "params": {
@@ -68,18 +75,21 @@
               "section": "Main", "order": 3,
               "tooltip": "Obscura's model card: START ~1.3 and raise for COMPLEX removals; this bundled axiomgraph workflow ships 2.3. Lower if the kept subject distorts. (src: model card recommends ~1.3; graph default 2.3)" } },
     "fps":      { "node": "302", "path": "inputs.value", "default": 24,
-      "ui": { "label": "Frame rate (fps)", "widget": "number", "min": 1, "max": 60, "step": 1,
+      "ui": { "label": "Frame rate (fps)", "widget": "number", "min": 1, "max": 50, "step": 1,
               "section": "Advanced", "order": 1,
-              "tooltip": "Output frame rate; also drives the input loader and output mux." } },
-    "width":    { "node": "314", "path": "inputs.value", "default": 720,
-      "ui": { "label": "Width", "widget": "number", "min": 256, "max": 2048, "step": 32,
-              "section": "Advanced", "order": 2, "tooltip": "Output width in px (graph 720)." } },
-    "height":   { "node": "301", "path": "inputs.value", "default": 1280,
-      "ui": { "label": "Height", "widget": "number", "min": 256, "max": 2048, "step": 32,
-              "section": "Advanced", "order": 3, "tooltip": "Output height in px (graph 1280)." } },
+              "tooltip": "LTX-2.3 ceiling: 50 fps. Clips <=10s can run up to 50fps (even 4K); 10-20s clips are capped at 25fps + 1080p. For v2v match your source's fps. (src: LTX-2.3 docs)" } },
+    "short_edge": { "node": "314", "path": "inputs.value", "default": 720,
+      "ui": { "label": "Short edge", "widget": "number", "min": 256, "max": 3840, "step": 32,
+              "section": "Advanced", "order": 2,
+              "tooltip": "The SMALLER of the two output dimensions (default 720). This graph auto-orients to your source clip: a landscape clip renders long x short (e.g. 1280x720), a portrait clip short x long (720x1280) -- so you set edge LENGTHS, not which one is width. That's why a '16:9' pick can come back 9:16 if the source is portrait. Use the Resolution dropdown for known-good tiers; max 4K, safest divisible by 32. (src: LTX-2.3 docs; graph nodes 314/301/425/397/398)" } },
+    "long_edge":  { "node": "301", "path": "inputs.value", "default": 1280,
+      "ui": { "label": "Long edge", "widget": "number", "min": 256, "max": 3840, "step": 32,
+              "section": "Advanced", "order": 3,
+              "tooltip": "The LARGER of the two output dimensions (default 1280; native 9:16 is 1080x1920). Pairs with Short edge: orientation follows the source clip automatically, so this is just the long side's length. 4K (3840) is heavy and only for <=10s clips. (src: LTX-2.3 docs)" } },
     "length":   { "node": "303", "path": "inputs.value", "default": 81,
-      "ui": { "label": "Frames (length)", "widget": "number", "min": 9, "max": 257, "step": 8,
-              "section": "Advanced", "order": 4, "tooltip": "Number of frames to generate (graph 81)." } },
+      "ui": { "label": "Frames (length)", "widget": "number", "min": 9, "max": 497, "step": 8,
+              "section": "Advanced", "order": 4,
+              "tooltip": "Frame count; LTX REQUIRES 8*n+1 (..., 81, 121, 161). Duration = frames / fps. LTX-2.3 max ~10s @50fps (4K) or ~20s @25fps (1080p). (src: LTX-2.3 docs)" } },
     "video":    { "node": "372", "path": "inputs.video" },
     "lora":     { "node": "427", "path": "inputs.lora_name" }
   }

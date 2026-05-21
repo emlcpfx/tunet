@@ -45,9 +45,17 @@
     "title": "LTX-2.3 Control — canny / depth / pose from a reference clip (IC-LoRA)",
     "primary_input": {
       "label": "Control reference video",
-      "tooltip": "The clip whose structure (edges/depth/pose) the output should follow. Preprocessing happens on Spark.",
+      "tooltip": "The clip whose structure (edges/depth/pose) the output should follow. Preprocessing happens on Spark. Output resolution is set by the Width/Height/Frames knobs below (default 960x544).",
       "filetypes": [["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]
-    }
+    },
+    "resolutions": [
+      { "label": "960x544 (16:9)",       "width": 960,  "height": 544 },
+      { "label": "1280x720 (16:9 HD)",   "width": 1280, "height": 720 },
+      { "label": "1920x1080 (16:9 FHD)", "width": 1920, "height": 1080 },
+      { "label": "3840x2160 (16:9 4K)",  "width": 3840, "height": 2160 },
+      { "label": "720x1280 (9:16 HD)",   "width": 720,  "height": 1280 },
+      { "label": "1080x1920 (9:16 FHD)", "width": 1080, "height": 1920 }
+    ]
   },
 
   "params": {
@@ -59,6 +67,18 @@
       "default": "pc game, console game, video game, cartoon, childish, ugly",
       "ui": { "label": "Negative prompt", "widget": "multiline", "section": "Main", "order": 2,
               "tooltip": "Lightricks' shipped LTX-2 negative (same one used across their example workflows)." } },
-    "video":    { "node": "5001", "path": "inputs.file" }
+    "video":    { "node": "5001", "path": "inputs.file" },
+    "width":    { "node": "3059", "path": "inputs.width", "default": 960,
+      "ui": { "label": "Width", "widget": "number", "min": 256, "max": 3840, "step": 32,
+              "section": "Advanced", "order": 1,
+              "tooltip": "LTX-2.3 up to 4K/UHD (3840x2160); pick from the Resolution dropdown above for known-good sizes (custom values safest divisible by 32). Best matched to the reference clip's aspect. 4K is heavy and only for clips <=10s. (src: LTX-2.3 docs)" } },
+    "height":   { "node": "3059", "path": "inputs.height", "default": 544,
+      "ui": { "label": "Height", "widget": "number", "min": 256, "max": 3840, "step": 32,
+              "section": "Advanced", "order": 2,
+              "tooltip": "LTX-2.3 up to 4K/UHD; pick from the Resolution dropdown above for known-good sizes (custom values safest divisible by 32). Match the reference clip's aspect. (src: LTX-2.3 docs)" } },
+    "length":   { "node": "3059", "path": "inputs.length", "default": 121,
+      "ui": { "label": "Frames (length)", "widget": "number", "min": 9, "max": 497, "step": 8,
+              "section": "Advanced", "order": 3,
+              "tooltip": "Frame count; LTX REQUIRES 8*n+1 (..., 121, 161). Should match the reference clip's frame count for clean control. LTX-2.3 max ~10s @50fps or ~20s @25fps. (src: LTX-2.3 docs)" } }
   }
 }

@@ -107,6 +107,10 @@ class App:
         self.presets = load_presets()
         self.proc = None
         self.logq = queue.Queue()
+        self.jobq = {}              # id -> {id,label,argv,status}; serial job queue
+        self._next_id = 1
+        self._running = False       # main-thread gate so only one job runs at once
+        self._viewing = None        # job id whose log is currently shown in the pane
         self.param_getters = {}     # param name -> () -> value (or None to skip)
         self.lora_rows = []         # list of (frame, name, strength)
         root.title("comfy_spark — LTX-2 on Spark Fuse")
@@ -144,18 +148,39 @@ class App:
         bar = ttk.Frame(root, padding=(10, 6))
         bar.pack(fill="x")
         self.no_trig = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar, text="No trigger words", variable=self.no_trig).pack(side="left")
+        ttk.Checkbutton(bar, text="Don't auto-add LoRA trigger words", variable=self.no_trig).pack(side="left")
+        _help(bar, "Some LoRAs only activate when a trigger word is in the prompt (e.g. the "
+                   "'transition' LoRA needs 'zhuanchang'). comfy_spark normally appends those "
+                   "automatically. Check this to turn that off and place triggers yourself. Only "
+                   "affects catalog LoRAs that declare a trigger.").pack(side="left", padx=(4, 0))
         self.convert_only = tk.BooleanVar(value=False)
         co = ttk.Checkbutton(bar, text="Convert only", variable=self.convert_only)
         co.pack(side="left", padx=(12, 0))
         _help(bar, "Convert the UI graph to API format on Spark and emit it (no render, no "
                    "weight download). The cheap way to validate a workflow / template preset.").pack(side="left", padx=4)
-        self.run_btn = ttk.Button(bar, text="▶ Run on Spark", command=lambda: self.run(False))
-        self.run_btn.pack(side="right")
-        self.dry_btn = ttk.Button(bar, text="Dry run", command=lambda: self.run(True))
+        self.add_btn = ttk.Button(bar, text="▶ Add to queue", command=lambda: self.enqueue(False))
+        self.add_btn.pack(side="right")
+        self.dry_btn = ttk.Button(bar, text="Dry run", command=lambda: self.enqueue(True))
         self.dry_btn.pack(side="right", padx=6)
-        self.stop_btn = ttk.Button(bar, text="Stop", command=self.stop, state="disabled")
-        self.stop_btn.pack(side="right", padx=6)
+
+        # queue — jobs run one at a time (serial), so a warm node carries across
+        # the batch via idle-hold. Queue as many as you want; watch status here.
+        qf = ttk.LabelFrame(root, text="Queue (serial)", padding=4)
+        qf.pack(fill="x", padx=10, pady=(0, 6))
+        self.tree = ttk.Treeview(qf, columns=("job", "status"), show="headings", height=5)
+        self.tree.heading("job", text="Job")
+        self.tree.heading("status", text="Status")
+        self.tree.column("job", width=560, anchor="w")
+        self.tree.column("status", width=150, anchor="w")
+        self.tree.pack(side="left", fill="x", expand=True)
+        # click a row -> show that job's own console output below
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+        qb = ttk.Frame(qf)
+        qb.pack(side="right", fill="y", padx=(6, 0))
+        self.stop_btn = ttk.Button(qb, text="Stop current", command=self.stop, state="disabled")
+        self.stop_btn.pack(fill="x", pady=1)
+        ttk.Button(qb, text="Remove", command=self._remove_selected).pack(fill="x", pady=1)
+        ttk.Button(qb, text="Clear finished", command=self._clear_finished).pack(fill="x", pady=1)
 
         # log
         logf = ttk.LabelFrame(root, text="Job log", padding=4)
@@ -176,6 +201,7 @@ class App:
         for w in self.form_host.winfo_children():
             w.destroy()
         self.param_getters = {}
+        self.param_vars = {}        # param name -> tk var (for the resolution dropdown to drive)
         self.lora_rows = []
         preset = self.presets[self.preset_var.get()]
         ui = preset.get("ui", {})
@@ -225,6 +251,10 @@ class App:
                 continue
             frame = ttk.LabelFrame(self.form_host, text=section, padding=8)
             frame.pack(fill="x", pady=6)
+            # a Resolution dropdown sits atop whichever section holds the size pair
+            if ui.get("resolutions") and any(n in ("width", "short_edge")
+                                             for n, _, _ in rows):
+                self._resolution_row(frame, ui["resolutions"], params)
             for name, spec, pui in sorted(rows, key=lambda r: r[2].get("order", 99)):
                 self._param_row(frame, name, spec, pui)
 
@@ -245,6 +275,45 @@ class App:
         ttk.Button(row, text="Browse…",
                    command=lambda: var.set(filedialog.askopenfilename(filetypes=ft) or var.get())
                    ).pack(side="left", padx=4)
+
+    def _resolution_row(self, parent, resolutions, params):
+        """A dropdown of common known-good sizes that fills the size fields below.
+        Driven entirely by the preset's ui.resolutions, so it stays in CLI parity
+        (it just sets the same size params the CLI exposes). Two schemas:
+          - width/height: literal output dimensions (most presets).
+          - short_edge/long_edge: edge lengths for graphs that auto-orient the
+            output to the source clip's aspect (e.g. the Obscura cleanplate),
+            where the dropdown entries carry "short"/"long" instead."""
+        if "short_edge" in params and "long_edge" in params:
+            pa, pb, fa, fb = "short_edge", "long_edge", "short", "long"
+            hint = ("Common known-good sizes. Picking one fills the Short/Long edge "
+                    "fields below. This graph auto-orients output to the SOURCE clip, "
+                    "so these set the two edge lengths, not the aspect — a landscape "
+                    "clip comes back landscape regardless. Custom… (or edit) for any size.")
+        else:
+            pa, pb, fa, fb = "width", "height", "width", "height"
+            hint = ("Common known-good sizes for this model. Picking one fills the "
+                    "Width/Height fields below; pick Custom… (or just edit them) for any size.")
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=3)
+        ttk.Label(row, text="Resolution", width=18, anchor="nw").pack(side="left")
+        _help(row, hint).pack(side="left", padx=(0, 6))
+        by_label = {r["label"]: r for r in resolutions}
+        da = (params.get(pa) or {}).get("default")
+        db = (params.get(pb) or {}).get("default")
+        sel = next((r["label"] for r in resolutions
+                    if r.get(fa) == da and r.get(fb) == db), "Custom…")
+        var = tk.StringVar(value=sel)
+        box = ttk.Combobox(row, textvariable=var, values=list(by_label) + ["Custom…"],
+                           state="readonly", width=32)
+        box.pack(side="left", fill="x", expand=True)
+
+        def on_pick(_e=None):
+            r = by_label.get(var.get())
+            if r and pa in self.param_vars and pb in self.param_vars:
+                self.param_vars[pa].set(float(r[fa]))
+                self.param_vars[pb].set(float(r[fb]))
+        box.bind("<<ComboboxSelected>>", on_pick)
 
     def _param_row(self, parent, name, spec, pui):
         row = ttk.Frame(parent)
@@ -280,6 +349,7 @@ class App:
             else:
                 ttk.Spinbox(row, from_=lo, to=hi, increment=step, textvariable=var,
                             width=10).pack(side="left")
+            self.param_vars[name] = var      # let the Resolution dropdown drive width/height
             self.param_getters[name] = lambda v=var, i=integer: (int(round(v.get())) if i else round(v.get(), 3))
         else:  # text / entry
             var = tk.StringVar(value=str(default) if default is not None else "")
@@ -440,50 +510,133 @@ class App:
             argv.append("--dry-run")
         return argv
 
-    def run(self, dry_run):
-        if self.proc and self.proc.poll() is None:
-            self._append("[ui] a job is already running; Stop it first.\n")
-            return
+    def enqueue(self, dry_run):
+        """Snapshot the current form into a queued job. Jobs run serially; a warm
+        node carries across the batch (idle-hold), so queue freely."""
         argv = self.build_argv(dry_run)
-        self.log.delete("1.0", "end")
-        self._append("[ui] " + " ".join(self._q(a) for a in argv) + "\n\n")
-        self.run_btn.config(state="disabled")
-        self.dry_btn.config(state="disabled")
-        self.stop_btn.config(state="normal")
-        threading.Thread(target=self._run_thread, args=(argv,), daemon=True).start()
+        prim = os.path.basename(self.primary_var.get().strip()) or "(no input)"
+        label = ("[dry] " if dry_run else "") + f"{self.preset_var.get()} · {prim}"
+        jid = self._next_id
+        self._next_id += 1
+        self.jobq[jid] = {"id": jid, "label": label, "argv": argv, "status": "queued", "log": []}
+        self.tree.insert("", "end", iid=str(jid), values=(label, "queued"))
+        self._job_log(jid, f"[ui] queued #{jid}: {label}\n"
+                           + " ".join(self._q(a) for a in argv) + "\n")
+        if self._viewing is None:           # show the very first job right away
+            self._select_and_view(jid)
+        self._pump()
 
-    def _run_thread(self, argv):
+    def _pump(self):
+        """Start the next queued job if nothing is running (serial). Gated on a
+        main-thread flag so two rapid enqueues can't launch concurrent jobs."""
+        if self._running:
+            return
+        nxt = next((j for j in self.jobq.values() if j["status"] == "queued"), None)
+        if not nxt:
+            return
+        self._running = True
+        nxt["status"] = "running"
+        self.tree.item(str(nxt["id"]), values=(nxt["label"], "running"))
+        self.stop_btn.config(state="normal")
+        self._job_log(nxt["id"], f"\n[ui] ▶ running #{nxt['id']}...\n\n")
+        self._select_and_view(nxt["id"])    # follow the job that just started
+        threading.Thread(target=self._run_job, args=(nxt,), daemon=True).start()
+
+    def _run_job(self, job):
         try:
-            self.proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            self.proc = subprocess.Popen(job["argv"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                          text=True, bufsize=1, cwd=os.path.dirname(HERE))
             for line in iter(self.proc.stdout.readline, ""):
-                self.logq.put(line)
+                self.logq.put(("LOG", job["id"], line))
             self.proc.stdout.close()
             self.proc.wait()
-            self.logq.put(f"\n[ui] finished (exit {self.proc.returncode}).\n")
+            rc = self.proc.returncode
         except Exception as e:  # noqa: BLE001
-            self.logq.put(f"\n[ui] ERROR launching: {e}\n")
-        finally:
-            self.logq.put("__DONE__")
+            self.logq.put(("LOG", job["id"], f"\n[ui] ERROR launching: {e}\n"))
+            rc = -1
+        self.logq.put(("JOBEND", job["id"], rc))
 
     def stop(self):
+        """Stop the locally-running job process. NOTE: the Spark job keeps running
+        and its download won't complete — use the CLI --cancel to stop it on Spark."""
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
-            self._append("\n[ui] stop requested (the Spark job may keep running — use the CLI --cancel).\n")
+            running = next((j for j in self.jobq.values() if j["status"] == "running"), None)
+            if running:
+                self._job_log(running["id"], "\n[ui] stop requested — the Spark job may keep "
+                              "running and its download won't complete. Use the CLI --cancel.\n")
+
+    def _remove_selected(self):
+        for iid in self.tree.selection():
+            j = self.jobq.get(int(iid))
+            if j and j["status"] == "queued":      # only removable before it runs
+                del self.jobq[int(iid)]
+                self.tree.delete(iid)
+                if self._viewing == int(iid):
+                    self._viewing = None
+                    self.log.delete("1.0", "end")
+
+    def _clear_finished(self):
+        for jid, j in list(self.jobq.items()):
+            if j["status"] in ("done", "failed", "stopped"):
+                del self.jobq[jid]
+                self.tree.delete(str(jid))
+                if self._viewing == jid:
+                    self._viewing = None
+                    self.log.delete("1.0", "end")
 
     def _drain_log(self):
         try:
             while True:
-                line = self.logq.get_nowait()
-                if line == "__DONE__":
-                    self.run_btn.config(state="normal")
-                    self.dry_btn.config(state="normal")
+                item = self.logq.get_nowait()
+                kind = item[0] if isinstance(item, tuple) else None
+                if kind == "JOBEND":
+                    _, jid, rc = item
+                    j = self.jobq.get(jid)
+                    if j:
+                        j["status"] = "done" if rc == 0 else ("stopped" if rc < 0 else "failed")
+                        self.tree.item(str(jid), values=(j["label"], j["status"]))
+                    self._job_log(jid, f"\n[ui] #{jid} finished (exit {rc}).\n")
+                    self.proc = None
+                    self._running = False
                     self.stop_btn.config(state="disabled")
-                else:
-                    self._append(line)
+                    self._pump()                    # advance to the next queued job
+                elif kind == "LOG":
+                    self._job_log(item[1], item[2])
         except queue.Empty:
             pass
         self.root.after(100, self._drain_log)
+
+    # ── per-job log routing (each queued job keeps its own console output) ──────
+
+    def _job_log(self, jid, text):
+        """Append output to a job's own buffer; mirror to the pane only if that
+        job is the one currently selected/viewed."""
+        j = self.jobq.get(jid)
+        if not j:
+            return
+        j.setdefault("log", []).append(text)
+        if self._viewing == jid:
+            self.log.insert("end", text)
+            self.log.see("end")
+
+    def _view_job(self, jid):
+        """Repaint the log pane with the chosen job's full buffered output."""
+        self._viewing = jid
+        self.log.delete("1.0", "end")
+        j = self.jobq.get(jid)
+        if j:
+            self.log.insert("end", "".join(j.get("log", [])))
+            self.log.see("end")
+
+    def _select_and_view(self, jid):
+        self.tree.selection_set(str(jid))    # also fires _on_select
+        self._view_job(jid)
+
+    def _on_select(self, _e=None):
+        sel = self.tree.selection()
+        if sel:
+            self._view_job(int(sel[0]))
 
     def _append(self, text):
         self.log.insert("end", text)

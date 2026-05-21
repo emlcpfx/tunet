@@ -36,7 +36,15 @@
       "label": "Input video",
       "tooltip": "The source clip. The masked region (white in the mask) is regenerated from the prompt + surrounding video.",
       "filetypes": [["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]
-    }
+    },
+    "resolutions": [
+      { "label": "832x480 (16:9 480p)",  "width": 832,  "height": 480 },
+      { "label": "1280x720 (16:9 720p)", "width": 1280, "height": 720 },
+      { "label": "1024x576 (16:9)",      "width": 1024, "height": 576 },
+      { "label": "720x720 (1:1)",        "width": 720,  "height": 720 },
+      { "label": "480x832 (9:16 480p)",  "width": 480,  "height": 832 },
+      { "label": "720x1280 (9:16 720p)", "width": 720,  "height": 1280 }
+    ]
   },
 
   "params": {
@@ -54,7 +62,27 @@
     "strength": { "node": "154", "path": "inputs.strength_model", "default": 0.3,
       "ui": { "label": "CausVid strength", "widget": "slider", "min": 0.0, "max": 1.0, "step": 0.05,
               "section": "Advanced", "order": 1,
-              "tooltip": "CausVid acceleration LoRA strength (4-step, cfg 1). Try 0.3–0.7. Set 0 to run the base model instead — then bump steps ~20 / cfg ~6 via --set." } }
+              "tooltip": "CausVid acceleration LoRA strength. Keep it on (try 0.3-0.7) with Steps=4 / CFG=1 for fast 4-step renders. To run the BASE model instead, set this to 0 and raise Steps to ~20 and CFG to ~6 (see the Steps/CFG knobs below)." } },
+    "steps":    { "node": "3", "path": "inputs.steps", "default": 4,
+      "ui": { "label": "Steps", "widget": "number", "min": 1, "max": 40, "step": 1,
+              "section": "Advanced", "order": 5,
+              "tooltip": "Sampler steps. With CausVid on, 4 is enough (that's the point). For the base model (CausVid strength 0) use ~20. More steps = slower, diminishing returns." } },
+    "cfg":      { "node": "3", "path": "inputs.cfg", "default": 1.0,
+      "ui": { "label": "CFG", "widget": "slider", "min": 1.0, "max": 10.0, "step": 0.5,
+              "section": "Advanced", "order": 6,
+              "tooltip": "Classifier-free guidance (prompt adherence). CausVid needs CFG=1. For the base model use ~6. Higher = follows the prompt harder but can over-cook." } },
+    "width":    { "node": "49", "path": "inputs.width", "default": 720,
+      "ui": { "label": "Width", "widget": "number", "min": 256, "max": 1280, "step": 16,
+              "section": "Advanced", "order": 2,
+              "tooltip": "Wan2.1 VACE 14B is a 480p-720p model - best at 1280x720 (or 720x1280 portrait). Beyond 720p quality drops and VRAM spikes; 1080p+ is not really supported. Divisible by 16. (src: Wan2.1-VACE-14B docs)" } },
+    "height":   { "node": "49", "path": "inputs.height", "default": 720,
+      "ui": { "label": "Height", "widget": "number", "min": 256, "max": 1280, "step": 16,
+              "section": "Advanced", "order": 3,
+              "tooltip": "Wan2.1 14B sweet spot is 720p (max dimension ~1280); divisible by 16. Match the source clip's aspect; the mask must match these dims. (src: Wan2.1-VACE-14B docs)" } },
+    "length":   { "node": "49", "path": "inputs.length", "default": 81,
+      "ui": { "label": "Frames (length)", "widget": "number", "min": 17, "max": 161, "step": 16,
+              "section": "Advanced", "order": 4,
+              "tooltip": "Wan frame count = 16*n+1 (default 81 ~= 5s, 161 ~= 10s). Wan2.1 runs at 16 fps (fixed); a mask VIDEO must match this frame count. (src: Wan-Video/Wan2.1)" } }
   },
   "mask_video_param": { "node": "215", "path": "inputs.file" }
 }
