@@ -5,6 +5,7 @@
   "_PARAMS": "Node ids come from the UI graph and are preserved through conversion; patches apply post-conversion, so paths target API format. Primitive nodes (432/302) use input name 'value' by convention; if a patch warns 'not in graph' or inputs look wrong, pull the converted workflow_api.json (written to ShareSync) and check field names.",
   "_LORASTACK": "Obscura is the built-in LoRA on node 427 (the workflow's purpose). Extra Tier-1 LoRAs from --lora are chained AFTER it via lora_chain (anchor 427): 326(UNET) -> 427(Obscura) -> your stack -> CFGGuider. Mostly useful for layering a style/effect on top of the cleanplate; for plain generation+effects use the ltx2_generate preset.",
 
+  "order": 0,
   "base": "ltx2.3-22b",
   "lora_catalog": "ltx2.loras.json",
   "lora_chain": { "anchor": "427", "slot": 0 },
@@ -49,7 +50,7 @@
   "lora_name": "LTX23_Obscura_Remova_v1.safetensors",
 
   "ui": {
-    "title": "LTX-2.3 Cleanplate — occlusion / foreground removal (Obscura Remova)",
+    "title": "LTX-2.3 ObscuraRemova — occlusion / foreground removal",
     "primary_input": {
       "label": "Input video",
       "tooltip": "The clip to clean up. Obscura regenerates occluded/foreground regions from the surrounding video.",

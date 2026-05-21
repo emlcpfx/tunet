@@ -35,6 +35,7 @@ export interface ComfyParamSpec {
 
 export interface ComfyPreset {
   key:           string
+  order?:        number          // dropdown sort key (lower first); default 100
   description?:   string
   base?:         string
   image?:        string
@@ -74,6 +75,9 @@ export function loadComfyPresets(): ComfyPreset[] {
       out.push({ ...p, key: f.slice(0, -'.preset.json'.length) })
     } catch { /* skip a malformed preset rather than break the whole list */ }
   }
+  // Explicit `order` floats presets to the top (e.g. ObscuraRemova); ties keep
+  // the filename order. Stable sort (V8) preserves it.
+  out.sort((a, b) => (a.order ?? 100) - (b.order ?? 100))
   return out
 }
 
