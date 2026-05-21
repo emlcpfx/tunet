@@ -11,7 +11,13 @@
 
 import type { FolderPickerResult } from '@/components/spark/folder-picker'
 
-export const MAX_BATCH_BYTES = 200 * 1024 * 1024
+// Per-POST cap. Next.js buffers the whole multipart request body in RAM before
+// the route handler runs, so this is effectively the peak heap per batch — keep
+// it well under the prod box's ~1 GB (a 200 MB batch + a concurrent tenant spike
+// is what OOM-killed the .pth upload). 64 MB → flat memory; more POSTs is the
+// cheap price. (A single source frame larger than this still goes in its own
+// batch.) Long-term fix is direct browser→ShareSync upload, bypassing the box.
+export const MAX_BATCH_BYTES = 64 * 1024 * 1024
 
 export async function uploadStage(
   picked: FolderPickerResult,
