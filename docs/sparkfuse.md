@@ -284,7 +284,7 @@ async function jobDone() {
   const job = await fetch(`${sparkHost}/api/compute/jobs/${jobId}`, {
     headers: { Authorization: `Bearer ${sparkToken}` },
   }).then((r) => r.json());
-  return ['succeeded', 'failed', 'cancelled', 'spot-interrupted'].includes(job.status);
+  return ['succeeded', 'failed', 'cancelled', 'smartcompute-interrupted'].includes(job.status);
 }
 
 // Poll every 2 s until the job ends + one more pass to catch the final batch.
@@ -337,7 +337,7 @@ def poll_once():
 def job_done():
     r = requests.get(f"{SPARK_HOST}/api/compute/jobs/{JOB_ID}",
         headers={"Authorization": f"Bearer {SPARK_TOKEN}"}).json()
-    return r["status"] in ("succeeded", "failed", "cancelled", "spot-interrupted")
+    return r["status"] in ("succeeded", "failed", "cancelled", "smartcompute-interrupted")
 
 def on_new_image(href, data):
     print(f"new output: {href} ({len(data)} bytes)")
