@@ -73,39 +73,47 @@ export async function uploadStage(
  * because there's no folder picker / role decomposition — just one file with
  * a known role and basename.
  *
- * Sent as a RAW octet-stream body (not multipart) so the server can stream it
- * to disk without buffering — .pth files run ~200 MB to ~1 GB, and buffering
- * a 1 GB multipart body OOM-kills the small prod VPS. Metadata rides in
- * headers. The browser streams the File body, so the client doesn't buffer it
- * either.
+ * Sent as RAW octet-stream chunks (not multipart) appended server-side into one
+ * file. We slice the .pth into CHECKPOINT_CHUNK_BYTES pieces and POST them
+ * sequentially because Next.js buffers each request body fully in RAM before the
+ * route handler runs — a single ~1 GB body OOM-kills the small (1 GB) prod VPS.
+ * Chunking caps the server's buffered body (and our slice) at one chunk. The
+ * first chunk mints the stage; the rest append to it. Metadata rides in headers.
  *
- * On a 200 MB–1 GB .pth this can take 10-90 s depending on the network. There's
- * no progress event (fetch can't report request-upload progress here); use a
- * spinner / "uploading…" placeholder in the caller.
+ * onProgress (optional) reports bytes sent so the caller can show a bar; without
+ * it, show a "uploading…" spinner. A 200 MB–1 GB .pth takes ~10-90 s on network.
  */
+export const CHECKPOINT_CHUNK_BYTES = 32 * 1024 * 1024
+
 export async function uploadCheckpoint(
   file: File,
+  onProgress?: (sent: number, total: number) => void,
 ): Promise<{ stageId: string; filename: string; bytes: number }> {
-  const res = await fetch('/api/spark/upload-stage', {
-    method:  'POST',
-    headers: {
+  let stageId = ''
+  const total = file.size
+  for (let start = 0; start < total; start += CHECKPOINT_CHUNK_BYTES) {
+    const end = Math.min(start + CHECKPOINT_CHUNK_BYTES, total)
+    const headers: Record<string, string> = {
       'content-type': 'application/octet-stream',
       'x-role':       'checkpoint',
       'x-filename':   encodeURIComponent(file.name),
-    },
-    body: file,
-  })
-  if (!res.ok) {
-    const j = await res.json().catch(() => ({}))
-    throw new Error(j.error ?? `upload-stage HTTP ${res.status}`)
+      'x-chunk-mode': start === 0 ? 'create' : 'append',
+    }
+    if (stageId) headers['x-stage-id'] = stageId
+
+    const res = await fetch('/api/spark/upload-stage', {
+      method:  'POST',
+      headers,
+      body: file.slice(start, end),
+    })
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}))
+      throw new Error(j.error ?? `upload-stage HTTP ${res.status}`)
+    }
+    const json = await res.json() as { stageId: string }
+    stageId = json.stageId
+    onProgress?.(end, total)
   }
-  const json = await res.json() as {
-    stageId: string
-    received: { role: string; files: number; bytes: number }
-  }
-  return {
-    stageId:  json.stageId,
-    filename: file.name,
-    bytes:    json.received?.bytes ?? file.size,
-  }
+  if (!stageId) throw new Error('checkpoint file is empty')
+  return { stageId, filename: file.name, bytes: total }
 }

@@ -115,11 +115,17 @@ export async function POST(req: Request) {
 //
 // Used for large files (~1 GB .pth checkpoints). The client sends the file as
 // the raw request body with metadata in headers:
-//   x-role      — same role values as the multipart path
-//   x-filename  — URL-encoded basename (we take basename only, no traversal)
-//   x-stage-id  — optional; omit on the first upload to mint a new stage
-// We pipe req.body → disk so peak memory stays at the stream buffer size, not
-// the file size.
+//   x-role       — same role values as the multipart path
+//   x-filename   — URL-encoded basename (we take basename only, no traversal)
+//   x-stage-id   — optional; omit on the first chunk to mint a new stage
+//   x-chunk-mode — 'create' (first chunk, truncate/overwrite) | 'append'
+//                  (subsequent chunks). Absent = 'create' (single-shot upload).
+//
+// The client slices the file into bounded chunks and POSTs them sequentially,
+// each appended to the same dest file. This keeps peak memory at ONE chunk —
+// not the whole file — which matters because Next.js buffers the entire request
+// body in RAM before this handler runs, so a single ~1 GB body OOM-kills the
+// small (1 GB) prod host. Chunking caps that buffered body at the chunk size.
 async function handleRawUpload(req: Request): Promise<Response> {
   let stageId = req.headers.get('x-stage-id') ?? ''
   if (!stageId) stageId = newStageId()
@@ -138,16 +144,23 @@ async function handleRawUpload(req: Request): Promise<Response> {
     return NextResponse.json({ error: 'empty request body' }, { status: 400 })
   }
 
+  // 'append' continues an existing chunked upload; anything else starts fresh
+  // (truncating any partial file from a prior, abandoned attempt).
+  const append   = req.headers.get('x-chunk-mode') === 'append'
   const targetDir = path.join(stageDir(stageId), role)
   await fs.promises.mkdir(targetDir, { recursive: true })
   const destPath = path.join(targetDir, safeName)
 
   try {
     // Readable.fromWeb adapts the web ReadableStream (req.body) to a Node
-    // stream; pipeline handles backpressure + closes the file handle.
-    await pipeline(Readable.fromWeb(req.body as Parameters<typeof Readable.fromWeb>[0]), fs.createWriteStream(destPath))
+    // stream; pipeline handles backpressure + closes the file handle. flags:
+    // 'a' to append a chunk onto the growing file, 'w' to (re)create it.
+    await pipeline(
+      Readable.fromWeb(req.body as Parameters<typeof Readable.fromWeb>[0]),
+      fs.createWriteStream(destPath, { flags: append ? 'a' : 'w' }),
+    )
   } catch (e) {
-    await fs.promises.rm(destPath, { force: true }).catch(() => {})
+    if (!append) await fs.promises.rm(destPath, { force: true }).catch(() => {})
     return NextResponse.json({ error: 'upload stream failed', detail: e instanceof Error ? e.message : '' }, { status: 500 })
   }
 
