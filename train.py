@@ -1827,6 +1827,35 @@ def train(config):
                  else: logging.error("Cannot save final checkpoint: Model/Optimizer/Scaler missing.")
             except Exception as e: logging.error(f"Final checkpoint save failed: {e}", exc_info=True)
 
+        # --- Final export on completion ---
+        # In-loop auto-export only fires on interval boundaries, so a run that
+        # ends off-interval (or before the first interval is reached) would
+        # never produce an ONNX/Nuke deliverable — forcing a separate export
+        # job. Export the final model here so every completed run lands its
+        # export inline with training, gated by the same auto_export.flame/nuke
+        # flags. Skipped if the loop already exported this exact epoch.
+        if (is_main_process() and training_successful and model is not None
+                and (config.auto_export.flame or config.auto_export.nuke)):
+            try:
+                final_ep = final_global_step // iter_epoch
+                interval = config.auto_export.interval
+                already_exported = interval > 0 and final_ep > 0 and final_ep % interval == 0
+                if not already_exported:
+                    if _pending_ckpt_thread is not None and _pending_ckpt_thread.is_alive():
+                        _pending_ckpt_thread.join()
+                    from exporters.auto_export import export_flame, export_nuke
+                    export_res = config.data.resolution
+                    logging.info(f"Performing final export (epoch {final_ep}, res {export_res})...")
+                    if config.auto_export.flame:
+                        export_flame(model, config, config.data.output_dir, final_ep, export_res,
+                                     loss_mode=config.training.loss, ckpt_prefix=ckpt_prefix)
+                    if config.auto_export.nuke:
+                        export_nuke(model, config, config.data.output_dir, final_ep, export_res,
+                                    loss_mode=config.training.loss, ckpt_prefix=ckpt_prefix)
+                    logging.info("Final export complete.")
+            except Exception as e:
+                logging.error(f"Final export failed: {e}", exc_info=True)
+
         if is_main_process():
             if loop_crashed:
                 status = "with errors (training loop crashed — see traceback above)"
