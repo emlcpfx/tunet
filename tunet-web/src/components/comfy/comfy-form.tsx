@@ -57,6 +57,7 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
 
   const [file, setFile]       = useState<File | null>(null)
   const [upPct, setUpPct]     = useState<number | null>(null)
+  const [probe, setProbe]     = useState<{ fps: number; frames: number; w: number; h: number } | null>(null)
 
   const [events, setEvents]   = useState<PhaseEvent[]>([])
   const [busy, setBusy]       = useState(false)
@@ -88,6 +89,24 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
     setGpu(p.gpu || 'rtxpro6000')
     setMode((p.mode as 'instant' | 'smart') || 'instant')
     setDoneJob(null); setErr(null); setEvents([])
+  }
+
+  // Match the desktop tool: probe the picked clip and fill fps + frame count so
+  // the output matches the source (web can't ffprobe, so we read duration from a
+  // <video> + sample frame timestamps for fps; degrades to no-op if undetectable).
+  async function onPickClip(f: File) {
+    setProbe(null)
+    const info = await probeClip(f)
+    if (!info) return
+    setProbe(info)
+    setValues(v => {
+      const next = { ...v }
+      if (preset?.params.fps && info.fps > 0) next.fps = info.fps
+      if (preset?.params.length && info.frames > 0) {
+        next.length = Math.max(9, Math.round((info.frames - 1) / 8) * 8 + 1) // LTX needs 8n+1
+      }
+      return next
+    })
   }
 
   // group params by section, hide structural ones (video/mask handled by upload)
@@ -194,7 +213,7 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
             <Label tip={preset.ui?.primary_input?.tooltip}>{preset.ui?.primary_input?.label || 'Input clip'}</Label>
             <div className="flex items-center gap-3">
               <input ref={fileRef} type="file" accept={acceptStr} className="hidden"
-                onChange={e => setFile(e.target.files?.[0] ?? null)} />
+                onChange={e => { const f = e.target.files?.[0] ?? null; setFile(f); setProbe(null); if (f) void onPickClip(f) }} />
               <button type="button" onClick={() => fileRef.current?.click()}
                 className="px-3 py-1.5 text-xs font-semibold border border-[#7E3AF2] text-[#7E3AF2] rounded hover:bg-[#faf5ff]">
                 {file ? 'Replace clip' : 'Browse…'}
@@ -203,6 +222,14 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
                 {file ? `${file.name} (${(file.size / 1048576).toFixed(1)} MB)` : 'No clip selected'}
               </span>
             </div>
+            {probe && (
+              <p className="mt-2 text-xs text-[#16A34A]">
+                Detected {probe.w}×{probe.h}
+                {probe.fps > 0 ? ` · ${probe.fps} fps` : ''}
+                {probe.frames > 0 ? ` · ~${probe.frames} frames` : ''}
+                {' '}— fps/frames filled in below to match the clip.
+              </p>
+            )}
             {upPct !== null && (
               <div className="mt-2 h-1.5 bg-[#e5e7eb] rounded overflow-hidden">
                 <div className="h-full bg-[#7E3AF2] transition-all" style={{ width: `${upPct}%` }} />
@@ -287,6 +314,61 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
       )}
     </div>
   )
+}
+
+// ── clip probe (client-side; matches the desktop ffprobe behavior) ────────────
+
+async function probeClip(file: File): Promise<{ fps: number; frames: number; w: number; h: number } | null> {
+  const url = URL.createObjectURL(file)
+  const v = document.createElement('video')
+  v.muted = true
+  v.preload = 'auto'
+  v.src = url
+  try {
+    await new Promise<void>((res, rej) => {
+      v.onloadedmetadata = () => res()
+      v.onerror = () => rej(new Error('metadata load failed'))
+      setTimeout(() => rej(new Error('metadata timeout')), 8000)
+    })
+    const dur = v.duration
+    const fps = await detectFps(v)
+    const frames = fps > 0 && Number.isFinite(dur) && dur > 0 ? Math.round(dur * fps) : 0
+    return { fps, frames, w: v.videoWidth, h: v.videoHeight }
+  } catch {
+    return null
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
+// fps isn't exposed by HTMLVideoElement, so sample frame timestamps via
+// requestVideoFrameCallback (play muted briefly) and take the median delta.
+function detectFps(v: HTMLVideoElement): Promise<number> {
+  type VFC = HTMLVideoElement & {
+    requestVideoFrameCallback?: (cb: (now: number, meta: { mediaTime: number }) => void) => number
+  }
+  const vv = v as VFC
+  if (typeof vv.requestVideoFrameCallback !== 'function') return Promise.resolve(0)
+  return new Promise(resolve => {
+    const times: number[] = []
+    let done = false
+    const finish = () => {
+      if (done) return
+      done = true
+      try { v.pause() } catch { /* ignore */ }
+      const deltas = times.slice(1).map((t, i) => t - times[i]).filter(d => d > 0).sort((a, b) => a - b)
+      const med = deltas.length ? deltas[Math.floor(deltas.length / 2)] : 0
+      resolve(med > 0 ? Math.round(1 / med) : 0)
+    }
+    const cb = (_now: number, meta: { mediaTime: number }) => {
+      times.push(meta.mediaTime)
+      if (times.length >= 12) { finish(); return }
+      vv.requestVideoFrameCallback!(cb)
+    }
+    vv.requestVideoFrameCallback!(cb)
+    v.play().catch(() => finish())   // muted autoplay; if blocked, give up gracefully
+    setTimeout(finish, 6000)         // safety cap
+  })
 }
 
 // ── small components ──────────────────────────────────────────────────────────
