@@ -23,6 +23,7 @@ import { TrainingStats } from '@/components/spark/training-stats'
 import { PreviewImages } from '@/components/spark/preview-images'
 import { DownloadsPanel } from '@/components/spark/downloads-panel'
 import { JobSettingsPanel } from '@/components/spark/job-settings-panel'
+import { ComfyOutputsPanel } from '@/components/comfy/comfy-outputs-panel'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -54,6 +55,12 @@ export default async function JobDetailPage({
   // See spark-types.ts for the heuristic.
   const isLive = ACTIVE_STATUSES.has(derivedStatus(job))
 
+  // EZ-Comfy jobs share this route but are a different beast — a one-shot
+  // ComfyUI render, not a training run. They have no loss curve, no training
+  // stats, and their deliverables are rendered media (not .pth/.onnx). Branch
+  // the body to a comfy-specific layout. Marker is set by /api/comfy/submit.
+  const isComfy = job.env?.TUNET_MODE === 'comfy'
+
   return (
     <div className="space-y-5 animate-slide-in">
       {/* Header */}
@@ -71,7 +78,9 @@ export default async function JobDetailPage({
         </div>
         <div className="flex items-center gap-3 flex-shrink-0">
           <LiveStatusBadge initialJob={job} />
-          {!isLive && (
+          {/* Resume/Clone route into the training form — meaningless for a
+              comfy render, so they're training-only. */}
+          {!isComfy && !isLive && (
             <Link
               href={`/demo/jobs/new?resume=${job.id}`}
               className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#7E3AF2] text-[#7E3AF2] hover:bg-[#faf5ff] transition-colors"
@@ -80,13 +89,23 @@ export default async function JobDetailPage({
               Resume
             </Link>
           )}
-          <Link
-            href={`/demo/jobs/new?clone=${job.id}`}
-            className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#e5e7eb] text-[#374151] hover:bg-[#F9FAFB] transition-colors"
-            title="Start a new job pre-filled from this one"
-          >
-            Clone
-          </Link>
+          {isComfy ? (
+            <Link
+              href="/demo/comfy"
+              className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#e5e7eb] text-[#374151] hover:bg-[#F9FAFB] transition-colors"
+              title="Start a new EZ-Comfy render"
+            >
+              New render
+            </Link>
+          ) : (
+            <Link
+              href={`/demo/jobs/new?clone=${job.id}`}
+              className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#e5e7eb] text-[#374151] hover:bg-[#F9FAFB] transition-colors"
+              title="Start a new job pre-filled from this one"
+            >
+              Clone
+            </Link>
+          )}
           {isLive && <CancelJobButton jobId={job.id} />}
         </div>
       </div>
@@ -108,19 +127,36 @@ export default async function JobDetailPage({
         </div>
       )}
 
-      {/* Initial settings the job was submitted with */}
-      <JobSettingsPanel job={job} />
+      {isComfy ? (
+        /* Comfy render: a one-line settings summary + the rendered outputs
+           (no training settings panel / chart / stats). */
+        <>
+          <div className="bg-white border border-[#e5e7eb] rounded-lg px-4 py-2.5 flex flex-wrap items-center gap-x-6 gap-y-1.5">
+            <ComfyInfo label="Preset" value={job.env?.TUNET_PRESET ?? '—'} mono />
+            <ComfyInfo label="GPU"    value={jobGpuDisplay(job)} />
+            <ComfyInfo label="LoRA"   value={comfyLoraSummary(job.env)} mono />
+          </div>
+          <section>
+            <ComfyOutputsPanel job={job} />
+          </section>
+        </>
+      ) : (
+        <>
+          {/* Initial settings the job was submitted with */}
+          <JobSettingsPanel job={job} />
 
-      {/* Training chart + Preview images side-by-side */}
-      <section className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <TrainingChart jobId={job.id} />
-        <PreviewImages job={job} />
-      </section>
+          {/* Training chart + Preview images side-by-side */}
+          <section className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <TrainingChart jobId={job.id} />
+            <PreviewImages job={job} />
+          </section>
 
-      {/* Stats + analysis strip */}
-      <section>
-        <TrainingStats jobId={job.id} job={job} />
-      </section>
+          {/* Stats + analysis strip */}
+          <section>
+            <TrainingStats jobId={job.id} job={job} />
+          </section>
+        </>
+      )}
 
       {/* Provisioning timeline + log stream (combined client view) */}
       <section>
@@ -136,8 +172,8 @@ export default async function JobDetailPage({
         <JobLiveView initialJob={job} initiallyLive={isLive} />
       </section>
 
-      {/* Downloads */}
-      {job.output_share_sync_path && (
+      {/* Downloads (training only — comfy outputs are shown above) */}
+      {!isComfy && job.output_share_sync_path && (
         <section>
           <h2 className="text-sm font-semibold text-[#374151] mb-2">Downloads</h2>
           <DownloadsPanel job={job} />
@@ -159,6 +195,39 @@ function MetricBlock({ label, value, mono, small }: { label: string; value: stri
       </p>
     </div>
   )
+}
+
+function ComfyInfo({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <span className="inline-flex items-baseline gap-2 min-w-0">
+      <span className="text-[10px] uppercase tracking-wider text-[#9ca3af] font-semibold">{label}</span>
+      <span className={`text-sm text-[#111827] truncate ${mono ? 'font-mono' : ''}`} title={value}>{value}</span>
+    </span>
+  )
+}
+
+/**
+ * One-line LoRA summary for a comfy job's settings strip. Prefers the stacked
+ * COMFY_LORAS list (set when the preset supports a LoRA chain), falling back to
+ * the preset's single default (COMFY_LORA_NAME). See lib/comfy.ts buildComfyEnv.
+ */
+function comfyLoraSummary(env: SparkJob['env']): string {
+  if (!env) return '—'
+  const rawList = env.COMFY_LORAS
+  if (rawList) {
+    try {
+      const arr = JSON.parse(rawList) as { file?: string; strength?: number }[]
+      if (Array.isArray(arr) && arr.length > 0) {
+        return arr
+          .map(l => {
+            const name = (l.file ?? '').split('/').pop() || (l.file ?? '?')
+            return typeof l.strength === 'number' ? `${name} (${l.strength})` : name
+          })
+          .join(', ')
+      }
+    } catch { /* fall through to the single-LoRA default */ }
+  }
+  return env.COMFY_LORA_NAME || 'none'
 }
 
 function shortImage(img?: string): string {
