@@ -73,7 +73,7 @@ export function FormRow({ label, hint, tip, children, required }: FormRowProps) 
  * desktop tunet.py tooltips are rich multiline blocks that don't fit a
  * generic "title=…" attribute.
  */
-export function InfoTip({ text }: { text: string }) {
+export function InfoTip({ text, align = 'left' }: { text: string; align?: 'left' | 'right' }) {
   return (
     <span className="relative inline-flex group" tabIndex={0}>
       <svg
@@ -87,17 +87,17 @@ export function InfoTip({ text }: { text: string }) {
       </svg>
       <span
         role="tooltip"
-        className="
+        className={`
           pointer-events-none invisible opacity-0
           group-hover:visible group-hover:opacity-100
           group-focus-within:visible group-focus-within:opacity-100
           transition-opacity duration-100 delay-150
-          absolute left-0 top-5 z-50
+          absolute ${align === 'right' ? 'right-0' : 'left-0'} top-5 z-50
           bg-[#1F2937] text-[#F3F4F6] text-xs
           rounded-md shadow-lg px-3 py-2
           w-72 max-w-[18rem]
           whitespace-pre-wrap font-normal leading-relaxed
-        "
+        `}
       >
         {text}
       </span>

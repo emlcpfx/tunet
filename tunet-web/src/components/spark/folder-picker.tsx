@@ -58,6 +58,8 @@ interface FolderInfo {
   sampleDims:  { w: number; h: number } | null
   /** First src sample's extension, e.g. '.exr' */
   sampleExt:   string | null
+  /** src filenames with no dst sharing their basename (the unpaired ones) */
+  unmatchedSrc: string[]
 }
 
 interface FileEntry {
@@ -152,9 +154,14 @@ export function FolderPicker({ onPicked }: FolderPickerProps) {
       const valDst = roleEntries.val_dst ?? []
       const mask   = roleEntries.mask    ?? []
 
-      // Compute matched pairs (filename basename match)
+      // Compute matched pairs (filename basename match). Keep the names of the
+      // src files that DON'T have a dst so the UI can name them, not just count.
       const dstSet = new Set(dst.map(e => stripExt(e.name).toLowerCase()))
       const pairCount = src.filter(e => dstSet.has(stripExt(e.name).toLowerCase())).length
+      const unmatchedSrc = src
+        .filter(e => !dstSet.has(stripExt(e.name).toLowerCase()))
+        .map(e => e.name)
+        .sort((a, b) => a.localeCompare(b))
 
       // Sample dimensions from first src image (if possible)
       let sampleDims: { w: number; h: number } | null = null
@@ -183,7 +190,7 @@ export function FolderPicker({ onPicked }: FolderPickerProps) {
         pairCount, totalBytes, sampleDims, sampleExt,
       }
 
-      setInfo({ rootName, totalBytes, roles: rolesInfo, pairCount, sampleDims, sampleExt })
+      setInfo({ rootName, totalBytes, roles: rolesInfo, pairCount, sampleDims, sampleExt, unmatchedSrc })
       onPicked(result)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to scan folder')
@@ -293,10 +300,19 @@ export function FolderPicker({ onPicked }: FolderPickerProps) {
               ⚠ No matched <code>src</code>↔<code>dst</code> pairs. Filenames must match (e.g. <code>frame_001.exr</code> in both folders).
             </p>
           )}
-          {info.pairCount > 0 && info.roles.src && info.pairCount < info.roles.src.entries.length && (
-            <p className="mt-3 text-xs text-[#D97706]">
-              ⚠ {info.roles.src.entries.length - info.pairCount} src files have no matching dst.
-            </p>
+          {info.pairCount > 0 && info.unmatchedSrc.length > 0 && (
+            <div className="mt-3 text-xs text-[#D97706]">
+              <p>
+                ⚠ {info.unmatchedSrc.length} src file{info.unmatchedSrc.length === 1 ? '' : 's'} have no matching dst
+                {' '}(skipped during training):
+              </p>
+              <ul className="mt-1 max-h-32 overflow-auto list-disc pl-5 font-mono text-[11px] text-[#92400E]">
+                {info.unmatchedSrc.slice(0, 100).map(n => <li key={n}>{n}</li>)}
+              </ul>
+              {info.unmatchedSrc.length > 100 && (
+                <p className="mt-1">…and {info.unmatchedSrc.length - 100} more.</p>
+              )}
+            </div>
           )}
         </div>
       )}

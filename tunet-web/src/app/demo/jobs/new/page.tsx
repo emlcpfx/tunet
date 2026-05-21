@@ -18,7 +18,7 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { useSession } from 'next-auth/react'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
-import { Input, FormRow } from '@/components/ui/input'
+import { Input, FormRow, InfoTip } from '@/components/ui/input'
 import { FolderPicker, type FolderPickerResult } from '@/components/spark/folder-picker'
 import { SubmitProgress, type SubmitEvent } from '@/components/spark/submit-progress'
 import { PreviewFilterDialog } from '@/components/spark/preview-filter-dialog'
@@ -748,7 +748,20 @@ Letters, numbers, _ and - only — anything else is sanitized."
         </Card>
 
         {/* ── Step 3: Data ──────────────────────────────────── */}
-        <Card step={3} title="Training Data">
+        <Card
+          step={3}
+          title="Training Data"
+          info={
+            'Accepted subfolder names (any one per role):\n' +
+            '• Source:  src, source, in, input\n' +
+            '• Target:  dst, dest, destination, out, output, target\n' +
+            '• Validation src:  val_src, val_source, val_input\n' +
+            '• Validation dst:  val_dst, val_dest, val_target\n' +
+            '• Mask (optional):  mask, masks, matte, mattes\n\n' +
+            'Image files: PNG, JPG/JPEG, EXR, TIF/TIFF, BMP, WEBP.\n\n' +
+            'Source and target filenames must match (e.g. frame_001.exr in both folders).'
+          }
+        >
           <p className="text-xs text-[#6b7280] mb-4">
             Pick your project folder to auto-detect <code className="bg-[#F9FAFB] px-1 rounded">src/</code>, <code className="bg-[#F9FAFB] px-1 rounded">dst/</code>, and validation folders.
             Or enter ShareSync paths manually below.
@@ -1197,7 +1210,7 @@ Leave the email field empty to opt out for this job entirely."
 
 // ── Subcomponents ───────────────────────────────────────────────────────────
 
-function Card({ step, title, children }: { step: number; title: string; children: React.ReactNode }) {
+function Card({ step, title, info, children }: { step: number; title: string; info?: string; children: React.ReactNode }) {
   return (
     <div className="bg-white border border-[#e5e7eb] rounded-xl p-5 card-shadow">
       <div className="flex items-center gap-2.5 mb-4">
@@ -1205,6 +1218,11 @@ function Card({ step, title, children }: { step: number; title: string; children
           {step}
         </span>
         <h2 className="text-base font-semibold text-[#111827]">{title}</h2>
+        {info && (
+          <span className="ml-auto">
+            <InfoTip text={info} align="right" />
+          </span>
+        )}
       </div>
       {children}
     </div>
