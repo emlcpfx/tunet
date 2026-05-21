@@ -1,16 +1,17 @@
 server {
-    listen 80;
-    listen [::]:80;
     server_name tunet.cleanplatefx.com;
 
-    # Large enough for ~1 GB .pth checkpoint uploads to /api/spark/upload-stage
-    # (and multi-hundred-MB training-frame batches). The route streams these to
-    # disk, so the cap is just a sanity ceiling.
+    # Matches next.config.ts experimental.serverActions.bodySizeLimit
     client_max_body_size 2g;
-    # Stream the request body to the backend instead of buffering the whole
-    # upload first — pairs with the route's streamed-to-disk handler so a 1 GB
-    # upload never fully lands in nginx or in the Node process's memory.
     proxy_request_buffering off;
+
+    # Auth.js stores the Keycloak session (access/id/refresh tokens) in cookies.
+    # Those make both the upstream Set-Cookie response header (on the OIDC
+    # callback) and the Cookie request header (on every later request) large —
+    # bigger than nginx's 8k defaults, which yields "upstream sent too big
+    # header" -> 502 on /api/auth/callback/keycloak, and later 400 "header too
+    # large". Roomy buffers below fix both. Scoped to this server block only.
+    large_client_header_buffers 8 32k;
 
     location / {
         proxy_pass http://127.0.0.1:3002;
@@ -21,6 +22,11 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
+        # Header buffer for the upstream response (used even with buffering off).
+        proxy_buffer_size       32k;
+        proxy_buffers           8 32k;
+        proxy_busy_buffers_size 64k;
+
         # WebSocket / SSE
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -29,4 +35,25 @@ server {
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
     }
+
+    listen [::]:443 ssl; # managed by Certbot
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/tunet.cleanplatefx.com/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/tunet.cleanplatefx.com/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+}
+server {
+    if ($host = tunet.cleanplatefx.com) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    listen 80;
+    listen [::]:80;
+    server_name tunet.cleanplatefx.com;
+    return 404; # managed by Certbot
+
+
 }
