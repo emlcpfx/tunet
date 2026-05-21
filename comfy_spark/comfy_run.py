@@ -51,7 +51,8 @@ Environment (set by comfy_launch.py):
 import base64
 import json
 import os
-import shutil
+import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -96,11 +97,30 @@ def http_json(url, method="GET", payload=None, timeout=60):
 
 def download(url, dest, label="file"):
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    log(f"downloading {label} -> {dest}")
     req = urllib.request.Request(url, headers={"User-Agent": "comfy_run/1.0"})
     with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
-        shutil.copyfileobj(r, f, length=1024 * 1024)
-    log(f"  {label} done ({os.path.getsize(dest) / 1024 / 1024:.1f} MB)")
+        total = int(r.headers.get("Content-Length") or 0)
+        total_mb = total / 1048576
+        log(f"downloading {label} ({total_mb:.0f} MB) -> {dest}" if total
+            else f"downloading {label} -> {dest}")
+        done, start, last = 0, time.time(), time.time()
+        while True:
+            buf = r.read(1048576)
+            if not buf:
+                break
+            f.write(buf)
+            done += len(buf)
+            now = time.time()
+            if now - last >= 3:
+                spd = done / (now - start) / 1048576 if now > start else 0
+                if total and spd > 0:
+                    eta = (total - done) / 1048576 / spd
+                    log(f"  {label} {done / 1048576:.0f}/{total_mb:.0f} MB "
+                        f"({spd:.0f} MB/s, ~{eta:.0f}s left)")
+                else:
+                    log(f"  {label} {done / 1048576:.0f} MB ({spd:.0f} MB/s)")
+                last = now
+    log(f"  {label} done ({os.path.getsize(dest) / 1048576:.1f} MB)")
 
 
 def ensure_comfyui(comfy_home, bundle):
@@ -349,6 +369,85 @@ def validate_graph(port, workflow):
         log("VALIDATION OK — /prompt accepted the graph (model files aside).")
 
 
+def ws_progress(port, client_id, workflow):
+    """Best-effort: stream ComfyUI's WebSocket progress events to the log with a
+    rough ETA. Minimal pure-stdlib WS client; any failure is swallowed (progress
+    is a nicety, not required for the render). Runs in a daemon thread until the
+    server closes the socket at teardown."""
+    try:
+        sock = socket.create_connection((HOST, port), timeout=10)
+    except OSError:
+        return
+    try:
+        key = base64.b64encode(os.urandom(16)).decode()
+        sock.sendall(
+            (f"GET /ws?clientId={client_id} HTTP/1.1\r\n"
+             f"Host: {HOST}:{port}\r\n"
+             "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+             f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        rbuf = b""
+        while b"\r\n\r\n" not in rbuf:                      # consume 101 handshake
+            chunk = sock.recv(4096)
+            if not chunk:
+                return
+            rbuf += chunk
+        rbuf = rbuf.split(b"\r\n\r\n", 1)[1]
+
+        def recvn(n):
+            nonlocal rbuf
+            while len(rbuf) < n:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    raise ConnectionError
+                rbuf += chunk
+            out, rbuf = rbuf[:n], rbuf[n:]
+            return out
+
+        cur, base, last_log = None, {}, 0.0
+        while True:
+            h = recvn(2)
+            opcode, ln = h[0] & 0x0F, h[1] & 0x7F
+            if ln == 126:
+                ln = struct.unpack(">H", recvn(2))[0]
+            elif ln == 127:
+                ln = struct.unpack(">Q", recvn(8))[0]
+            if h[1] & 0x80:                                  # masked (unexpected)
+                recvn(4)
+            payload = recvn(ln) if ln else b""
+            if opcode == 0x8:                                # close
+                return
+            if opcode != 0x1:                                # only text JSON
+                continue
+            try:
+                msg = json.loads(payload.decode("utf-8", "ignore"))
+            except ValueError:
+                continue
+            mtype, d = msg.get("type"), (msg.get("data") or {})
+            if mtype == "executing" and d.get("node") is not None:
+                cur, base = str(d["node"]), {}
+                name = (workflow.get(cur) or {}).get("class_type", cur)
+                log(f"running node {cur} ({name})")
+            elif mtype == "progress":
+                v, m = d.get("value"), d.get("max")
+                now = time.time()
+                if isinstance(v, int) and isinstance(m, int) and m > 0:
+                    base.setdefault(m, (now, v))             # baseline per phase
+                    if now - last_log >= 2:
+                        t0, v0 = base[m]
+                        per = (now - t0) / (v - v0) if v > v0 and now > t0 else 0
+                        eta = f" (~{(m - v) * per:.0f}s left)" if per > 0 else ""
+                        name = (workflow.get(cur) or {}).get("class_type", "") if cur else ""
+                        log(f"  {name + ': ' if name else ''}step {v}/{m}{eta}")
+                        last_log = now
+    except (OSError, ConnectionError, ValueError):
+        return
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 def queue_prompt(port, workflow, client_id):
     resp = http_json(f"http://{HOST}:{port}/prompt", method="POST",
                      payload={"prompt": workflow, "client_id": client_id})
@@ -479,6 +578,8 @@ def main():
         if not prompt_id:
             return 1
         log(f"Queued prompt_id={prompt_id} — running...")
+        threading.Thread(target=ws_progress, args=(port, client_id, workflow),
+                         daemon=True).start()
         ok = wait_for_completion(port, prompt_id)
         exit_code = 0 if ok else 1
         log("Done." if ok else "Failed.")
