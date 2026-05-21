@@ -99,6 +99,49 @@ def load_catalog(name):
         return {}
 
 
+def _parse_rate(s):
+    """ffprobe rates are 'num/den' (e.g. '24000/1001') or a bare float."""
+    try:
+        if "/" in s:
+            a, b = s.split("/", 1)
+            return float(a) / float(b) if float(b) else None
+        return float(s) if s else None
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def probe_video(path):
+    """(nframes, fps) for a clip via ffprobe, or (None, None) if it can't be read
+    (ffprobe missing, not a video, parse error). Reads container metadata only —
+    duration × fps — so it's fast (no full-clip decode like -count_frames)."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=avg_frame_rate,r_frame_rate,nb_frames",
+             "-show_entries", "format=duration", "-of", "json", path],
+            capture_output=True, text=True, timeout=30)
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None, None
+    if out.returncode != 0:
+        return None, None
+    try:
+        data = json.loads(out.stdout or "{}")
+    except ValueError:
+        return None, None
+    st = (data.get("streams") or [{}])[0]
+    fps = _parse_rate(st.get("avg_frame_rate") or "") or _parse_rate(st.get("r_frame_rate") or "")
+    nb = st.get("nb_frames")
+    nframes = int(nb) if (nb and str(nb).isdigit() and int(nb) > 0) else None
+    if nframes is None:                       # container didn't store a count → derive it
+        dur = (data.get("format") or {}).get("duration")
+        try:
+            if dur and fps:
+                nframes = round(float(dur) * fps)
+        except (ValueError, TypeError):
+            nframes = None
+    return (nframes or None), fps
+
+
 # ── app ───────────────────────────────────────────────────────────────────────
 
 class App:
@@ -203,6 +246,7 @@ class App:
         self.param_getters = {}
         self.param_vars = {}        # param name -> tk var (for the resolution dropdown to drive)
         self.lora_rows = []
+        self.detect_note = None     # label under the input row; filled by the clip probe
         preset = self.presets[self.preset_var.get()]
         ui = preset.get("ui", {})
         self.title_lbl.config(text=ui.get("title", preset.get("description", "")[:90]))
@@ -222,7 +266,11 @@ class App:
             if prim or needs_input:
                 label = (prim or {}).get("label", "Primary input file")
                 self._file_row(f, label, self.primary_var, (prim or {}).get("filetypes"),
-                               (prim or {}).get("tooltip"))
+                               (prim or {}).get("tooltip"), on_change=self._probe_and_fill)
+                # auto-detect line: shows the picked clip's frame count + fps and
+                # which Frames/fps values we filled in below.
+                self.detect_note = ttk.Label(f, text="", wraplength=720)
+                self.detect_note.pack(anchor="w", padx=(26, 0))
             if has_mask:
                 self._file_row(f, "Mask (image or video)", self.mask_var,
                                [["Image", "*.png *.jpg *.jpeg *.webp"],
@@ -265,16 +313,76 @@ class App:
         # output dir + compute
         self._tail_section(preset)
 
-    def _file_row(self, parent, label, var, filetypes, tip):
+    def _file_row(self, parent, label, var, filetypes, tip, on_change=None):
         row = ttk.Frame(parent)
         row.pack(fill="x", pady=3)
         ttk.Label(row, text=label, width=18).pack(side="left")
         _help(row, tip).pack(side="left", padx=(0, 6))
-        ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
+        entry = ttk.Entry(row, textvariable=var)
+        entry.pack(side="left", fill="x", expand=True)
         ft = [tuple(t) for t in filetypes] if filetypes else [("All files", "*.*")]
-        ttk.Button(row, text="Browse…",
-                   command=lambda: var.set(filedialog.askopenfilename(filetypes=ft) or var.get())
-                   ).pack(side="left", padx=4)
+
+        def browse():
+            chosen = filedialog.askopenfilename(filetypes=ft)
+            if chosen:
+                var.set(chosen)
+                if on_change:
+                    on_change()
+        ttk.Button(row, text="Browse…", command=browse).pack(side="left", padx=4)
+        if on_change:                    # also probe a hand-typed / pasted path
+            entry.bind("<FocusOut>", lambda _e: on_change())
+            entry.bind("<Return>", lambda _e: on_change())
+
+    # ── input-clip probe → auto-fill Frames + fps ───────────────────────────────
+
+    def _probe_and_fill(self):
+        """Read the just-picked input clip and auto-fill the Frames + fps knobs.
+        Probes off-thread (ffprobe metadata read) and marshals the result back to
+        the UI thread; degrades quietly if ffprobe isn't installed."""
+        path = self.primary_var.get().strip()
+        if not path or not os.path.isfile(path) or not self.detect_note:
+            return
+        self.detect_note.config(text="reading clip…", foreground="#888")
+        note = self.detect_note
+
+        def work():
+            nframes, fps = probe_video(path)
+            self.root.after(0, lambda: self._apply_probe(note, nframes, fps))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_probe(self, note, nframes, fps):
+        if not note.winfo_exists():        # form was rebuilt while probing
+            return
+        if not nframes:
+            note.config(text="couldn't read the clip — install ffmpeg/ffprobe to auto-detect "
+                             "frames; left at the preset default.", foreground="#c33")
+            return
+        msg = [f"{nframes} frames" + (f" @ {fps:.4g} fps" if fps else "")]
+        params = self.presets[self.preset_var.get()].get("params", {})
+        lui = (params.get("length") or {}).get("ui", {})
+        if nframes > 1 and "length" in self.param_vars:
+            lo, hi = float(lui.get("min", 9)), float(lui.get("max", 497))
+            valid = self._round_to_grid(nframes, lo, hi, float(lui.get("step", 8)))
+            self.param_vars["length"].set(float(valid))
+            if nframes > hi and valid >= hi:
+                msg.append(f"→ Frames {valid} (capped at max)")
+            elif valid != nframes:
+                msg.append(f"→ Frames {valid} (nearest 8n+1)")
+            else:
+                msg.append(f"→ Frames {valid}")
+        if fps and "fps" in self.param_vars:
+            fui = (params.get("fps") or {}).get("ui", {})
+            flo, fhi = float(fui.get("min", 1)), float(fui.get("max", 1000))
+            rfps = int(max(flo, min(fhi, round(fps))))
+            self.param_vars["fps"].set(float(rfps))
+            msg.append(f"fps {rfps}" + (" (capped)" if rfps != round(fps) else ""))
+        note.config(text="clip: " + ", ".join(msg), foreground="#2a7a2a")
+
+    @staticmethod
+    def _round_to_grid(x, lo, hi, step):
+        """Snap x to the nearest lo + k·step (LTX's 8n+1 grid), clamped to [lo, hi]."""
+        k = round((x - lo) / step)
+        return int(max(lo, min(hi, lo + k * step)))
 
     def _resolution_row(self, parent, resolutions, params):
         """A dropdown of common known-good sizes that fills the size fields below.

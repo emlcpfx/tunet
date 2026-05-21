@@ -19,6 +19,9 @@
 
   "workflow": "ltx_Obscura_Remova.workflow.json",
 
+  "_OUTPUTNAME": "Renders are named <inputstem>_<preset>_#####.ext — comfy_launch.py computes the prefix from the input file + preset name and patches node 410's filename_prefix (the only save node; node 409 is a preview, save_output=false). ComfyUI appends its own ##### counter. Override per-run with --set 410.inputs.filename_prefix=...",
+  "output_prefix": { "nodes": ["410"], "path": "inputs.filename_prefix", "template": "{stem}_{preset}" },
+
   "node_packs": [
     "https://github.com/Lightricks/ComfyUI-LTXVideo",
     "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite",

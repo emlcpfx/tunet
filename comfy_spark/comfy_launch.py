@@ -690,6 +690,22 @@ def main():
                 continue
             patch_ops.append({"node": str(spec["node"]), "path": spec["path"], "value": val})
 
+        # Output filename: name renders <inputstem>_<preset> so ComfyUI's own
+        # counter yields e.g. myclip_ltx_Obscura_Remova_00001.mp4 instead of the
+        # graph's baked "LTX2.3" prefix. Overridable per-run via --set (applied
+        # after this, so it wins). Skipped on convert-only (no input to name from).
+        op = preset.get("output_prefix")
+        if op and args.video:
+            stem = os.path.splitext(os.path.basename(args.video))[0]
+            model_tag = str(preset.get("base", "")).split("-")[0]
+            raw = op.get("template", "{stem}_{preset}").format(
+                stem=stem, preset=args.preset or "comfy", model=model_tag)
+            prefix = "".join(c if (c.isalnum() or c in "._-") else "_" for c in raw)[:120] or "output"
+            for nid in op.get("nodes", []):
+                patch_ops.append({"node": str(nid), "path": op.get("path", "inputs.filename_prefix"),
+                                  "value": prefix})
+            print(f"[comfy] output filename prefix: {prefix!r} → ComfyUI adds its #####.ext counter")
+
     for s in args.set:  # generic overrides, applied last so they win
         if "=" not in s:
             sys.exit(f"ERROR: --set needs NODE.path=value, got {s!r}")
