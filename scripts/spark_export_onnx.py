@@ -22,6 +22,16 @@ import os
 import sys
 from types import SimpleNamespace
 
+# This script lives in scripts/, so `python scripts/spark_export_onnx.py` puts
+# scripts/ — not the repo root — on sys.path[0], which breaks the in-tree
+# `from models import …` / `from exporters import …` below (train.py doesn't
+# hit this because it sits at the repo root). Prepend the repo root (this
+# file's parent's parent) so those packages import the same way they do for
+# training.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import torch
 
 
