@@ -134,9 +134,17 @@ export async function POST(req: Request) {
           loras:        body.loras,
           readyTimeout: body.readyTimeout,
         })
+        const rawName = typeof body.values?.['__name'] === 'string' ? (body.values['__name'] as string).trim() : ''
+        const jobName = rawName || `comfy-${preset.key}`
+        // Spark doesn't echo the submit `name` back in list/detail responses, so
+        // stash it (+ preset/mode markers) in env for the dashboard to show —
+        // same as training jobs. Without this the dashboard falls back to the id.
+        env.TUNET_JOB_NAME = jobName
+        env.TUNET_PRESET   = preset.key
+        env.TUNET_MODE     = 'comfy'
         const mode = body.mode === 'smart' ? 'smart' : 'instant'
         const submitResp = await submitJob({
-          name:            body.values?.['__name'] as string || `comfy-${preset.key}`,
+          name:            jobName,
           instanceType:    comfyInstanceType(preset, body.gpu),
           image:           preset.image,
           command:         comfyCommand(preset),

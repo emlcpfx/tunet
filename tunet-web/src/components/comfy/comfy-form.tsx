@@ -297,8 +297,22 @@ function Card({ children }: { children: React.ReactNode }) {
 
 function Label({ children, tip }: { children: React.ReactNode; tip?: string }) {
   return (
-    <label className="block text-xs font-semibold text-[#374151] mb-1.5" title={tip}>
-      {children}{tip && <span className="ml-1 text-[#9ca3af] cursor-help">ⓘ</span>}
+    <label className="flex items-center gap-1 text-xs font-semibold text-[#374151] mb-1.5">
+      <span>{children}</span>
+      {tip && (
+        <span className="relative inline-flex group" tabIndex={0}>
+          <span className="text-[#9ca3af] cursor-help">ⓘ</span>
+          <span
+            role="tooltip"
+            className="pointer-events-none invisible opacity-0 group-hover:visible group-hover:opacity-100
+                       group-focus-within:visible group-focus-within:opacity-100 transition-opacity duration-100 delay-150
+                       absolute left-0 top-5 z-50 bg-[#1F2937] text-[#F3F4F6] text-xs font-normal leading-relaxed
+                       rounded-md shadow-lg px-3 py-2 w-72 max-w-[18rem] whitespace-pre-wrap"
+          >
+            {tip}
+          </span>
+        </span>
+      )}
     </label>
   )
 }
