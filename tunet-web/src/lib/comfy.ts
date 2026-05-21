@@ -1,0 +1,248 @@
+/**
+ * Server-side helpers for EZ-Comfy — a web port of comfy_spark/comfy_launch.py.
+ *
+ * A "comfy job" is just another Spark job: pack a tiny tarball
+ * (comfy_run.py + workflow.json + patches.json + the input clip) that extracts
+ * to /input/, then submit it with the preset's ComfyUI image and the command
+ * `bash -c "<python> /input/comfy_run.py"`. comfy_run.py (shipped verbatim from
+ * the repo) does the heavy lifting on the Spark node: clone node packs, fetch
+ * weights, convert the UI graph to API format, apply patches, render, and
+ * self-upload the outputs to ShareSync.
+ *
+ * This module mirrors comfy_launch.py's CLIENT side (build patches, build env,
+ * pack, pick instance) and reuses spark.ts (submitJob / uploadInputTarball /
+ * getToken) so it inherits the per-user Keycloak auth + the streaming uploader.
+ */
+
+import 'server-only'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import * as os from 'node:os'
+import * as crypto from 'node:crypto'
+import * as tar from 'tar'
+import { pipeline } from 'node:stream/promises'
+import { findTunetRepoRoot } from './spark-packer'
+import { GPU_TYPES, type GpuKey } from './spark'
+
+// ── Preset model ──────────────────────────────────────────────────────────────
+
+export interface ComfyParamSpec {
+  node:    string
+  path:    string
+  default?: unknown
+  ui?:     Record<string, unknown>
+}
+
+export interface ComfyPreset {
+  key:           string
+  description?:   string
+  base?:         string
+  image?:        string
+  comfy_home?:   string
+  comfy_bundle?: string
+  python?:       string
+  gpu?:          string
+  mode?:         string
+  extra_args?:   string
+  workflow:      string                 // filename under presets/
+  node_packs?:   string[]
+  models?:       { url: string; dest: string }[]
+  lora_default?: string
+  lora_name?:    string
+  lora_chain?:   { anchor: string; slot: number }
+  lora_catalog?: string
+  output_prefix?: { nodes: string[]; path?: string; template?: string }
+  ui?:           Record<string, unknown>
+  params:        Record<string, ComfyParamSpec>
+}
+
+/** comfy_spark/ sits at the repo root next to train.py. */
+export function comfyDir(): string {
+  return path.join(findTunetRepoRoot(), 'comfy_spark')
+}
+
+const KEY_RE = /^[A-Za-z0-9._-]+$/
+
+export function loadComfyPresets(): ComfyPreset[] {
+  const dir = path.join(comfyDir(), 'presets')
+  if (!fs.existsSync(dir)) return []
+  const out: ComfyPreset[] = []
+  for (const f of fs.readdirSync(dir).sort()) {
+    if (!f.endsWith('.preset.json')) continue
+    try {
+      const p = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))
+      out.push({ ...p, key: f.slice(0, -'.preset.json'.length) })
+    } catch { /* skip a malformed preset rather than break the whole list */ }
+  }
+  return out
+}
+
+export function loadComfyPreset(key: string): ComfyPreset | null {
+  if (!KEY_RE.test(key)) return null
+  const file = path.join(comfyDir(), 'presets', `${key}.preset.json`)
+  if (!fs.existsSync(file)) return null
+  try {
+    return { ...JSON.parse(fs.readFileSync(file, 'utf8')), key }
+  } catch {
+    return null
+  }
+}
+
+/** The workflow JSON a preset points at (UI-format graph for our presets). */
+export function loadComfyWorkflow(preset: ComfyPreset): unknown {
+  const file = path.join(comfyDir(), 'presets', preset.workflow)
+  if (!fs.existsSync(file)) throw new Error(`workflow ${preset.workflow} not found for preset ${preset.key}`)
+  return JSON.parse(fs.readFileSync(file, 'utf8'))
+}
+
+/** A LoRA catalog (name → {url,file,triggers,...}) referenced by a preset. */
+export function loadLoraCatalog(preset: ComfyPreset): Record<string, { url: string; file: string }> {
+  const name = preset.lora_catalog
+  if (!name || !KEY_RE.test(name.replace(/\.json$/, ''))) return {}
+  const file = path.join(comfyDir(), 'loras', name)
+  if (!fs.existsSync(file)) return {}
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8')).loras ?? {}
+  } catch {
+    return {}
+  }
+}
+
+// ── Patches ─────────────────────────────────────────────────────────────────
+
+export interface ComfyPatch { node: string; path: string; value: unknown }
+
+/**
+ * Build the patch list from preset params + the form values, mirroring
+ * comfy_launch.py: each declared param maps to a node.path; the `video` param
+ * gets the input basename; output_prefix nodes get a sanitized prefix.
+ */
+export function buildComfyPatches(
+  preset: ComfyPreset,
+  values: Record<string, unknown>,
+  inputBasename: string | null,
+): ComfyPatch[] {
+  const ops: ComfyPatch[] = []
+  for (const [name, spec] of Object.entries(preset.params ?? {})) {
+    let val: unknown = values[name]
+    if (val === undefined || val === null || val === '') {
+      val = name === 'video' && inputBasename ? inputBasename : spec.default
+    }
+    if (val === undefined || val === null) continue
+    ops.push({ node: String(spec.node), path: spec.path, value: val })
+  }
+
+  const op = preset.output_prefix
+  if (op && inputBasename) {
+    const stem  = inputBasename.replace(/\.[^.]+$/, '')
+    const model = String(preset.base ?? '').split('-')[0]
+    const raw   = (op.template ?? '{stem}_{preset}')
+      .replaceAll('{stem}', stem)
+      .replaceAll('{preset}', preset.key)
+      .replaceAll('{model}', model)
+    const prefix = (raw.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120)) || 'output'
+    for (const nid of op.nodes ?? []) {
+      ops.push({ node: String(nid), path: op.path ?? 'inputs.filename_prefix', value: prefix })
+    }
+  }
+  return ops
+}
+
+// ── Env / instance / command ──────────────────────────────────────────────────
+
+export interface ComfyLora { url: string; file: string; strength: number }
+
+/**
+ * The job env block comfy_run.py reads. `uploadToken` is the Spark bearer it
+ * uses post-render to self-upload /output to ShareSync (the agent doesn't sync
+ * it). NOTE: the token must outlive the render — pass a sufficiently long-lived
+ * token (see the submit route).
+ */
+export function buildComfyEnv(
+  preset: ComfyPreset,
+  uploadToken: string,
+  opts: { hasPatches: boolean; loras?: ComfyLora[]; readyTimeout?: number },
+): Record<string, string> {
+  const env: Record<string, string> = {
+    COMFY_WORKFLOW:       '/input/workflow.json',
+    COMFY_READY_TIMEOUT:  String(opts.readyTimeout ?? 300),
+    COMFY_RUN_ID:         crypto.randomBytes(16).toString('hex'),
+    COMFY_UPLOAD_TOKEN:   uploadToken,
+  }
+  if (opts.hasPatches) env.COMFY_PATCHES = '/input/patches.json'
+  if (preset.lora_default) {
+    env.COMFY_LORA_URL  = preset.lora_default
+    env.COMFY_LORA_NAME = preset.lora_name ?? 'lora.safetensors'
+  }
+  if (opts.loras?.length && preset.lora_chain) {
+    env.COMFY_LORAS      = JSON.stringify(opts.loras.map(l => ({ url: l.url, file: l.file, strength: l.strength })))
+    env.COMFY_LORA_CHAIN = JSON.stringify(preset.lora_chain)
+  }
+  if (preset.extra_args)   env.COMFY_EXTRA_ARGS  = preset.extra_args
+  if (preset.comfy_home)   env.COMFY_HOME        = preset.comfy_home
+  if (preset.comfy_bundle) env.COMFY_BUNDLE      = preset.comfy_bundle
+  if (preset.node_packs)   env.COMFY_FETCH_NODES = JSON.stringify(preset.node_packs)
+  if (preset.models)       env.COMFY_FETCH_MODELS = JSON.stringify(preset.models)
+  return env
+}
+
+/** Resolve the Spark SKU from the preset's gpu (or an override). */
+export function comfyInstanceType(preset: ComfyPreset, gpuOverride?: string): string {
+  const key = (gpuOverride || preset.gpu || 'rtxpro6000') as GpuKey
+  return GPU_TYPES[key]?.sku ?? GPU_TYPES.rtxpro6000.sku
+}
+
+/** Run under the image's real interpreter (e.g. python3.13 on the yanwk image). */
+export function comfyCommand(preset: ComfyPreset): string[] {
+  return ['bash', '-c', `${preset.python ?? 'python3'} /input/comfy_run.py`]
+}
+
+// ── Pack ───────────────────────────────────────────────────────────────────────
+
+/**
+ * Stream a comfy job tarball to disk: workflow.json + patches.json +
+ * comfy_run.py + the input clip (by basename). Never holds the clip in RAM —
+ * everything is written/copied on disk and tar-streamed (the same discipline as
+ * spark-packer, so a multi-hundred-MB clip won't OOM the box). Caller deletes
+ * the returned tarball after upload.
+ */
+export async function packComfyTarball(opts: {
+  workflow:      unknown
+  patches:       ComfyPatch[] | null
+  inputPath:     string | null
+  inputBasename: string | null
+}): Promise<{ tarballPath: string; fileCount: number; compressedSize: number }> {
+  const runner = path.join(comfyDir(), 'comfy_run.py')
+  if (!fs.existsSync(runner)) throw new Error(`comfy_run.py not found at ${runner}`)
+
+  const stamp = Date.now().toString(36)
+  const stage = path.join(os.tmpdir(), `comfy-pack-${stamp}-${process.pid}`)
+  await fs.promises.mkdir(stage, { recursive: true })
+  let fileCount = 0
+  try {
+    await fs.promises.writeFile(path.join(stage, 'workflow.json'), JSON.stringify(opts.workflow))
+    fileCount += 1
+    if (opts.patches) {
+      await fs.promises.writeFile(path.join(stage, 'patches.json'), JSON.stringify(opts.patches))
+      fileCount += 1
+    }
+    await fs.promises.copyFile(runner, path.join(stage, 'comfy_run.py'))
+    fileCount += 1
+    if (opts.inputPath && opts.inputBasename) {
+      // basename only — the workflow references the clip by bare filename
+      await fs.promises.copyFile(opts.inputPath, path.join(stage, path.basename(opts.inputBasename)))
+      fileCount += 1
+    }
+
+    const entries     = await fs.promises.readdir(stage)
+    const tarballPath  = path.join(os.tmpdir(), `comfy-tarball-${stamp}-${process.pid}.tar.gz`)
+    await pipeline(
+      tar.create({ gzip: { level: 6 }, cwd: stage, follow: false, portable: true }, entries),
+      fs.createWriteStream(tarballPath),
+    )
+    const compressedSize = (await fs.promises.stat(tarballPath)).size
+    return { tarballPath, fileCount, compressedSize }
+  } finally {
+    await fs.promises.rm(stage, { recursive: true, force: true }).catch(() => {})
+  }
+}

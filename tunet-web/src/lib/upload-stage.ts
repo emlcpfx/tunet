@@ -95,13 +95,29 @@ export async function uploadCheckpoint(
   file: File,
   onProgress?: (sent: number, total: number) => void,
 ): Promise<{ stageId: string; filename: string; bytes: number }> {
+  return uploadRawChunked(file, 'checkpoint', onProgress)
+}
+
+/** EZ-Comfy input clip — same chunked raw upload, staged under 'comfy_input'. */
+export async function uploadComfyInput(
+  file: File,
+  onProgress?: (sent: number, total: number) => void,
+): Promise<{ stageId: string; filename: string; bytes: number }> {
+  return uploadRawChunked(file, 'comfy_input', onProgress)
+}
+
+async function uploadRawChunked(
+  file: File,
+  role: string,
+  onProgress?: (sent: number, total: number) => void,
+): Promise<{ stageId: string; filename: string; bytes: number }> {
   let stageId = ''
   const total = file.size
   for (let start = 0; start < total; start += CHECKPOINT_CHUNK_BYTES) {
     const end = Math.min(start + CHECKPOINT_CHUNK_BYTES, total)
     const headers: Record<string, string> = {
       'content-type': 'application/octet-stream',
-      'x-role':       'checkpoint',
+      'x-role':       role,
       'x-filename':   encodeURIComponent(file.name),
       'x-chunk-mode': start === 0 ? 'create' : 'append',
     }
@@ -120,6 +136,6 @@ export async function uploadCheckpoint(
     stageId = json.stageId
     onProgress?.(end, total)
   }
-  if (!stageId) throw new Error('checkpoint file is empty')
+  if (!stageId) throw new Error('file is empty')
   return { stageId, filename: file.name, bytes: total }
 }

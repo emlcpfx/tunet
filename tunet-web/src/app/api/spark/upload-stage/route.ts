@@ -41,7 +41,9 @@ export const maxDuration = 300
 // the .pth they have on disk. Single file, not batched. training-jobs
 // reads it from <stageDir>/checkpoint/<filename> and threads it into the
 // extraFiles bundle just like a Spark-source resume would.
-const ALLOWED_ROLES = new Set(['src', 'dst', 'val_src', 'val_dst', 'mask', 'checkpoint'])
+// 'comfy_input' is the EZ-Comfy input clip (a single video, uploaded as raw
+// chunks via uploadCheckpoint-style streaming → staged at <stage>/comfy_input/).
+const ALLOWED_ROLES = new Set(['src', 'dst', 'val_src', 'val_dst', 'mask', 'checkpoint', 'comfy_input'])
 
 function stageDir(stageId: string): string {
   return path.join(os.tmpdir(), 'tunet-stages', stageId)
