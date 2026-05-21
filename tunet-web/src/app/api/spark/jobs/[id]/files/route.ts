@@ -14,7 +14,8 @@
  * outside the job's own dir anyway.
  */
 
-import { getJob, fetchOutputFile, listOutputDir, shareSyncBaseUrl, getToken } from '@/lib/spark'
+import { getJob, fetchOutputFile, listOutputDir, propfindDir, shareSyncBaseUrl, getToken } from '@/lib/spark'
+import type { SparkJob } from '@/lib/spark'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -75,14 +76,8 @@ export async function GET(
   // ── List mode ────────────────────────────────────────────────────────────
   if (!path) {
     try {
-      const entries = await listOutputDir(job)
-      return new Response(JSON.stringify({
-        entries: entries.filter(e => !e.isDir).map(e => ({
-          name: e.name,
-          size: e.size,
-          modified: e.modified,
-        })),
-      }), {
+      const entries = await listOutputFiles(job)
+      return new Response(JSON.stringify({ entries }), {
         headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
       })
     } catch (e) {
@@ -142,6 +137,46 @@ function jsonError(msg: string, status: number): Response {
     status,
     headers: { 'Content-Type': 'application/json' },
   })
+}
+
+interface ListedFile { name: string; size: number; modified: string | null }
+
+/**
+ * List a job's downloadable files: the top-level output dir PLUS a one-level
+ * descent into `exports/<sub>/` (flame, nuke, …). The auto-export + the
+ * "Export now" job write their ONNX / Nuke deliverables two levels deep
+ * (train.py → exporters/auto_export.py: `exports/flame/*.onnx`,
+ * `exports/nuke/*.{pt,nk,cat}`), but a Depth-1 PROPFIND only sees the
+ * `exports/` directory itself — so without this descent the Downloads panel's
+ * Flame/Nuke cards never find their files and stay greyed out.
+ *
+ * Nested files carry their relative path as `name` (e.g.
+ * "exports/flame/foo.onnx") so the fetch route can resolve them and the panel
+ * can classify by subfolder. We descend only into `exports/` (not arbitrary
+ * dirs) to keep this bounded to ~1 + N extra PROPFINDs per list call.
+ */
+async function listOutputFiles(job: SparkJob): Promise<ListedFile[]> {
+  const base = shareSyncBaseUrl(job)
+  if (!base) throw new Error('No ShareSync URL available for this job')
+
+  const top = await listOutputDir(job)
+  const files: ListedFile[] = top
+    .filter(e => !e.isDir)
+    .map(e => ({ name: e.name, size: e.size, modified: e.modified }))
+
+  const exportsDir = top.find(e => e.isDir && e.name.toLowerCase() === 'exports')
+  if (exportsDir) {
+    const subs = await propfindDir(`${base}/exports`)
+    for (const sub of subs) {
+      if (!sub.isDir) continue
+      const subFiles = await propfindDir(`${base}/exports/${encodeURIComponent(sub.name)}`)
+      for (const f of subFiles) {
+        if (f.isDir) continue
+        files.push({ name: `exports/${sub.name}/${f.name}`, size: f.size, modified: f.modified })
+      }
+    }
+  }
+  return files
 }
 
 /**

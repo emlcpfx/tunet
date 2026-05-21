@@ -83,10 +83,17 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
     )
   }
 
-  // Classify
-  const onnxFlame = files.find(f => /flame|ae(_|\.|$)/i.test(f.name) && f.name.endsWith('.onnx'))
-  const onnxNuke  = files.find(f => /nuke/i.test(f.name) && f.name.endsWith('.onnx'))
-  const onnxAny   = files.filter(f => f.name.endsWith('.onnx'))
+  // Classify. Exports land under exports/<flame|nuke>/… (the files route
+  // descends one level into them), so classify by that subfolder rather than
+  // the basename — and surface the most-recent when several epochs exist.
+  const flameOnnx = files.filter(f => /(^|\/)flame\//i.test(f.name) && f.name.endsWith('.onnx'))
+                         .sort(byModifiedDesc)[0] ?? null
+  // Nuke's deliverable is a trio — .cat (Cattery model) + .nk (node) + .pt
+  // (TorchScript) — NOT an .onnx. Group them and surface the .cat as primary.
+  const nukeFiles = files.filter(f => /(^|\/)nuke\//i.test(f.name) && /\.(cat|nk|pt)$/i.test(f.name))
+                         .sort(byModifiedDesc)
+  const nukePrimary = nukeFiles.find(f => f.name.endsWith('.cat')) ?? nukeFiles[0] ?? null
+  const allExports  = files.filter(f => f.name.startsWith('exports/')).sort(byModifiedDesc)
   const pthLatest = files.find(f => /_latest\.pth$/.test(f.name))
                 ?? files.filter(f => f.name.endsWith('.pth')).sort(byModifiedDesc)[0]
   const pthEpochs = files.filter(f => f.name.endsWith('.pth') && f.name !== pthLatest?.name)
@@ -206,15 +213,16 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
         />
         <DownloadCard
           jobId={job.id}
-          file={onnxFlame ?? null}
+          file={flameOnnx}
           title="Export for Flame / After Effects"
-          subtitle={onnxFlame?.name ?? 'Available after training completes'}
+          subtitle="No export yet — use Export now"
         />
         <DownloadCard
           jobId={job.id}
-          file={onnxNuke ?? null}
+          file={nukePrimary}
           title="Export for Nuke"
-          subtitle={onnxNuke?.name ?? 'Available after training completes'}
+          subtitle="No export yet — use Export now"
+          extraDownloadFiles={nukeFiles.filter(f => f !== nukePrimary)}
         />
         <DownloadCard
           jobId={job.id}
@@ -225,15 +233,20 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
         />
       </div>
 
-      {/* All ONNX (if more than the two named ones) */}
-      {onnxAny.length > 2 && (
+      {/* Every file in the exports/ tree — Flame .onnx/.json, Nuke .cat/.nk/.pt,
+          across all exported epochs — each individually downloadable. The two
+          cards above are just quick links to the latest of each. */}
+      {allExports.length > 0 && (
         <div className="mt-3">
-          <p className="text-xs font-semibold text-[#374151] mb-1">All ONNX files</p>
-          <ul className="space-y-1">
-            {onnxAny.map(f => (
+          <p className="text-xs font-semibold text-[#374151] mb-1">All exports ({allExports.length})</p>
+          <ul className="space-y-1 max-h-64 overflow-auto">
+            {allExports.map(f => (
               <li key={f.name} className="flex items-center justify-between text-xs">
-                <span className="font-mono text-[#374151]">{f.name}</span>
-                <DownloadLink jobId={job.id} file={f} />
+                <span className="font-mono text-[#374151]">{f.name.replace(/^exports\//, '')}</span>
+                <span className="flex items-center gap-3">
+                  <span className="text-[#9ca3af]">{formatBytes(f.size)}</span>
+                  <DownloadLink jobId={job.id} file={f} />
+                </span>
               </li>
             ))}
           </ul>
@@ -323,7 +336,7 @@ function DownloadCard({
       <div className="min-w-0 flex-1">
         <div className="text-sm font-semibold text-[#111827]">{title}</div>
         <div className="text-[11px] text-[#6b7280] truncate">
-          {file ? <>{file.name}{file.size > 0 && ` · ${formatBytes(file.size)}`}</> : subtitle}
+          {file ? <>{file.name.split('/').pop()}{file.size > 0 && ` · ${formatBytes(file.size)}`}</> : subtitle}
         </div>
       </div>
       {extraDownloadFiles && extraDownloadFiles.length > 0 && (

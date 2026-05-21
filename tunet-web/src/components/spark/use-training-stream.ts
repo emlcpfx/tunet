@@ -40,6 +40,25 @@ export interface TrainingStreamState {
    * per-step cost) into per-epoch quantities.
    */
   iterationsPerEpoch: number | null
+  /**
+   * Latest cumulative `global_step` from a train line's `Step[N]` (train.py
+   * keeps this counting across a resume). Null until the first train line.
+   */
+  currentStep: number | null
+  /**
+   * Latest cumulative epoch number from a train line's `Epoch[N]` (1-indexed,
+   * in-progress; also continues across a resume). Null until first train line.
+   */
+  currentEpoch: number | null
+  /**
+   * Global-step baseline this run resumed from, parsed from train.py's
+   * "Resuming from Global Step N (Logical Epoch M)" line (train.py:872).
+   * Null for fresh / fine-tune runs (which start global_step at 0). When set,
+   * `currentStep - resumeFromStep` is "steps since resume".
+   */
+  resumeFromStep:  number | null
+  /** Logical-epoch baseline (1-indexed) from the same resume line; null if not a resume. */
+  resumeFromEpoch: number | null
 }
 
 const EMPTY_STREAM: TrainingStreamState = {
@@ -47,6 +66,10 @@ const EMPTY_STREAM: TrainingStreamState = {
   scalars: { stepTimeS: [], valPsnr: [], valSsim: [] },
   status:  'connecting',
   iterationsPerEpoch: null,
+  currentStep:     null,
+  currentEpoch:    null,
+  resumeFromStep:  null,
+  resumeFromEpoch: null,
 }
 
 const TRAIN_RE = /Epoch\[(\d+)\]\s*Step\[(\d+)\]\s*(?:\((\d+)\/(\d+)\))?.*?\b(L1|L2|BCE\+Dice):([\d.]+)/
@@ -56,6 +79,7 @@ const VAL_RE   = /Val Epoch\[(\d+)\].*?Val_(L1|L2|BCE\+Dice):([\d.]+)/
 const VAL_LPIPS_RE = /Val_LPIPS:([\d.]+)/
 const VAL_PSNR_RE  = /PSNR:([\d.]+)dB/
 const VAL_SSIM_RE  = /SSIM:([\d.]+)/
+const RESUME_RE    = /Resuming from Global Step (\d+) \(Logical Epoch (\d+)\)/
 
 interface LogLine {
   ts:     string
@@ -107,6 +131,18 @@ function openStream(jobId: string) {
     const line = parsed.line
     const cur  = store.state
 
+    // Resume baseline (one-shot, early in the run). Cheap regex, rare line —
+    // checked before the train branch so it can't be shadowed by it.
+    const rm = line.match(RESUME_RE)
+    if (rm) {
+      emit(store, {
+        ...cur,
+        resumeFromStep:  parseInt(rm[1], 10),
+        resumeFromEpoch: parseInt(rm[2], 10),
+      })
+      return
+    }
+
     const tm = line.match(TRAIN_RE)
     if (tm) {
       const epoch    = parseInt(tm[1], 10)
@@ -129,7 +165,11 @@ function openStream(jobId: string) {
       // because progressive_resolution can change it mid-run.
       const iterationsPerEpoch = stepTot && stepTot > 0 ? stepTot : cur.iterationsPerEpoch
 
-      emit(store, { ...cur, series, scalars, iterationsPerEpoch })
+      // Step[N]/Epoch[N] are cumulative (continue across a resume).
+      const currentStep  = parseInt(tm[2], 10)
+      const currentEpoch = epoch
+
+      emit(store, { ...cur, series, scalars, iterationsPerEpoch, currentStep, currentEpoch })
       return
     }
 

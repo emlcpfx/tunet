@@ -14,6 +14,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useTrainingStream, type Point } from './use-training-stream'
+import { parseFormState } from '@/lib/spark-form-state'
 import type { SparkJob } from '@/lib/spark-types'
 
 // Mirror of /api/spark/pricing's PricingMap shape (server-only file, can't import).
@@ -26,7 +27,35 @@ interface TrainingStatsProps {
 }
 
 export function TrainingStats({ jobId, job }: TrainingStatsProps) {
-  const { series, scalars, iterationsPerEpoch } = useTrainingStream(jobId)
+  const {
+    series, scalars, iterationsPerEpoch,
+    currentStep, currentEpoch, resumeFromStep, resumeFromEpoch,
+  } = useTrainingStream(jobId)
+
+  // ── Training progress (total + since-resume) ──────────────────────────────
+  // Step[N]/Epoch[N] in the logs are cumulative — on a resume they keep
+  // counting from the prior run's checkpoint. The submit-time max-steps target
+  // (when set) is likewise absolute (train.py stops at global_step >= max_steps).
+  const stashed  = useMemo(() => parseFormState(job?.env?.TUNET_FORM_STATE), [job])
+  const mode     = stashed?.mode ?? 'new'
+  const maxSteps = stashed?.maxSteps && stashed.maxSteps > 0 ? stashed.maxSteps : null
+
+  // Fractional epochs trained = the chart's x of the latest train point.
+  const totalEpochs = series.train.length > 0 ? series.train[series.train.length - 1].x : null
+
+  // "Since resume" is only meaningful when train.py logged a non-zero resume
+  // baseline. Fine-tune runs reset global_step to 0, so total == this-run.
+  const isResume = resumeFromStep !== null && resumeFromStep > 0
+  const stepsSinceResume = isResume && currentStep !== null
+    ? Math.max(0, currentStep - resumeFromStep)
+    : null
+  const epochsSinceResume = stepsSinceResume === null
+    ? null
+    : iterationsPerEpoch && iterationsPerEpoch > 0
+      ? stepsSinceResume / iterationsPerEpoch
+      : (currentEpoch !== null && resumeFromEpoch !== null
+          ? Math.max(0, currentEpoch - resumeFromEpoch)
+          : null)
 
   // ── Best tracking (across the entire run) ────────────────────────────────
   const bestL1     = useMemo(() => bestPoint(series.train), [series.train])
@@ -75,6 +104,52 @@ export function TrainingStats({ jobId, job }: TrainingStatsProps) {
 
   return (
     <div className="bg-white border border-[#e5e7eb] rounded-lg overflow-hidden">
+      {/* Progress row — total steps/epochs, plus since-resume when this run
+          continued from a checkpoint. */}
+      <div className="px-4 py-2.5 border-b border-[#e5e7eb] flex items-center gap-x-6 gap-y-2 flex-wrap">
+        <span className="text-xs font-semibold text-[#374151]">Progress:</span>
+        <ProgressItem
+          label="Total Steps"
+          value={currentStep !== null ? currentStep.toLocaleString() : '—'}
+          hint={maxSteps ? `of ${maxSteps.toLocaleString()}` : undefined}
+        />
+        <ProgressItem
+          label="Total Epochs"
+          value={totalEpochs !== null ? totalEpochs.toFixed(2) : '—'}
+        />
+        {isResume ? (
+          <>
+            <span className="h-7 w-px bg-[#e5e7eb]" />
+            <span
+              className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-[#7E3AF2]"
+              title={`Continued from global step ${resumeFromStep!.toLocaleString()}`}
+            >
+              Resumed
+            </span>
+            <ProgressItem
+              label="Steps Since Resume"
+              value={stepsSinceResume !== null ? stepsSinceResume.toLocaleString() : '—'}
+              accent
+            />
+            <ProgressItem
+              label="Epochs Since Resume"
+              value={epochsSinceResume !== null ? epochsSinceResume.toFixed(2) : '—'}
+              accent
+            />
+          </>
+        ) : mode === 'finetune' ? (
+          <>
+            <span className="h-7 w-px bg-[#e5e7eb]" />
+            <span
+              className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-[#7E3AF2]"
+              title="Fine-tuned from existing weights — step counter starts fresh, so totals are this run"
+            >
+              Fine-tuned
+            </span>
+          </>
+        ) : null}
+      </div>
+
       {/* Analysis row */}
       <div className="px-4 py-2 border-b border-[#e5e7eb] flex items-center gap-6 flex-wrap text-xs">
         <span className="font-semibold text-[#374151]">Analysis:</span>
@@ -86,7 +161,6 @@ export function TrainingStats({ jobId, job }: TrainingStatsProps) {
 
       {/* Metric grid */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-px bg-[#f3f4f6]">
-        <Stat label="Epoch"          value={cur ? cur.x.toFixed(2) : '—'} />
         <Stat label="Loss Current"   value={cur ? cur.y.toFixed(5) : '—'} />
         <Stat label="Loss Best"      value={bestL1 ? bestL1.y.toFixed(5) : '—'}
               hint={bestL1 ? `@ ep ${bestL1.x.toFixed(1)}` : undefined}
@@ -142,6 +216,20 @@ function Stat({ label, value, hint, accent }: {
       </p>
       {hint && <p className="text-[10px] text-[#9ca3af] truncate font-mono">{hint}</p>}
     </div>
+  )
+}
+
+function ProgressItem({ label, value, hint, accent }: {
+  label: string; value: string; hint?: string; accent?: boolean
+}) {
+  return (
+    <span className="inline-flex flex-col leading-tight min-w-0">
+      <span className="text-[9px] uppercase tracking-wider text-[#9ca3af] font-semibold">{label}</span>
+      <span className={`text-sm font-mono font-semibold ${accent ? 'text-[#7E3AF2]' : 'text-[#111827]'}`}>
+        {value}
+        {hint && <span className="ml-1 text-[10px] text-[#9ca3af] font-normal">{hint}</span>}
+      </span>
+    </span>
   )
 }
 
