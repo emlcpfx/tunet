@@ -22,6 +22,7 @@ import { Input, FormRow, InfoTip } from '@/components/ui/input'
 import { FolderPicker, type FolderPickerResult } from '@/components/spark/folder-picker'
 import { SubmitProgress, type SubmitEvent } from '@/components/spark/submit-progress'
 import { PreviewFilterDialog } from '@/components/spark/preview-filter-dialog'
+import { PairReviewDialog } from '@/components/spark/pair-review-dialog'
 import { AutoMaskDialog } from '@/components/spark/auto-mask-dialog'
 import { AdvancedSettings } from '@/components/spark/advanced-settings'
 import { ModePicker } from '@/components/spark/mode-picker'
@@ -172,6 +173,13 @@ function NewJobPageInner() {
   // picked folder and hand them to the dialog when it opens.
   const [filterOpen, setFilterOpen]       = useState(false)
   const [filterError, setFilterError]     = useState<string | null>(null)
+
+  // Pair Review — a hard gate before submit. The user must visually approve the
+  // matched src↔dst pairs (Source | Target | Diff) so a wrong or misaligned
+  // dataset can't reach a paid training run. Approval is reset whenever the
+  // picked dataset changes (effect on filterPairs below), forcing a fresh look.
+  const [reviewOpen, setReviewOpen]         = useState(false)
+  const [reviewApproved, setReviewApproved] = useState(false)
   // Skip threshold lives on `advanced.skip_empty_threshold` so the Preview
   // Filter dialog and the Mask & Skip-empty section in Advanced Settings
   // share one value. Default 3.0 matches the desktop app + base/base.yaml.
@@ -204,6 +212,15 @@ function NewJobPageInner() {
     }
     return out
   }, [picked])
+
+  // Whether there's a local dataset to review/gate on. Manual ShareSync paths
+  // have no File handles to diff, so they're not gated (same limitation as the
+  // Preview Filter / Auto-Mask previews).
+  const hasReviewablePairs = !!filterPairs && filterPairs.length > 0
+
+  // Re-arm the gate whenever the picked dataset changes — filterPairs identity
+  // only flips when `picked` changes, so this won't fire on unrelated renders.
+  useEffect(() => { setReviewApproved(false) }, [filterPairs])
 
   function openPreviewFilter() {
     if (!filterPairs || filterPairs.length === 0) {
@@ -409,6 +426,17 @@ function NewJobPageInner() {
     // Resume / fine-tune require a source job + checkpoint
     if ((mode === 'resume' || mode === 'finetune') && (!source || !source.checkpointName)) {
       setSubmitError(`${mode === 'resume' ? 'Resume' : 'Fine-tune'} requires picking a source job and checkpoint`)
+      return
+    }
+
+    // Hard gate: a picked dataset must be visually reviewed and approved before
+    // it can be submitted (catches wrong/misaligned folders, which the pair
+    // count and Preview Filter don't). Manual ShareSync paths aren't gated —
+    // there are no local files to diff. Re-opens the dialog so approval is one
+    // click away rather than a dead end.
+    if (usingPickedFiles && !reviewApproved) {
+      setSubmitError('Review and approve your image pairs before submitting (Step 3 → Review pairs).')
+      setReviewOpen(true)
       return
     }
 
@@ -621,6 +649,12 @@ function NewJobPageInner() {
       initialGamma={autoMaskGamma}
       onAccept={(g) => setAutoMaskGamma(g)}
     />
+    <PairReviewDialog
+      open={reviewOpen}
+      onClose={() => setReviewOpen(false)}
+      pairs={filterPairs}
+      onApprove={() => { setReviewApproved(true); setSubmitError(null) }}
+    />
     {filterError && filterOpen && (
       <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setFilterOpen(false)}>
         <div className="bg-white rounded-lg p-5 max-w-md" onClick={e => e.stopPropagation()}>
@@ -798,7 +832,25 @@ Letters, numbers, _ and - only — anything else is sanitized."
                 before training can read them. The paths below assume <code className="bg-[#F9FAFB] px-1 rounded">/Compute Inputs/{picked.rootName}/...</code>;
                 edit them if your actual ShareSync layout differs.
               </p>
-              <div className="mt-3 flex items-center gap-3">
+              <div className="mt-3 flex items-center gap-3 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setReviewOpen(true)}
+                  className={`px-3 py-1.5 text-xs font-semibold rounded border ${
+                    reviewApproved
+                      ? 'border-[#16A34A] text-[#16A34A] bg-[#F0FDF4] hover:bg-[#dcfce7]'
+                      : 'border-[#7E3AF2] text-white bg-[#7E3AF2] hover:bg-[#6C2BD9]'
+                  }`}
+                >
+                  {reviewApproved ? '✓ Pairs reviewed' : 'Review pairs'}
+                </button>
+                <span className="text-[11px] text-[#6b7280]">
+                  {reviewApproved
+                    ? 'Approved. Click to review again.'
+                    : 'Required before submit — eyeball every Source ↔ Target ↔ Diff to catch a wrong or misaligned dataset.'}
+                </span>
+              </div>
+              <div className="mt-2 flex items-center gap-3">
                 <button
                   type="button"
                   onClick={openPreviewFilter}
@@ -1190,11 +1242,30 @@ Leave the email field empty to opt out for this job entirely."
             </div>
           )}
 
+          {hasReviewablePairs && !reviewApproved && (
+            <div className="mt-4 px-4 py-3 bg-[#FFFBEB] border border-[#fde68a] rounded-lg text-sm text-[#92400E] flex items-center justify-between gap-3">
+              <span>⚠ Review your image pairs before submitting.</span>
+              <button
+                type="button"
+                onClick={() => setReviewOpen(true)}
+                className="px-3 py-1.5 text-xs font-semibold rounded border border-[#7E3AF2] text-white bg-[#7E3AF2] hover:bg-[#6C2BD9] whitespace-nowrap"
+              >
+                Review pairs
+              </button>
+            </div>
+          )}
+
           <div className="mt-5 flex items-center justify-between border-t border-[#e5e7eb] pt-5">
             <Link href="/demo/jobs" className="text-sm text-[#6b7280] hover:text-[#374151]">
               ← Cancel
             </Link>
-            <Button type="submit" loading={submitting} disabled={submitting} size="lg">
+            <Button
+              type="submit"
+              loading={submitting}
+              disabled={submitting || (hasReviewablePairs && !reviewApproved)}
+              title={hasReviewablePairs && !reviewApproved ? 'Review and approve your image pairs first' : undefined}
+              size="lg"
+            >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <polygon points="5 3 19 12 5 21 5 3" />
               </svg>
