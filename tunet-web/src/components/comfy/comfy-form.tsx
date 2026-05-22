@@ -7,7 +7,7 @@
 // we hand off to the job detail page for live render logs + output download.
 // (Extra stacked LoRAs beyond a preset's built-in one are a follow-up.)
 //
-// Shared by both /comfy (real app) and /demo/comfy. The only thing that differs
+// Shared by both /comfy (real app) and /comfy. The only thing that differs
 // is where the "View job" link points, hence the `jobsBase` prop.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -253,47 +253,46 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
               className="w-full text-sm border border-[#e5e7eb] rounded-lg px-3 py-2 bg-white focus:border-[#7E3AF2] focus:outline-none">
               {presets!.map(p => <option key={p.key} value={p.key}>{p.ui?.title || p.key}</option>)}
             </select>
-            {preset.description && <p className="mt-2 text-xs text-[#6b7280]">{preset.description}</p>}
           </Card>
 
           {/* About this workflow — plain-language summary + canonical docs link */}
           {(preset.about || preset.tags?.length || docLinks(preset).length > 0) && (
             <Card>
-              <h2 className="text-sm font-semibold text-[#111827] mb-2.5">About this workflow</h2>
-              <dl className="space-y-2 text-xs leading-relaxed">
+              <h2 className="text-base font-semibold text-[#111827] mb-3.5">About this workflow</h2>
+              <dl className="space-y-4">
                 {preset.about?.what && (
                   <div>
-                    <dt className="font-semibold text-[#374151]">What it does</dt>
-                    <dd className="text-[#6b7280]">{preset.about.what}</dd>
+                    <dt className="text-[11px] font-semibold uppercase tracking-wide text-[#6b7280] mb-1">What it does</dt>
+                    <dd className="text-[15px] leading-relaxed text-[#374151]">{preset.about.what}</dd>
                   </div>
                 )}
                 {preset.about?.inputs && (
                   <div>
-                    <dt className="font-semibold text-[#374151]">Inputs</dt>
-                    <dd className="text-[#6b7280]">{preset.about.inputs}</dd>
+                    <dt className="text-[11px] font-semibold uppercase tracking-wide text-[#6b7280] mb-1">Inputs</dt>
+                    <dd className="text-[15px] leading-relaxed text-[#374151]">{preset.about.inputs}</dd>
                   </div>
                 )}
                 {preset.about?.key_knobs && (
                   <div>
-                    <dt className="font-semibold text-[#374151]">Key settings</dt>
-                    <dd className="text-[#6b7280]">{preset.about.key_knobs}</dd>
+                    <dt className="text-[11px] font-semibold uppercase tracking-wide text-[#6b7280] mb-1">Key settings</dt>
+                    <dd className="text-[15px] leading-relaxed text-[#374151]">{preset.about.key_knobs}</dd>
                   </div>
                 )}
               </dl>
               {preset.tags && preset.tags.length > 0 && (
-                <div className="mt-3 flex flex-wrap gap-1.5">
+                <div className="mt-4 flex flex-wrap gap-1.5">
                   {preset.tags.map(t => (
-                    <span key={t} className="text-[11px] font-medium text-[#6b7280] bg-[#f3f4f6] border border-[#e5e7eb] rounded-full px-2 py-0.5">
+                    <span key={t} className="text-xs font-medium text-[#4b5563] bg-[#f3f4f6] border border-[#e5e7eb] rounded-full px-2.5 py-1">
                       {t}
                     </span>
                   ))}
                 </div>
               )}
               {docLinks(preset).length > 0 && (
-                <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1">
+                <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1">
                   {docLinks(preset).map(d => (
                     <a key={d.url} href={d.url} target="_blank" rel="noopener noreferrer"
-                      className="text-xs font-semibold text-[#7E3AF2] hover:underline">
+                      className="text-sm font-semibold text-[#7E3AF2] hover:underline">
                       {d.label || 'Documentation'} ↗
                     </a>
                   ))}
