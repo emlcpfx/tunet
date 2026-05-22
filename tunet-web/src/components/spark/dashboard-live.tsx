@@ -58,7 +58,8 @@ export function DashboardLive({ initialJobs }: DashboardLiveProps) {
   }, [])
 
   const active    = jobs.filter(j => ACTIVE_STATUSES.has(j.status))
-  const recent    = jobs.slice(0, 8)
+  // The dashboard now lists ALL jobs — it absorbed the old "Training Jobs" page.
+  const listed    = jobs
 
   // Stuck-job detection: jobs that are holding an account-cap slot without
   // making progress. Surfaced prominently because (1) they can block new
@@ -81,8 +82,8 @@ export function DashboardLive({ initialJobs }: DashboardLiveProps) {
         />
         <MetricCard
           label="Last Activity"
-          value={recent[0] ? formatStartedRel(recent[0]) : '—'}
-          sub={recent[0] ? recent[0].instance_type_name ?? '?' : 'No jobs yet'}
+          value={listed[0] ? formatStartedRel(listed[0]) : '—'}
+          sub={listed[0] ? listed[0].instance_type_name ?? '?' : 'No jobs yet'}
         />
       </div>
 
@@ -107,17 +108,17 @@ export function DashboardLive({ initialJobs }: DashboardLiveProps) {
 
       <section>
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-lg font-semibold text-[#111827]">Recent Jobs</h2>
-          <Link href="/demo/jobs" className="text-sm text-[#ae69f4] hover:underline">View all →</Link>
+          <h2 className="text-lg font-semibold text-[#111827]">Jobs</h2>
+          <Link href="/demo/jobs/new" className="text-sm text-[#ae69f4] hover:underline">+ New job</Link>
         </div>
 
-        {recent.length === 0 ? (
+        {listed.length === 0 ? (
           <div className="bg-white border border-dashed border-[#D1D5DB] rounded-xl p-10 text-center">
             <p className="text-[#6b7280] text-sm mb-4">No jobs yet</p>
             <Link href="/demo/jobs/new"><Button variant="secondary">Launch your first job</Button></Link>
           </div>
         ) : (
-          <JobsTable jobs={recent} startedFormat={formatStartedRel} onAfterAction={refresh} />
+          <JobsTable jobs={listed} startedFormat={formatStartedRel} onAfterAction={refresh} />
         )}
       </section>
     </div>
