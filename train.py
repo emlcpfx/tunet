@@ -52,6 +52,13 @@ from training.validation import run_validation
 from training.checkpoint import prune_checkpoints
 from training.dataloader_utils import cycle, collate_skip_none, auto_detect_num_workers
 
+# How often (in optimizer steps) a running job polls tunet-web's on-demand
+# export request. Step-based on purpose: every rank shares global_step, so the
+# broadcast/barrier that coordinate the inline export stay matched — a
+# wall-clock throttle would fire on different steps per rank and deadlock the
+# collectives. ~20 steps keeps it responsive (seconds) without chatty polling.
+EXPORT_POLL_STEPS = 20
+
 # --- Data Loading and Augmentation ---
 
 # --- Augmentation Creation Function ---
@@ -544,12 +551,28 @@ def _setup_logging(config, rank, device, world_size):
             logging.error(f"Error setting up file logging: {log_setup_e}")
 
 
-def _auto_batch_size(model, resolution, n_input_ch, device, device_type, use_amp):
+def _auto_batch_size(model, resolution, n_input_ch, device, device_type, use_amp,
+                     use_lpips=False, lpips_module=None, use_compile=False):
     """Estimate the largest batch size that fits in GPU memory without OOM.
 
     Runs a single no_grad forward pass at bs=1 to measure real activation memory,
     then scales linearly to estimate all other batch sizes. No backward pass is
     run during probing, so this is fast and doesn't grind the machine.
+
+    Memory accounting:
+      - Main-model activations: measured at bs=1, 3x scale for backward
+      - LPIPS VGG forward: ~60 MB/sample (both VGG sides) added per sample
+      - torch.compile(mode='reduce-overhead') captures the whole training step
+        into a private CUDA Graph pool. That pool scales with the training
+        activation memory (measured ~0.66x of per-sample training cost on a
+        Blackwell at bs=16, res=512) — it is NOT a fixed overhead. We model it
+        as a per-sample MULTIPLIER (×1.7 when use_compile), so it scales with
+        the chosen batch and resolution.
+    The old code reserved a flat 2.5 GB for the graph pool. That under-budgets
+    badly at high resolution / large batch — the pool there is tens of GB, not
+    2.5. Symptom: res>384 OOMed on every GPU regardless of the picked batch
+    (e.g. Blackwell bs=16 res=512 hit 99% VRAM, LPIPS then OOMed; A10 bs=6
+    res=512 would too). Folding the pool into the per-sample cost fixes that.
     """
     if device_type != 'cuda':
         if is_main_process():
@@ -582,11 +605,38 @@ def _auto_batch_size(model, resolution, n_input_ch, device, device_type, use_amp
         activation_per_sample = max(peak - baseline, 1)
         # backward stores ~3x the no_grad activation memory (empirically validated)
         per_sample_train = activation_per_sample * 3
-        usable = free * 0.85  # leave 15% headroom
+        # LPIPS overhead: VGG-16 forward at training resolution. Two sides
+        # (out, dst), and PyTorch has to keep activations for the gradient
+        # w.r.t. `out` (the gradient flows through VGG's frozen params back
+        # to the model output). Empirically ~30 MB per side per sample at
+        # 256-512 res, so ~60 MB/sample total.
+        if use_lpips:
+            per_sample_train += 60 * 1_000_000  # 60 MB per sample
+        per_sample_base = per_sample_train  # pre-graph, for logging
+        # torch.compile(mode='reduce-overhead') keeps a private CUDA Graph pool
+        # holding the step's working set — roughly +0.66x the per-sample
+        # training cost (measured: Blackwell bs=16 res=512 → 34.8 GB pool vs
+        # 53 GB training alloc). It scales with batch AND resolution, so it
+        # must be a per-sample multiplier, not the old flat 2.5 GB reserve
+        # (which under-budgeted and OOMed at res>384). Use 0.7 for a hair of
+        # margin over the measured 0.66.
+        GRAPH_FACTOR = 0.7
+        if use_compile:
+            per_sample_train *= (1.0 + GRAPH_FACTOR)
+        # Headroom: 15% normally, bump to 20% when LPIPS is on (LPIPS forward
+        # has bursty allocations that the per-sample estimate doesn't
+        # capture perfectly — the OOM we hit was on a 384 MB allocation).
+        headroom_factor = 0.80 if use_lpips else 0.85
+        usable = free * headroom_factor
         if is_main_process():
+            extras = []
+            if use_lpips: extras.append('LPIPS +60MB/sample')
+            if use_compile: extras.append(f'compile graph x{1.0 + GRAPH_FACTOR:.1f}')
+            extras_str = f"  [{', '.join(extras)}]" if extras else ''
             logging.info(f"Auto batch size: measured {activation_per_sample / 1e6:.0f}MB/sample no_grad "
-                         f"(~{per_sample_train / 1e6:.0f}MB with backward). "
-                         f"Usable: {usable / 1e6:.0f}MB / {free / 1e6:.0f}MB free.")
+                         f"(~{per_sample_base / 1e6:.0f}MB backward"
+                         f"{f', ~{per_sample_train / 1e6:.0f}MB with graph pool' if use_compile else ''}). "
+                         f"Usable: {usable / 1e6:.0f}MB / {free / 1e6:.0f}MB free.{extras_str}")
         for bs in candidates:
             if per_sample_train * bs <= usable:
                 chosen = bs
@@ -950,6 +1000,12 @@ def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_
     return model, optimizer, scaler, scheduler, start_epoch, start_step, ckpt_prefix, use_amp_eff, criterion_l1, criterion_l2, criterion_bce
 
 
+# One-shot flag for diagnostic logging (so we print mask stats once at the
+# start of training instead of every step). Keyed dict so we can add more
+# diagnostics here without colliding namespaces.
+_DIAG_LOGGED: dict = {'mask': False, 'lpips_err': False}
+
+
 def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion_l1, criterion_l2,
                            loss_fn_lpips, criterion_bce, config, device, device_type, use_amp_eff,
                            use_bce_dice, use_lpips, use_weighted, use_l2, use_mask_loss, use_auto_mask,
@@ -988,6 +1044,47 @@ def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion
             else:
                 weight_map = None
                 l1 = criterion_l1(out, dst)
+            # One-time diagnostics: prove the weight map is actually doing
+            # something. Print mask coverage, mean weight, and effective
+            # amplification (weighted L1 / raw L1) — if the ratio is ~1, the
+            # mask is empty or near-empty and the weighting has no effect,
+            # which means training will collapse to identity-function on
+            # small regions of interest. Only logged once per process.
+            if weight_map is not None and not _DIAG_LOGGED['mask']:
+                _DIAG_LOGGED['mask'] = True
+                try:
+                    with torch.no_grad():
+                        wm = weight_map.detach()
+                        # 'Coverage' = fraction of pixels weighted >1 (i.e. masked)
+                        coverage = (wm > 1.0).float().mean().item()
+                        raw_l1 = torch.abs(out.detach() - dst).mean().item()
+                        weighted = l1.detach().item()
+                        ratio = weighted / max(raw_l1, 1e-8)
+                        logging.info(
+                            f"[Mask diag] coverage={coverage*100:.2f}%  "
+                            f"mean_w={wm.mean().item():.2f}  max_w={wm.max().item():.2f}  "
+                            f"weighted_L1={weighted:.4f}  raw_L1={raw_l1:.4f}  "
+                            f"amplification={ratio:.1f}x"
+                        )
+                        if coverage < 0.001:
+                            logging.warning(
+                                "[Mask diag] mask coverage < 0.1% — the mask "
+                                "is essentially empty. Auto-mask may be too "
+                                "strict for this dataset (try a lower "
+                                "auto_mask_gamma) or the src/dst pairs may "
+                                "be too similar for auto-mask to find a "
+                                "signal. Mask weighting will have no effect."
+                            )
+                        elif ratio < 1.5:
+                            logging.warning(
+                                "[Mask diag] amplification < 1.5x — mask "
+                                "weighting is barely affecting loss. Consider "
+                                "raising mask_weight or widening auto-mask "
+                                "gamma. Without meaningful amplification, the "
+                                "optimizer is rewarded for identity output."
+                            )
+                except Exception as diag_err:
+                    logging.debug(f"[Mask diag] failed: {diag_err}")
             l2_val = torch.tensor(0.0, device=device)
             if use_l2 and criterion_l2 is not None:
                 if weight_map is not None:
@@ -997,8 +1094,29 @@ def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion
             lp = torch.tensor(0.0, device=device)
             if use_lpips and loss_fn_lpips:
                 try:
+                    # LPIPS's VGG backbone is fp32-loaded but autocast is
+                    # active here, so the call runs in mixed precision. That's
+                    # been fine historically but interactions with
+                    # torch.compile(mode='reduce-overhead') + CUDA Graphs can
+                    # silently break it. If that happens we want to KNOW —
+                    # see the one-shot warning below.
                     lp = loss_fn_lpips(out, dst).mean()
-                except Exception:
+                except Exception as lpips_err:
+                    # Log the first failure with full traceback so the user
+                    # can diagnose (commonly: torch.compile/CUDA-Graph
+                    # interaction, AMP dtype mismatch, VGG shape error).
+                    # Subsequent failures stay silent so we don't spam the log
+                    # every step at high frequency.
+                    if not _DIAG_LOGGED['lpips_err']:
+                        _DIAG_LOGGED['lpips_err'] = True
+                        logging.warning(
+                            f"LPIPS computation failed on first attempt: "
+                            f"{type(lpips_err).__name__}: {lpips_err}. "
+                            f"Loss is falling back to L1-only — set "
+                            f"TUNET_DISABLE_COMPILE=1 to rule out torch.compile, "
+                            f"or report this if it persists.",
+                            exc_info=True,
+                        )
                     lp = torch.tensor(0.0, device=device)
             if use_weighted:
                 loss = (config.training.l1_weight * l1
@@ -1042,7 +1160,17 @@ def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion
 # --- Training Function ---
 def train(config):
     global shutdown_requested, scaler, _stop_file_path # Make scaler global for use in save_previews
+    # Reset one-shot diagnostic flags so a second train() call in the same
+    # process (rare, but happens in tests + REPL workflows) prints them again.
+    _DIAG_LOGGED['mask'] = False
+    _DIAG_LOGGED['lpips_err'] = False
     training_successful = False; final_global_step = 0
+    # Separate from shutdown_requested (which means "user / max-time / stop-file
+    # asked us to stop"). loop_crashed is for unhandled exceptions in the
+    # training loop — OOM, CUDA errors, etc. — so the final-status logic can
+    # report them honestly and exit non-zero instead of pretending it was a
+    # graceful shutdown.
+    loop_crashed = False
 
     # --- Stop file setup (file-based stop signal from GUI) ---
     _stop_file_path = getattr(config, '_stop_file', None)
@@ -1185,9 +1313,16 @@ def train(config):
     # --- Auto Batch Size (after model exists) ---
     if auto_batch_pending and model is not None:
         if is_main_process():
+            # Detect whether torch.compile was applied to `model` so the
+            # auto-batcher can reserve memory for the CUDA Graph private pool
+            # (~2.5 GB) — without this it picked numbers that OOM'd when
+            # LPIPS + compile ran together at first forward.
+            model_compiled = hasattr(model, '_orig_mod')
             config.training.batch_size = _auto_batch_size(
                 model, config.data.resolution, n_input_ch, device, device_type,
-                getattr(config.training, 'use_amp', True))
+                getattr(config.training, 'use_amp', True),
+                use_lpips=use_lpips, lpips_module=loss_fn_lpips,
+                use_compile=model_compiled)
         if world_size > 1:
             bs_list = [config.training.batch_size]
             dist.broadcast_object_list(bs_list, src=0)
@@ -1554,6 +1689,63 @@ def train(config):
                     _pending_ckpt_thread.join()
                 dist.barrier()  # All ranks wait for rank 0 to finish writing checkpoint
 
+            # --- On-demand export (live control channel) ---
+            # tunet-web can request an export from THIS running job (the model is
+            # already on the GPU). Poll on a step cadence (EXPORT_POLL_STEPS) AND
+            # at each epoch end, so a request is honored within ~seconds rather
+            # than at the next epoch boundary. The cadence is step-based, not
+            # wall-clock, so every rank agrees on when to poll — the broadcast +
+            # barriers below must be hit by all ranks in lockstep. Only rank 0
+            # talks to ShareSync and exports; the exporters deep-copy the model to
+            # CPU, so the live training model's device/mode is never touched.
+            # No-op for local training (control env unset → poll returns None).
+            if epoch_end_now or (global_step > 0 and global_step % EXPORT_POLL_STEPS == 0):
+                _exp_req = None
+                if is_main_process():
+                    try:
+                        from exporters.export_control import poll_export_request
+                        _exp_req = poll_export_request()
+                    except Exception as e:
+                        logging.warning(f"[export-control] poll failed: {e}")
+                if world_size > 1:
+                    _exp_sig = torch.tensor([1 if _exp_req else 0], device=device)
+                    dist.broadcast(_exp_sig, src=0)
+                    _do_export = bool(_exp_sig.item())
+                else:
+                    _do_export = _exp_req is not None
+                if _do_export:
+                    if world_size > 1: dist.barrier()   # pause all ranks together
+                    if is_main_process() and _exp_req is not None:
+                        try:
+                            from exporters.export_control import run_export
+                            _exp_res = current_training_res if config.training.progressive_resolution else config.data.resolution
+                            run_export(model, config, ckpt_prefix, _exp_res, global_step // iter_epoch,
+                                       _exp_req['flame'], _exp_req['nuke'])
+                        except Exception as e:
+                            logging.warning(f"[export-control] inline export failed: {e}")
+                    if world_size > 1: dist.barrier()   # rejoin before next step
+
+                # Live max_steps change from the control channel — lets tunet-web
+                # set/adjust a running job's stop point. Same step-cadence poll
+                # (deterministic across ranks); broadcast the new value so every
+                # rank's top-of-loop `global_step >= max_steps` check agrees.
+                _new_max = -1
+                if is_main_process():
+                    try:
+                        from exporters.export_control import poll_max_steps
+                        _new_max = poll_max_steps()
+                    except Exception as e:
+                        logging.warning(f"[stop-control] poll failed: {e}")
+                if world_size > 1:
+                    _ms_t = torch.tensor([_new_max], device=device, dtype=torch.long)
+                    dist.broadcast(_ms_t, src=0)
+                    _new_max = int(_ms_t.item())
+                if _new_max >= 0:
+                    max_steps = _new_max
+                    if is_main_process():
+                        logging.info(f"[stop-control] max_steps set to {max_steps} @ step {global_step} "
+                                     f"({'stops at next check' if max_steps and global_step >= max_steps else 'unlimited' if max_steps == 0 else 'will stop at ' + str(max_steps)})")
+
             # --- Auto Export ---
             if is_main_process() and epoch_end_now and config.auto_export.interval > 0:
                 # Ensure async checkpoint is written before we copy it for export
@@ -1656,19 +1848,28 @@ def train(config):
                     shutdown_requested = True
 
         # --- End of Training Loop ---
-        training_successful = True
+        # Don't claim success if the loop bailed at step 0 — that means we
+        # broke out (e.g. dataloader exhausted from a shm bus error killing
+        # the workers) before any batch landed. Reporting `successfully` in
+        # that case is a billing/UX trap: Spark records the job as succeeded,
+        # the user sees no error flag, but zero training actually happened.
+        # `final_global_step > 0` proves we completed at least one batch.
+        training_successful = final_global_step > 0
     except KeyboardInterrupt:
         if is_main_process(): logging.warning("KeyboardInterrupt. Shutting down...")
         if not shutdown_requested: handle_signal(signal.SIGINT, None)
     except Exception as loop_err:
         logging.error("FATAL Training loop error:", exc_info=True);
-        shutdown_requested = True
+        loop_crashed = True
     finally:
         # Flush any async checkpoint write before proceeding to final save
         if _pending_ckpt_thread is not None and _pending_ckpt_thread.is_alive():
             _pending_ckpt_thread.join()
         max_steps_reached = max_steps > 0 and final_global_step >= max_steps
-        if (shutdown_requested or max_steps_reached) and is_main_process():
+        # Save final checkpoint on any exit path that completed at least some
+        # work — graceful shutdown, hit max_steps, or crashed mid-run (so the
+        # user can resume from whatever step they reached before the OOM).
+        if (shutdown_requested or max_steps_reached or loop_crashed) and is_main_process():
             logging.info(f"Performing final checkpoint save (State @ Step {final_global_step})...")
             try:
                  final_ep = final_global_step // iter_epoch; latest_path = os.path.join(config.data.output_dir, f'{ckpt_prefix}_tunet_latest.pth'); cfg_dict = config_to_dict(config)
@@ -1690,11 +1891,62 @@ def train(config):
                  else: logging.error("Cannot save final checkpoint: Model/Optimizer/Scaler missing.")
             except Exception as e: logging.error(f"Final checkpoint save failed: {e}", exc_info=True)
 
+        # --- Final export on completion ---
+        # In-loop auto-export only fires on interval boundaries, so a run that
+        # ends off-interval (or before the first interval is reached) would
+        # never produce an ONNX/Nuke deliverable — forcing a separate export
+        # job. Export the final model here so every completed run lands its
+        # export inline with training, gated by the same auto_export.flame/nuke
+        # flags. Skipped if the loop already exported this exact epoch.
+        if (is_main_process() and training_successful and model is not None
+                and (config.auto_export.flame or config.auto_export.nuke)):
+            try:
+                final_ep = final_global_step // iter_epoch
+                interval = config.auto_export.interval
+                already_exported = interval > 0 and final_ep > 0 and final_ep % interval == 0
+                if not already_exported:
+                    if _pending_ckpt_thread is not None and _pending_ckpt_thread.is_alive():
+                        _pending_ckpt_thread.join()
+                    from exporters.auto_export import export_flame, export_nuke
+                    export_res = config.data.resolution
+                    logging.info(f"Performing final export (epoch {final_ep}, res {export_res})...")
+                    if config.auto_export.flame:
+                        export_flame(model, config, config.data.output_dir, final_ep, export_res,
+                                     loss_mode=config.training.loss, ckpt_prefix=ckpt_prefix)
+                    if config.auto_export.nuke:
+                        export_nuke(model, config, config.data.output_dir, final_ep, export_res,
+                                    loss_mode=config.training.loss, ckpt_prefix=ckpt_prefix)
+                    logging.info("Final export complete.")
+            except Exception as e:
+                logging.error(f"Final export failed: {e}", exc_info=True)
+
         if is_main_process():
-            status = "successfully" if training_successful and not shutdown_requested else "gracefully" if shutdown_requested else "with errors"
+            if loop_crashed:
+                status = "with errors (training loop crashed — see traceback above)"
+            elif training_successful and not shutdown_requested:
+                status = "successfully"
+            elif shutdown_requested:
+                status = "gracefully"
+            else:
+                status = "with errors"
             logging.info(f"Training finished {status} at Step {final_global_step}.")
         cleanup_ddp();
         if is_main_process(): logging.info("Script finished.")
+
+        # Exit non-zero on real failure so the container exit code reflects
+        # what happened. Spark Fuse maps container_nonzero_exit to job
+        # status='failed' with the real exit_code on the row — without this,
+        # a crash-at-step-0 would be reported as `succeeded` and silently
+        # billed. Three failure modes covered:
+        #   1. loop_crashed         — OOM, CUDA error, dataloader bus error.
+        #   2. final_global_step==0 — never completed a single batch (covers
+        #                             "graceful shutdown" before step 1, which
+        #                             is also a no-progress failure).
+        #   3. !training_successful — fell through with errors but no crash.
+        # Real graceful shutdown (Ctrl-C / max-time / stop-file) AFTER at
+        # least one successful step still exits 0.
+        if loop_crashed or final_global_step == 0 or (not training_successful and not shutdown_requested):
+            exit(1)
 
 
 # --- Main Execution (`if __name__ == "__main__":`) ---
@@ -1854,10 +2106,22 @@ if __name__ == "__main__":
             if config.logging.log_interval <= 0: error_msgs.append("log.interval<=0")
             if config.logging.preview_batch_interval < 0: error_msgs.append("log.preview<0")
             if config.logging.preview_refresh_rate < 0: error_msgs.append("log.refresh<0")
-            # Mask validation
+            # Mask validation. mask_dir is the folder of pre-painted mask
+            # files (one per src/dst pair). Auto-mask generates the mask
+            # in-memory from |src - dst|, so it satisfies both use_mask_loss
+            # and use_mask_input without any folder on disk — don't demand
+            # mask_dir in that case.
             if config.mask.use_mask_loss or config.mask.use_mask_input:
-                if not config.data.mask_dir: error_msgs.append("mask_dir required when mask features enabled")
-                elif not os.path.isdir(config.data.mask_dir): error_msgs.append(f"data.mask_dir missing: {config.data.mask_dir}")
+                if config.mask.use_auto_mask:
+                    # Auto-mask is providing the mask. If the user *also* set
+                    # a mask_dir (rare mixed workflow), validate it exists.
+                    if config.data.mask_dir and not os.path.isdir(config.data.mask_dir):
+                        error_msgs.append(f"data.mask_dir missing: {config.data.mask_dir}")
+                else:
+                    if not config.data.mask_dir:
+                        error_msgs.append("mask_dir required when mask features enabled (or enable mask.use_auto_mask to generate masks from src-dst diff)")
+                    elif not os.path.isdir(config.data.mask_dir):
+                        error_msgs.append(f"data.mask_dir missing: {config.data.mask_dir}")
             if config.mask.mask_weight < 1.0: error_msgs.append("mask.mask_weight must be >= 1.0")
             # Validation dir checks
             if config.data.val_src_dir and not os.path.isdir(config.data.val_src_dir): error_msgs.append(f"data.val_src_dir missing: {config.data.val_src_dir}")

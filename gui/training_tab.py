@@ -38,6 +38,15 @@ class TrainingTabMixin:
                 "lr": 1e-4,
                 "use_auto_mask": True,
                 "auto_mask_gamma": 0.5,
+                # Mask weighting enabled by default so small ROIs (smudges,
+                # dust spots, lens dirt) don't collapse to identity-function
+                # training. At weight=100 the masked region contributes ~23%
+                # of total loss for typical small-ROI work; at the platform
+                # default of 10 it'd be ~3% and the optimizer would happily
+                # output the source unchanged. See tunet-web/spark-presets.ts
+                # for the same change applied to the Spark side.
+                "use_mask_loss": True,
+                "mask_weight": 100.0,
                 "skip_empty_patches": True,
                 "progressive_resolution": False,
             },
@@ -97,6 +106,14 @@ class TrainingTabMixin:
             self.lpips_weight_input.setValue(p["lpips_weight"])
         self.use_auto_mask_input.setChecked(p["use_auto_mask"])
         self.auto_mask_gamma_input.setValue(p.get("auto_mask_gamma", 1.0))
+        # Apply preset's mask-weighting defaults so e.g. Beauty ships with
+        # use_mask_loss=True + mask_weight=100 out of the box. Without these
+        # lines the preset selection ignored the new fields and the user had
+        # to manually toggle the checkbox and bump the weight on every run.
+        if "use_mask_loss" in p:
+            self.use_mask_loss_input.setChecked(p["use_mask_loss"])
+        if "mask_weight" in p:
+            self.mask_weight_input.setValue(p["mask_weight"])
         self.skip_empty_patches_input.setChecked(p["skip_empty_patches"])
         self.progressive_res_check.setChecked(p.get("progressive_resolution", False))
 
@@ -466,7 +483,12 @@ class TrainingTabMixin:
             "making the model focus on those areas.\n\n"
             "Example: if you have a face mask, the model will prioritize\n"
             "getting the face right over the background.")
-        self.mask_weight_input = QDoubleSpinBox(decimals=1, minimum=1.0, maximum=100.0, value=10.0, singleStep=1.0)
+        # Max raised from 100 → 1000 for parity with tunet-web; small ROIs
+        # sometimes need weight in the 200-500 range when the smudge is a
+        # fraction of a percent of patch area. Anything above ~500 is rarely
+        # productive — gradient signal saturates and other settings (gamma,
+        # skip threshold, crop tightness) are the better lever.
+        self.mask_weight_input = QDoubleSpinBox(decimals=1, minimum=1.0, maximum=1000.0, value=10.0, singleStep=1.0)
         self.mask_weight_input.setToolTip(
             "How much more important masked (white) regions are.\n"
             "10 = white pixels contribute 10× more to loss.")
@@ -495,6 +517,10 @@ class TrainingTabMixin:
             "Speeds up training when only parts of the image have changes.\n\n"
             "Requires Auto Mask to be enabled.")
         self.use_auto_mask_input.toggled.connect(self.skip_empty_patches_input.setEnabled)
+        # Sync initial enabled state — same connect-after-setChecked trap as
+        # the auto_mask_gamma_input below. Without this, "Skip empty patches"
+        # is grey at startup even though Auto-mask is on.
+        self.skip_empty_patches_input.setEnabled(self.use_auto_mask_input.isChecked())
 
         self.skip_empty_threshold_input = QDoubleSpinBox()
         self.skip_empty_threshold_input.setRange(0.1, 20.0)
@@ -518,8 +544,13 @@ class TrainingTabMixin:
             "  < 1.0 — expands white coverage (e.g. 0.5 for subtle beauty work)\n"
             "  > 1.0 — contracts it (tighter focus)\n"
             "  1.0 — neutral, no adjustment")
-        self.auto_mask_gamma_input.setEnabled(False)
         self.use_auto_mask_input.toggled.connect(self.auto_mask_gamma_input.setEnabled)
+        # Sync initial enabled state to the checkbox's actual value. The
+        # toggled signal only fires on state *changes*, not on the connect
+        # itself — without this line, the gamma input stays disabled at startup
+        # if use_auto_mask was setChecked(True) before this connect (which it
+        # is at line 482). Same trap as skip_empty_patches_input below.
+        self.auto_mask_gamma_input.setEnabled(self.use_auto_mask_input.isChecked())
 
         mask_weight_row = QHBoxLayout()
         mask_weight_row.addWidget(self.use_mask_loss_input)

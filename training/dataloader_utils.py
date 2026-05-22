@@ -67,4 +67,23 @@ def auto_detect_num_workers(resolution, current_os):
         workers = min(workers, 4)
 
     reason += f" | CPUs={cpu_count}, res={resolution} -> {workers} workers"
+
+    # On Linux, PyTorch DataLoader workers communicate over /dev/shm. Docker's
+    # default /dev/shm is 64 MB, which causes workers to die with a bus error
+    # the moment they try to ship a batch — the failure mode in tunet looks
+    # like "DataLoader worker (pid N) is killed by signal: Bus error" followed
+    # by zero-progress training. Detect a constrained /dev/shm and force
+    # num_workers=0 (in-process loading needs no shared memory). The user can
+    # always override in the YAML config if they know their setup has more.
+    if current_os == 'Linux' and workers > 0:
+        try:
+            st = os.statvfs('/dev/shm')
+            shm_mib = (st.f_bavail * st.f_frsize) / (1024 * 1024)
+            if shm_mib < 512:
+                reason += (f" -> forcing 0 (/dev/shm only {shm_mib:.0f} MiB, "
+                           f"DataLoader workers would bus-error; common in containers)")
+                workers = 0
+        except (OSError, AttributeError):
+            pass  # Non-Linux or unreadable /dev/shm — leave workers as-is
+
     return workers, reason

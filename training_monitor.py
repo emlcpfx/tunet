@@ -697,13 +697,11 @@ class TrainingMonitor:
         current_smooth = smoothed[-1]
         relative_slope = slope / current_smooth if current_smooth > 0 else 0
 
-        if relative_slope < -0.005:
-            self.analysis_labels['trend'].configure(text="Improving", fg=COLORS['good'])
-        elif relative_slope > 0.005:
-            self.analysis_labels['trend'].configure(text="Diverging", fg=COLORS['bad'])
-        else:
-            self.analysis_labels['trend'].configure(text="Flat", fg=COLORS['warn'])
-
+        # Recent Change — half-vs-half pct on smoothed window. Computed first
+        # because Trend is derived from the same metric (keeps the two chips
+        # mutually consistent — previously Trend read `relative_slope` and could
+        # show "Flat" alongside a -29.9% Recent Change when EMA lag squashed the
+        # slope).
         mid = len(smoothed) // 2
         first_half_avg = sum(smoothed[:mid]) / mid if mid > 0 else 0
         second_half_avg = sum(smoothed[mid:]) / (len(smoothed) - mid) if (len(smoothed) - mid) > 0 else 0
@@ -718,6 +716,15 @@ class TrainingMonitor:
             change_color = COLORS['warn']
         self.analysis_labels['improvement'].configure(text=f"{pct_change:+.1f}%", fg=change_color)
 
+        # Trend label — same metric as Recent Change above, so the two chips
+        # can never contradict.
+        if pct_change < -1:
+            self.analysis_labels['trend'].configure(text="Improving", fg=COLORS['good'])
+        elif pct_change > 1:
+            self.analysis_labels['trend'].configure(text="Diverging", fg=COLORS['bad'])
+        else:
+            self.analysis_labels['trend'].configure(text="Flat", fg=COLORS['warn'])
+
         epochs_since_best = current_epoch - run.best_l1_epoch
         if epochs_since_best < 10:
             self.analysis_labels['plateau'].configure(
@@ -729,16 +736,34 @@ class TrainingMonitor:
             self.analysis_labels['plateau'].configure(
                 text=f"Best {epochs_since_best:.0f}ep ago", fg=COLORS['bad'])
 
-        if relative_slope < -0.005 and epochs_since_best < 20:
-            self.analysis_labels['recommendation'].configure(text="Training well", fg=COLORS['good'])
-        elif relative_slope > 0.01:
-            self.analysis_labels['recommendation'].configure(text="Diverging - check LR", fg=COLORS['bad'])
+        # Status (the only chip a beginner needs to act on). Decision tree in
+        # priority order — earlier branches win. Guard #2 (epochs_since_best
+        # <= 2) is load-bearing: without it, a fresh best with a flat smoothed
+        # slope would mis-recommend stopping (this was the original bug).
+        strong_improve = pct_change < -3
+        diverging      = relative_slope > 0.01 or pct_change > 3
+
+        if diverging:
+            self.analysis_labels['recommendation'].configure(
+                text="Stop - diverging, lower LR", fg=COLORS['bad'])
+        elif epochs_since_best <= 2:
+            self.analysis_labels['recommendation'].configure(
+                text="Training well - new best", fg=COLORS['good'])
+        elif relative_slope < -0.005 or strong_improve:
+            self.analysis_labels['recommendation'].configure(
+                text="Training well", fg=COLORS['good'])
         elif epochs_since_best > 50:
-            self.analysis_labels['recommendation'].configure(text="Consider stopping", fg=COLORS['bad'])
-        elif epochs_since_best > 30 or abs(relative_slope) < 0.001:
-            self.analysis_labels['recommendation'].configure(text="Plateau - may stop", fg=COLORS['warn'])
+            self.analysis_labels['recommendation'].configure(
+                text="Stop - no new best in 50+ epochs", fg=COLORS['bad'])
+        elif epochs_since_best > 30:
+            self.analysis_labels['recommendation'].configure(
+                text="Plateau - may stop", fg=COLORS['warn'])
+        elif abs(relative_slope) < 0.001 and epochs_since_best > 10:
+            self.analysis_labels['recommendation'].configure(
+                text="Slowing - keep watching", fg=COLORS['warn'])
         elif relative_slope < -0.001:
-            self.analysis_labels['recommendation'].configure(text="Slow progress", fg=COLORS['warn'])
+            self.analysis_labels['recommendation'].configure(
+                text="Slow improvement", fg=COLORS['text'])
         else:
             self.analysis_labels['recommendation'].configure(text="Stable", fg=COLORS['text'])
 
