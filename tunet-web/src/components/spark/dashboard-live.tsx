@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * Client component that owns the live job state for /demo/dashboard.
+ * Client component that owns the live job state for /.
  *
  * Seeded from the server-fetched job list to avoid first-paint flash, then
  * polls /api/spark/jobs every 5s so status, runtimes, and the active card
@@ -109,13 +109,13 @@ export function DashboardLive({ initialJobs }: DashboardLiveProps) {
       <section>
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-lg font-semibold text-[#111827]">Jobs</h2>
-          <Link href="/demo/jobs/new" className="text-sm text-[#ae69f4] hover:underline">+ New job</Link>
+          <Link href="/jobs/new" className="text-sm text-[#ae69f4] hover:underline">+ New job</Link>
         </div>
 
         {listed.length === 0 ? (
           <div className="bg-white border border-dashed border-[#D1D5DB] rounded-xl p-10 text-center">
             <p className="text-[#6b7280] text-sm mb-4">No jobs yet</p>
-            <Link href="/demo/jobs/new"><Button variant="secondary">Launch your first job</Button></Link>
+            <Link href="/jobs/new"><Button variant="secondary">Launch your first job</Button></Link>
           </div>
         ) : (
           <JobsTable jobs={listed} startedFormat={formatStartedRel} onAfterAction={refresh} />
@@ -128,7 +128,7 @@ export function DashboardLive({ initialJobs }: DashboardLiveProps) {
 function ActiveJobCard({ job }: { job: SparkJob }) {
   return (
     <Link
-      href={`/demo/jobs/${job.id}`}
+      href={`/jobs/${job.id}`}
       className="block bg-white border border-[#e5e7eb] rounded-xl px-5 py-4 card-shadow hover:border-[#ae69f4] transition-colors"
     >
       <div className="flex items-center justify-between gap-4">
@@ -213,7 +213,7 @@ function StuckJobsBanner({
           >
             <div className="min-w-0 flex-1">
               <Link
-                href={`/demo/jobs/${job.id}`}
+                href={`/jobs/${job.id}`}
                 className="font-mono text-xs text-[#78350F] hover:underline truncate block"
               >
                 {jobLabel(job)}

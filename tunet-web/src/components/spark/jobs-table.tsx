@@ -1,8 +1,8 @@
 'use client'
 
 /**
- * Shared multi-select jobs table used by /demo/dashboard ("Recent Jobs") and
- * /demo/jobs (full list).
+ * Shared multi-select jobs table used by / ("Recent Jobs") and
+ * /jobs (full list).
  *
  * Selection rules:
  *   - All rows are selectable (terminal jobs included; we just can't cancel
@@ -300,7 +300,7 @@ export function JobsTable({ jobs, startedFormat, onAfterAction }: JobsTableProps
                     />
                   </td>
                   <td className="px-4 py-3">
-                    <Link href={`/demo/jobs/${j.id}`} className="font-mono text-xs text-[#111827] hover:text-[#ae69f4]">
+                    <Link href={`/jobs/${j.id}`} className="font-mono text-xs text-[#111827] hover:text-[#ae69f4]">
                       {jobLabel(j)}
                     </Link>
                     {(() => {
@@ -352,14 +352,14 @@ export function JobsTable({ jobs, startedFormat, onAfterAction }: JobsTableProps
                         </button>
                       ) : (
                         <Link
-                          href={`/demo/jobs/new?clone=${j.id}`}
+                          href={`/jobs/new?clone=${j.id}`}
                           className="text-xs text-[#6b7280] hover:text-[#7E3AF2]"
                           title="Start a new job pre-filled from this one"
                         >
                           Clone
                         </Link>
                       )}
-                      <Link href={`/demo/jobs/${j.id}`} className="text-xs text-[#ae69f4] hover:underline">View →</Link>
+                      <Link href={`/jobs/${j.id}`} className="text-xs text-[#ae69f4] hover:underline">View →</Link>
                     </div>
                   </td>
                 </tr>

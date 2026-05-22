@@ -6,7 +6,7 @@ import { SparkLogo } from '@/components/brand/spark-logo'
 
 const navItems = [
   {
-    href: '/demo/dashboard',
+    href: '/',
     label: 'Dashboard',
     exact: true,
     icon: (
@@ -17,7 +17,7 @@ const navItems = [
     ),
   },
   {
-    href: '/demo/comfy',
+    href: '/comfy',
     label: 'EZ-Comfy',
     exact: false,
     icon: (
@@ -27,7 +27,7 @@ const navItems = [
     ),
   },
   {
-    href: '/demo/billing',
+    href: '/billing',
     label: 'Billing',
     exact: false,
     icon: (

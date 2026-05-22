@@ -26,6 +26,16 @@ const nextConfig: NextConfig = {
       bodySizeLimit: '500mb',
     },
   },
+  // The app moved off the /demo/* prefix to clean root paths (dashboard at /).
+  // Keep old bookmarks/links working. Evaluated in order — the dashboard and the
+  // bare /demo land on / before the catch-all maps the rest 1:1.
+  async redirects() {
+    return [
+      { source: '/demo', destination: '/', permanent: false },
+      { source: '/demo/dashboard', destination: '/', permanent: false },
+      { source: '/demo/:path*', destination: '/:path*', permanent: false },
+    ]
+  },
 }
 
 export default nextConfig

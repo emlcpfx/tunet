@@ -10,7 +10,7 @@ function SignInForm() {
 
   const raw = searchParams.get('callbackUrl') ?? ''
   const safe =
-    raw.startsWith('/') && !raw.startsWith('//') ? raw : '/dashboard'
+    raw.startsWith('/') && !raw.startsWith('//') ? raw : '/'
 
   // The middleware appends a callbackUrl when it bounces an unauthenticated
   // user off a protected page; signOut sends them here without one. So treat

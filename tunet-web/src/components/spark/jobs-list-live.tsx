@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * Client wrapper around <JobsTable> for /demo/jobs. Owns the polling so the
+ * Client wrapper around <JobsTable> for /jobs. Owns the polling so the
  * list refreshes after a bulk-cancel and stays current while users sit on
  * the page. Renders its own empty state so the table always reflects the
  * latest poll, not the server-fetched seed.
@@ -64,7 +64,7 @@ export function JobsListLive({ initialJobs, statusFilter }: JobsListLiveProps) {
           {statusFilter === 'all' ? 'No jobs yet' : `No ${statusFilter} jobs`}
         </p>
         {statusFilter === 'all' && (
-          <Link href="/demo/jobs/new"><Button variant="secondary">Launch your first job</Button></Link>
+          <Link href="/jobs/new"><Button variant="secondary">Launch your first job</Button></Link>
         )}
       </div>
     )

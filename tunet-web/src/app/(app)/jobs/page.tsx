@@ -1,5 +1,5 @@
 /**
- * /demo/jobs — full jobs list with filtering and bulk-cancel.
+ * /jobs — full jobs list with filtering and bulk-cancel.
  *
  * Server component fetches the initial list directly from Spark; the client
  * component <JobsListLive> takes over for polling, filtering, multi-select,
@@ -48,7 +48,7 @@ export default async function DemoJobsList({
           <h1 className="text-2xl font-bold text-[#111827]">Training Jobs</h1>
           <p className="text-sm text-[#6b7280] mt-1">{jobs.length} total · live from Spark Compute v1</p>
         </div>
-        <Link href="/demo/jobs/new">
+        <Link href="/jobs/new">
           <Button>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <line x1="12" x2="12" y1="5" y2="19"/><line x1="5" x2="19" y1="12" y2="12"/>
@@ -69,7 +69,7 @@ export default async function DemoJobsList({
         {FILTERS.map(f => (
           <Link
             key={f.value}
-            href={`/demo/jobs?status=${f.value}`}
+            href={`/jobs?status=${f.value}`}
             className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors whitespace-nowrap ${
               statusFilter === f.value
                 ? 'bg-white text-[#111827] shadow-sm'

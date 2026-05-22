@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * /demo/billing — compute spend, usage, and live GPU pricing, all from Spark.
+ * /billing — compute spend, usage, and live GPU pricing, all from Spark.
  *
  * Spark bills the Spark account directly (automatic withdrawals), so there is
  * NO TuNet credit wallet or Stripe checkout here — that was a holdover from the

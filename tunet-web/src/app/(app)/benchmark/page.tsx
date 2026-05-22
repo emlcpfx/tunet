@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * /demo/benchmark — calibration page for the cost estimator.
+ * /benchmark — calibration page for the cost estimator.
  *
  * Submits one short job per GPU at the reference settings (UNet, model_size
  * 64, 512px, batch 2, L1 loss). Each job runs ~200 steps after warmup, logs
@@ -210,7 +210,7 @@ export default function BenchmarkPage() {
   return (
     <div className="space-y-5 animate-slide-in max-w-4xl">
       <div>
-        <Link href="/demo" className="text-sm text-[#6b7280] hover:text-[#374151]">← Demo</Link>
+        <Link href="/" className="text-sm text-[#6b7280] hover:text-[#374151]">← Demo</Link>
         <h1 className="text-2xl font-bold text-[#111827] mt-2">GPU Throughput Benchmark</h1>
         <p className="text-sm text-[#6b7280] mt-1">
           Calibrates the cost estimator. Runs ~200 timed training steps per GPU
@@ -523,7 +523,7 @@ function MatrixCell({ run }: { run: RunState | undefined }) {
   return (
     <td className="px-3 py-2 text-right">
       {run.rate != null ? (
-        <Link href={`/demo/jobs/${run.jobId}`} className="block hover:bg-[#F7F4FC] rounded -mx-2 px-2 py-0.5">
+        <Link href={`/jobs/${run.jobId}`} className="block hover:bg-[#F7F4FC] rounded -mx-2 px-2 py-0.5">
           <div className="font-mono text-sm font-semibold text-[#16A34A]">
             {run.rate.toFixed(2)}<span className="text-[10px] text-[#9ca3af] font-normal"> step/s</span>
           </div>
@@ -532,7 +532,7 @@ function MatrixCell({ run }: { run: RunState | undefined }) {
           </div>
         </Link>
       ) : run.status === 'failed' ? (
-        <Link href={`/demo/jobs/${run.jobId}`} className="block hover:bg-[#FEF2F2] rounded -mx-2 px-2 py-0.5" title={run.errorMsg ?? 'failed'}>
+        <Link href={`/jobs/${run.jobId}`} className="block hover:bg-[#FEF2F2] rounded -mx-2 px-2 py-0.5" title={run.errorMsg ?? 'failed'}>
           <span className="text-xs text-[#EF4444] font-semibold">
             {(run.errorMsg ?? '').toLowerCase().includes('memory') || (run.errorMsg ?? '').toLowerCase().includes('oom')
               ? 'OOM' : 'Failed'}
@@ -541,7 +541,7 @@ function MatrixCell({ run }: { run: RunState | undefined }) {
       ) : run.status === 'closed' ? (
         <span className="text-xs text-[#9ca3af]">no rate</span>
       ) : (
-        <Link href={`/demo/jobs/${run.jobId}`} className="block hover:bg-[#F9FAFB] rounded -mx-2 px-2 py-0.5">
+        <Link href={`/jobs/${run.jobId}`} className="block hover:bg-[#F9FAFB] rounded -mx-2 px-2 py-0.5">
           <span className="text-xs text-[#6b7280]">running…</span>
         </Link>
       )}
@@ -655,7 +655,7 @@ function RunRow({ run, setRuns, headless = false }: { run: RunState; setRuns: (f
         <p className="text-[11px] text-[#9ca3af] font-mono">{run.sku}</p>
       </td>
       <td className="px-3 py-2">
-        <Link href={`/demo/jobs/${run.jobId}`} className="text-xs font-mono text-[#7E3AF2] hover:underline">
+        <Link href={`/jobs/${run.jobId}`} className="text-xs font-mono text-[#7E3AF2] hover:underline">
           {run.jobId.slice(0, 8)}
         </Link>
       </td>
@@ -674,7 +674,7 @@ function RunRow({ run, setRuns, headless = false }: { run: RunState; setRuns: (f
       </td>
       <td className="px-3 py-2 text-right">
         <Link
-          href={`/demo/jobs/${run.jobId}`}
+          href={`/jobs/${run.jobId}`}
           className="text-[11px] text-[#6b7280] hover:text-[#7E3AF2]"
         >
           View →

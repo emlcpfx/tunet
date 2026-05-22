@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * /demo/jobs/new — preset-driven training job submitter.
+ * /jobs/new — preset-driven training job submitter.
  *
  * 4-step layout (mirrors Spark/frontend/new-job.html):
  *   1. Job Name
@@ -595,7 +595,7 @@ function NewJobPageInner() {
 
       // Brief moment so the user sees the green checkmark, then redirect
       await new Promise(resolve => setTimeout(resolve, 700))
-      router.push(`/demo/jobs/${resolvedJobId}`)
+      router.push(`/jobs/${resolvedJobId}`)
     } catch (e) {
       setProgressError(e instanceof Error ? e.message : 'Submit failed')
       setSubmitError(e instanceof Error ? e.message : 'Submit failed')
@@ -666,7 +666,7 @@ function NewJobPageInner() {
     )}
     <div className="space-y-5 animate-slide-in max-w-3xl">
       <div>
-        <Link href="/demo/jobs" className="text-sm text-[#6b7280] hover:text-[#374151]">← All Jobs</Link>
+        <Link href="/jobs" className="text-sm text-[#6b7280] hover:text-[#374151]">← All Jobs</Link>
         <h1 className="text-2xl font-bold text-[#111827] mt-2">New Training Job</h1>
         <p className="text-sm text-[#6b7280] mt-1">
           Pick a preset, point at frames, and go. The full tunet source bundle (~760 KB) is packed and shipped on submit.
@@ -678,7 +678,7 @@ function NewJobPageInner() {
           <div className="text-sm text-[#374151] min-w-0">
             <p>
               <span className="font-semibold">Cloned from</span>{' '}
-              <Link href={`/demo/jobs/${cloneSource.id}`} className="font-mono text-xs text-[#7E3AF2] hover:underline">
+              <Link href={`/jobs/${cloneSource.id}`} className="font-mono text-xs text-[#7E3AF2] hover:underline">
                 {cloneSource.label}
               </Link>
             </p>
@@ -688,7 +688,7 @@ function NewJobPageInner() {
           </div>
           <button
             type="button"
-            onClick={() => { setCloneSource(null); router.replace('/demo/jobs/new') }}
+            onClick={() => { setCloneSource(null); router.replace('/jobs/new') }}
             className="text-xs text-[#6b7280] hover:text-[#374151] flex-shrink-0"
             aria-label="Clear clone"
           >
@@ -1256,7 +1256,7 @@ Leave the email field empty to opt out for this job entirely."
           )}
 
           <div className="mt-5 flex items-center justify-between border-t border-[#e5e7eb] pt-5">
-            <Link href="/demo/jobs" className="text-sm text-[#6b7280] hover:text-[#374151]">
+            <Link href="/jobs" className="text-sm text-[#6b7280] hover:text-[#374151]">
               ← Cancel
             </Link>
             <Button

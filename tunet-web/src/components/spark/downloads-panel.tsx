@@ -12,7 +12,6 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
 import type { SparkJob } from '@/lib/spark-types'
 
 interface FileEntry {
@@ -43,10 +42,8 @@ const POLL_DEADLINE    = 7 * 60_000    // spawned CPU job: ~2-3 min, give headro
 const REQUEST_DEADLINE = 20 * 60_000   // inline export waits for the next epoch boundary
 
 export function DownloadsPanel({ job }: DownloadsPanelProps) {
-  const pathname  = usePathname()
-  // The panel renders on /demo/jobs/[id] (and /jobs/[id] if ever wired there);
-  // link export-job progress to whichever surface we're on.
-  const jobsBase  = pathname.startsWith('/demo/') ? '/demo/jobs' : '/jobs'
+  // The app's job pages live at /jobs/[id]; export-job progress links there.
+  const jobsBase  = '/jobs'
 
   // A live job can export on its own training node (no new machine); a finished
   // one can't (model unloaded), so it falls back to a spawned convert job.

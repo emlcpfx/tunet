@@ -23,7 +23,7 @@ export default auth((req) => {
   if (!userId) {
     const signIn = new URL('/sign-in', req.url)
     const callback = `${pathname}${req.nextUrl.search}`
-    signIn.searchParams.set('callbackUrl', callback || '/dashboard')
+    signIn.searchParams.set('callbackUrl', callback || '/')
     return NextResponse.redirect(signIn)
   }
 

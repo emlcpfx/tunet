@@ -1,5 +1,5 @@
 /**
- * /demo/jobs/[id] — live job detail with SSE log stream.
+ * /jobs/[id] — live job detail with SSE log stream.
  *
  * Server component for the surrounding chrome (job metadata fetched server-side
  * to avoid a client-side flash), client component for the SSE log viewer.
@@ -68,7 +68,7 @@ export default async function JobDetailPage({
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-3 mb-2">
-            <Link href="/demo/jobs" className="text-sm text-[#6b7280] hover:text-[#374151]">
+            <Link href="/jobs" className="text-sm text-[#6b7280] hover:text-[#374151]">
               ← All Jobs
             </Link>
           </div>
@@ -83,7 +83,7 @@ export default async function JobDetailPage({
               comfy render, so they're training-only. */}
           {!isComfy && !isLive && (
             <Link
-              href={`/demo/jobs/new?resume=${job.id}`}
+              href={`/jobs/new?resume=${job.id}`}
               className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#7E3AF2] text-[#7E3AF2] hover:bg-[#faf5ff] transition-colors"
               title="Continue training from this job's latest checkpoint"
             >
@@ -92,7 +92,7 @@ export default async function JobDetailPage({
           )}
           {isComfy ? (
             <Link
-              href="/demo/comfy"
+              href="/comfy"
               className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#e5e7eb] text-[#374151] hover:bg-[#F9FAFB] transition-colors"
               title="Start a new EZ-Comfy render"
             >
@@ -100,7 +100,7 @@ export default async function JobDetailPage({
             </Link>
           ) : (
             <Link
-              href={`/demo/jobs/new?clone=${job.id}`}
+              href={`/jobs/new?clone=${job.id}`}
               className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#e5e7eb] text-[#374151] hover:bg-[#F9FAFB] transition-colors"
               title="Start a new job pre-filled from this one"
             >
