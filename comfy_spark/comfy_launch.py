@@ -891,9 +891,10 @@ def main():
     # Collect patch ops (node, path, value) from the preset map + --set.
     patch_ops = []
     if args.preset:
-        if preset.get("requires_input", True) and not args.video and not args.convert_only:
+        if preset.get("requires_input", True) and not args.video \
+                and not args.input_sequence and not args.convert_only:
             sys.exit("ERROR: preset mode needs a primary input file, e.g. "
-                     "`... --preset ltx_Obscura_Remova clip.mp4` (or --convert-only)")
+                     "`... --preset ltx_Obscura_Remova clip.mp4` (or --input-sequence DIR, or --convert-only)")
         if args.video:
             input_files.insert(0, args.video)
         if args.mask:
@@ -1010,6 +1011,23 @@ def main():
     if preset.get("models"):
         env_vars["COMFY_FETCH_MODELS"] = json.dumps(preset["models"])
 
+    # ── input image-sequence: pack frames + swap the loader on the node ──
+    seq = None
+    if args.input_sequence:
+        seq = detect_sequence(args.input_sequence)
+        if seq["kind"] != "exr":
+            sys.exit(f"ERROR: --input-sequence currently supports EXR sequences; found a {seq['kind']!r} "
+                     f"sequence. DPX / PNG-folder ingest is the next add (see EZ_COMFY_TODO).")
+        env_vars["COMFY_INPUT_SEQ"] = json.dumps({
+            "kind": seq["kind"], "pattern": seq["pattern"], "start": seq["start"],
+            "end": seq["end"], "step": seq["step"],
+            "colorspace": args.colorspace or ("linear" if seq["kind"] == "exr" else "as-is")})
+        if preset.get("input_anchor"):                 # explicit loader id wins; else auto-detect
+            env_vars["COMFY_INPUT_SEQ_ANCHOR"] = json.dumps(str(preset["input_anchor"]["node"]))
+        seq_pack = {"exr": "https://github.com/Conor-Collins/ComfyUI-CoCoTools_IO"}.get(seq["kind"])
+        if seq_pack and seq_pack not in node_packs:
+            node_packs.append(seq_pack)
+
     # ── output format: splice a high-bit saver onto the frames (default mp4 = no-op) ──
     out_fmt = args.output
     if out_fmt and out_fmt != (load_outputs().get("_default") or "mp4"):
@@ -1038,6 +1056,9 @@ def main():
     print(f"        instance  : {instance_type} ({gpu})   mode={mode}")
     print(f"        tags      : {BILLING_TAG}, {GROUP_TAG}{''.join(', ' + t for t in args.tag)}")
     print(f"        inputs    : {[os.path.basename(p) for p in input_files] or '(none)'}")
+    if seq:
+        print(f"        in-seq    : {len(seq['files'])} {seq['kind']} frame(s) {seq['start']}-{seq['end']} "
+              f"→ {seq['pattern']} [{json.loads(env_vars['COMFY_INPUT_SEQ'])['colorspace']}]")
     print(f"        format    : {'UI graph → converts on Spark' if is_ui else 'API (patched locally)'}")
     if env_vars.get("COMFY_OUTPUT_SPEC"):
         _os = json.loads(env_vars["COMFY_OUTPUT_SPEC"])
@@ -1077,7 +1098,8 @@ def main():
     # none). bash -c also dodges PATH/entrypoint quirks across base images.
     python_bin = preset.get("python", "python3")
     command = ["bash", "-c", f"{python_bin} /input/comfy_run.py"]
-    tar_path = build_tar(workflow, input_files, patches_to_pack)
+    tar_path = build_tar(workflow, input_files, patches_to_pack,
+                         seq_files=seq["files"] if seq else None)
     try:
         resp = submit_job(job_name, instance_type, image, command, env_vars,
                           mode, args.idle_hold, args.max_retries, args.tag)

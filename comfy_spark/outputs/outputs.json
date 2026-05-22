@@ -1,0 +1,152 @@
+{
+  "_schema": "comfy_spark output-format registry v1. Drives `comfy_launch.py --output <name>` and `--list-outputs`. 'mp4' is the default = the preset's OWN built-in saver (no rewrite). Any other format makes comfy_run.py splice a PARALLEL output branch onto the workflow's final RGB frames (auto-detected as the IMAGE feeding the terminal CreateVideo/SaveImage/VHS node, or a preset's explicit `output_anchor`). The original mp4 saver is left intact, so you always get a quick preview PLUS your chosen high-bit deliverable. Sequence formats write frame.####.ext into a subfolder; video formats write one file. All land in ShareSync.",
+
+  "_fields": {
+    "label": "human description shown by --list-outputs / the GUI dropdown",
+    "kind": "builtin (the preset's own saver, no rewrite) | sequence (frames) | video (one file)",
+    "ext": "file extension produced",
+    "node_pack": "git repo cloned on the Spark node to register the save node(s); omitted for core-only chains",
+    "chain": "ordered nodes spliced from the IMAGE anchor to the final saver. Each: {class_type, in (the input that takes the upstream IMAGE/VIDEO link), inputs (static widgets)}. Placeholders $PREFIX/$FPS are filled by comfy_run. 'only_if_linear': skipped unless --colorspace linear.",
+    "default_colorspace": "linear | as-is — what --colorspace defaults to for this format"
+  },
+
+  "_default": "mp4",
+
+  "formats": {
+    "mp4": {
+      "label": "MP4 H.264 8-bit — the preset's own output (fast preview, default)",
+      "kind": "builtin"
+    },
+
+    "exr32": {
+      "label": "EXR 32-bit float, scene-linear — VFX comp (Nuke/AE)",
+      "kind": "sequence", "ext": "exr", "default_colorspace": "linear",
+      "node_pack": "https://github.com/Conor-Collins/ComfyUI-CoCoTools_IO",
+      "chain": [
+        { "class_type": "ColorspaceNode", "in": "images", "only_if_linear": true,
+          "inputs": { "from_colorspace": "sRGB", "to_colorspace": "sRGB Linear" } },
+        { "class_type": "SaverNode", "in": "images",
+          "inputs": { "file_path": "", "filename": "$PREFIX", "save_mode": "sequence",
+                      "use_versioning": false, "file_type": "exr", "bit_depth": "32",
+                      "exr_compression": "zips", "save_as_grayscale": false } }
+      ]
+    },
+
+    "exr16": {
+      "label": "EXR 16-bit half float, scene-linear — smaller than 32-bit, still float",
+      "kind": "sequence", "ext": "exr", "default_colorspace": "linear",
+      "node_pack": "https://github.com/Conor-Collins/ComfyUI-CoCoTools_IO",
+      "chain": [
+        { "class_type": "ColorspaceNode", "in": "images", "only_if_linear": true,
+          "inputs": { "from_colorspace": "sRGB", "to_colorspace": "sRGB Linear" } },
+        { "class_type": "SaverNode", "in": "images",
+          "inputs": { "file_path": "", "filename": "$PREFIX", "save_mode": "sequence",
+                      "use_versioning": false, "file_type": "exr", "bit_depth": "16",
+                      "exr_compression": "zips", "save_as_grayscale": false } }
+      ]
+    },
+
+    "png16": {
+      "label": "PNG 16-bit sequence (display sRGB) — high-bit stills",
+      "kind": "sequence", "ext": "png", "default_colorspace": "as-is",
+      "node_pack": "https://github.com/Conor-Collins/ComfyUI-CoCoTools_IO",
+      "chain": [
+        { "class_type": "SaverNode", "in": "images",
+          "inputs": { "file_path": "", "filename": "$PREFIX", "save_mode": "sequence",
+                      "use_versioning": false, "file_type": "png", "bit_depth": "16",
+                      "save_as_grayscale": false } }
+      ]
+    },
+
+    "tiff16": {
+      "label": "TIFF 16-bit sequence — Nuke-friendly high-bit",
+      "kind": "sequence", "ext": "tiff", "default_colorspace": "as-is",
+      "node_pack": "https://github.com/Conor-Collins/ComfyUI-CoCoTools_IO",
+      "chain": [
+        { "class_type": "SaverNode", "in": "images",
+          "inputs": { "file_path": "", "filename": "$PREFIX", "save_mode": "sequence",
+                      "use_versioning": false, "file_type": "tiff", "bit_depth": "16",
+                      "save_as_grayscale": false } }
+      ]
+    },
+
+    "prores_proxy": {
+      "label": "ProRes 422 Proxy 10-bit (~45 Mbps) — light review",
+      "kind": "video", "ext": "mov", "default_colorspace": "as-is",
+      "node_pack": "https://github.com/xergon/ComfyUI-SaveVideoHQ",
+      "chain": [
+        { "class_type": "CreateVideo", "in": "images", "inputs": { "fps": "$FPS" } },
+        { "class_type": "SaveVideoHQ", "in": "video",
+          "inputs": { "filename_prefix": "$PREFIX", "preset": "ProRes_Proxy_4:2:2_10bit_(~45Mbps)",
+                      "custom_codec": "prores_ks", "custom_container": "mov", "custom_rate_control": "crf",
+                      "custom_crf": 12, "custom_bitrate_mbps": 80, "custom_preset_speed": "slow",
+                      "custom_all_intra": true, "custom_pix_fmt": "yuv422p10le" } }
+      ]
+    },
+    "prores_lt": {
+      "label": "ProRes 422 LT 10-bit (~102 Mbps)",
+      "kind": "video", "ext": "mov", "default_colorspace": "as-is",
+      "node_pack": "https://github.com/xergon/ComfyUI-SaveVideoHQ",
+      "chain": [
+        { "class_type": "CreateVideo", "in": "images", "inputs": { "fps": "$FPS" } },
+        { "class_type": "SaveVideoHQ", "in": "video",
+          "inputs": { "filename_prefix": "$PREFIX", "preset": "ProRes_LT_4:2:2_10bit_(~102Mbps)",
+                      "custom_codec": "prores_ks", "custom_container": "mov", "custom_rate_control": "crf",
+                      "custom_crf": 12, "custom_bitrate_mbps": 80, "custom_preset_speed": "slow",
+                      "custom_all_intra": true, "custom_pix_fmt": "yuv422p10le" } }
+      ]
+    },
+    "prores_422": {
+      "label": "ProRes 422 10-bit (~147 Mbps) — standard editorial",
+      "kind": "video", "ext": "mov", "default_colorspace": "as-is",
+      "node_pack": "https://github.com/xergon/ComfyUI-SaveVideoHQ",
+      "chain": [
+        { "class_type": "CreateVideo", "in": "images", "inputs": { "fps": "$FPS" } },
+        { "class_type": "SaveVideoHQ", "in": "video",
+          "inputs": { "filename_prefix": "$PREFIX", "preset": "ProRes_422_4:2:2_10bit_(~147Mbps)",
+                      "custom_codec": "prores_ks", "custom_container": "mov", "custom_rate_control": "crf",
+                      "custom_crf": 12, "custom_bitrate_mbps": 80, "custom_preset_speed": "slow",
+                      "custom_all_intra": true, "custom_pix_fmt": "yuv422p10le" } }
+      ]
+    },
+    "prores_hq": {
+      "label": "ProRes 422 HQ 10-bit (~220 Mbps) — high-quality 4:2:2",
+      "kind": "video", "ext": "mov", "default_colorspace": "as-is",
+      "node_pack": "https://github.com/xergon/ComfyUI-SaveVideoHQ",
+      "chain": [
+        { "class_type": "CreateVideo", "in": "images", "inputs": { "fps": "$FPS" } },
+        { "class_type": "SaveVideoHQ", "in": "video",
+          "inputs": { "filename_prefix": "$PREFIX", "preset": "ProRes_HQ_4:2:2_10bit_(~220Mbps)",
+                      "custom_codec": "prores_ks", "custom_container": "mov", "custom_rate_control": "crf",
+                      "custom_crf": 12, "custom_bitrate_mbps": 80, "custom_preset_speed": "slow",
+                      "custom_all_intra": true, "custom_pix_fmt": "yuv422p10le" } }
+      ]
+    },
+    "prores_4444": {
+      "label": "ProRes 4444 12-bit 4:4:4 (~330 Mbps) — full chroma + alpha-capable",
+      "kind": "video", "ext": "mov", "default_colorspace": "as-is",
+      "node_pack": "https://github.com/xergon/ComfyUI-SaveVideoHQ",
+      "chain": [
+        { "class_type": "CreateVideo", "in": "images", "inputs": { "fps": "$FPS" } },
+        { "class_type": "SaveVideoHQ", "in": "video",
+          "inputs": { "filename_prefix": "$PREFIX", "preset": "ProRes_4444_4:4:4_12bit_(~330Mbps)",
+                      "custom_codec": "prores_ks", "custom_container": "mov", "custom_rate_control": "crf",
+                      "custom_crf": 12, "custom_bitrate_mbps": 80, "custom_preset_speed": "slow",
+                      "custom_all_intra": true, "custom_pix_fmt": "yuv444p10le" } }
+      ]
+    },
+    "prores_4444xq": {
+      "label": "ProRes 4444 XQ 12-bit 4:4:4 (~500 Mbps) — maximum",
+      "kind": "video", "ext": "mov", "default_colorspace": "as-is",
+      "node_pack": "https://github.com/xergon/ComfyUI-SaveVideoHQ",
+      "chain": [
+        { "class_type": "CreateVideo", "in": "images", "inputs": { "fps": "$FPS" } },
+        { "class_type": "SaveVideoHQ", "in": "video",
+          "inputs": { "filename_prefix": "$PREFIX", "preset": "ProRes_4444_XQ_4:4:4_12bit_(~500Mbps)",
+                      "custom_codec": "prores_ks", "custom_container": "mov", "custom_rate_control": "crf",
+                      "custom_crf": 12, "custom_bitrate_mbps": 80, "custom_preset_speed": "slow",
+                      "custom_all_intra": true, "custom_pix_fmt": "yuv444p10le" } }
+      ]
+    }
+  }
+}

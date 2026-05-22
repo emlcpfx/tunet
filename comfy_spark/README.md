@@ -554,6 +554,29 @@ To run the **base model without Lightning** (more motion, slower): set both
 strengths to 0 and raise the step split on the two `KSamplerAdvanced` nodes
 (110 high, 111 low) via `--set`, with cfg ~3.5.
 
+## Input: EXR frame sequences (plates in)
+
+For v2v presets (cleanplate, control, HDR) you can feed a **folder of EXR frames**
+as the input plate instead of an mp4, with `--input-sequence`:
+
+```bash
+python comfy_spark/comfy_launch.py --preset ltx_Obscura_Remova \
+    --input-sequence ./plate_exr --prompt "remove the rig" \
+    --output exr32 --download ./renders          # EXR in → EXR out, end to end
+```
+
+It auto-detects the numbered sequence in the folder (`shot.####.exr`, any
+prefix/padding), packs the frames to `/input/seq/`, and on the node **swaps the
+preset's video loader for CoCoTools `LoadExrSequence`** — keeping the IMAGE wiring
+intact and dropping the old loader's audio/fps outputs (a sequence has none).
+Because EXR is **scene-linear**, it inserts a `ColorspaceNode` (linear→sRGB) so the
+model sees display-referred frames, the mirror of the linear EXR *output* path.
+
+The loader to swap is auto-detected (the preset's `VHS_LoadVideo`/`VHS_LoadImages`/
+`LoadImage`); a preset can pin it with `input_anchor: {"node": "<id>"}`. Today this
+covers **EXR** sequences (the headline VFX plate format); DPX and PNG/TIFF folders
+need their own loaders and are tracked as the next add in `EZ_COMFY_TODO.md`.
+
 ## Choosing the output format (high-bit / EXR / ProRes)
 
 By default every preset writes an 8-bit H.264 **mp4** — fine for review, lossy for

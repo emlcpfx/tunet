@@ -82,3 +82,8 @@ aws_gpu_pricing.html
 tunet-web/deploy/tunet-web.env
 
 comfy_spark/_dl
+
+# comfy_resolve.py scratch — a generated draft preset (placeholder REPLACE_ URLs)
+# and extracted custom-node source dumps. Regenerated on demand; not source.
+/draft.preset.json
+/_outnodes/
