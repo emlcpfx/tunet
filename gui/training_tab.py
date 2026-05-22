@@ -153,10 +153,10 @@ class TrainingTabMixin:
         self.preset_input.addItems(["Custom", "General (Image-to-Image)", "Beauty / Paint Fix", "Paintout / Cleanup", "Roto / Matte"])
         self.preset_input.setToolTip(
             "Quick-start presets that configure model, loss, and patch settings.\n\n"
-            "  General — Good all-around starting point for image-to-image tasks\n"
-            "  Beauty / Paint Fix — Perceptual loss for faces, skin, hair\n"
-            "  Paintout / Cleanup — Weighted loss for removing objects\n"
-            "  Roto / Matte — Binary mask output for rotoscoping\n\n"
+            "  General — Whole-frame changes like grades, AOVs, or a global look (no masking)\n"
+            "  Beauty / Paint Fix — Small, local fixes: blemishes, wire/rig removal, skin retouch\n"
+            "  Paintout / Cleanup — Removing large objects and cleaning big areas with smooth blends\n"
+            "  Roto / Matte — Turn a plate into a black-and-white matte\n\n"
             "Select a preset then adjust individual settings as needed.\n"
             "Changing any setting afterwards keeps your changes (won't revert).")
         self.preset_input.currentTextChanged.connect(self._apply_preset)
