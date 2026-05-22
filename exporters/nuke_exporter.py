@@ -228,11 +228,16 @@ def load_model_for_conversion(checkpoint_path, device='cpu'):
 def generate_nuke_script(pt_file_path, cat_file_path, nk_file_path):
     """Generates a Nuke script (.nk) file with pre-configured nodes."""
 
-    # Ensure paths use forward slashes for Nuke
-    pt_file_path_nuke = pt_file_path.replace('\\', '/')
-    cat_file_path_nuke = cat_file_path.replace('\\', '/')
+    # Embed RELATIVE paths (just the basenames) for the .pt and .cat. Nuke
+    # resolves relative read/write paths against the script's own directory, and
+    # all three files (.nk/.pt/.cat) are written to the same folder — so a
+    # downloaded (.nk + .pt) pair "just works" when dropped in a folder and
+    # opened, with no manual repathing. (Absolute paths broke this: the .nk was
+    # generated with the export machine's paths, e.g. cloud `/output/…`.)
+    pt_file_path_nuke = os.path.basename(pt_file_path)
+    cat_file_path_nuke = os.path.basename(cat_file_path)
 
-    # Extract a base name for node labels (optional, makes it clearer)
+    # Base name for node labels
     base_name = os.path.splitext(os.path.basename(pt_file_path))[0]
 
     nuke_script_content = f"""#! C:/Program Files/Nuke15.1v3/Nuke15.1.exe -nx
