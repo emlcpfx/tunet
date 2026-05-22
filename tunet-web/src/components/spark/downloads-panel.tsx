@@ -34,7 +34,7 @@ type ExportPhase =
   | { kind: 'submitting' }
   | { kind: 'requested' }                  // running job is exporting inline on its training node
   | { kind: 'converting'; jobId: string }  // spawned CPU job is converting
-  | { kind: 'ready';      path: string }   // file is in ShareSync — show a Download link
+  | { kind: 'ready' }                      // export is in ShareSync — show a Download link
   | { kind: 'timeout';    jobId?: string }
   | { kind: 'error';      msg: string }
 
@@ -135,6 +135,30 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
     a.remove()
   }
 
+  function downloadMany(paths: string[]) {
+    // Stagger so the browser doesn't collapse rapid-fire downloads into one.
+    paths.forEach((p, i) => setTimeout(() => triggerDownload(p), i * 400))
+  }
+
+  // Every file in a format's most-recent export set. Flame ships .onnx + .json
+  // and Nuke ships .pt + .nk (+ .cat once built in Nuke) — you need the whole
+  // set, not just one file. Grouped by shared base name (epoch + timestamp).
+  // Takes an explicit list so callers can use a freshly-fetched listing rather
+  // than the (possibly stale) `files` state.
+  function exportSetFrom(list: FileEntry[], fmt: ExportFormat): string[] {
+    const sub = `exports/${fmt}/`
+    const inSub = list.filter(f => f.name.startsWith(sub)).sort(byModifiedDesc)
+    if (inSub.length === 0) return []
+    const baseOf = (n: string) => n.replace(/\.[^/.]+$/, '')   // strip extension
+    const newest = baseOf(inSub[0].name)
+    return inSub.filter(f => baseOf(f.name) === newest).map(f => f.name)
+  }
+
+  function downloadSet(fmt: ExportFormat) {
+    const set = exportSetFrom(files ?? [], fmt)
+    if (set.length) downloadMany(set)
+  }
+
   // Click handler for an export card. Preferred path for a RUNNING job: ask its
   // training node to export the current model inline (it already holds the
   // weights — no new machine), then poll for the file and surface a download.
@@ -184,9 +208,9 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
       if (data.fromCache && data.downloadPath) {
-        triggerDownload(data.downloadPath)            // best-effort (within the click's gesture window)
-        setPhase(fmt, { kind: 'ready', path: data.downloadPath })
-        void refreshFiles()
+        const entries = await refreshFiles()          // fresh listing → full set
+        downloadMany(exportSetFrom(entries, fmt))     // best-effort (within the click's gesture window)
+        setPhase(fmt, { kind: 'ready' })
         return
       }
       setPhase(fmt, { kind: 'converting', jobId: data.jobId })
@@ -217,15 +241,17 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
       if (cancelledRef.current) return
       const entries = await refreshFiles()
       const fresh = entries.filter(f => f.name.startsWith(`exports/${subdir}/`) && !before.has(f.name))
-      const primary = fmt === 'nuke'
-        ? (fresh.find(f => f.name.endsWith('.cat')) ?? fresh.find(f => f.name.endsWith('.pt')))
-        :  fresh.find(f => f.name.endsWith('.onnx'))
-      if (primary) {
-        // Best-effort auto-download; browsers block downloads fired long after a
-        // click (no user gesture), so the card also shows a Download link — that
-        // click is a real gesture and always works.
-        triggerDownload(primary.name)
-        setPhase(fmt, { kind: 'ready', path: primary.name })
+      // Wait for the deliverable of this format (.onnx for flame; .pt for nuke).
+      const arrived = fmt === 'nuke'
+        ? fresh.some(f => f.name.endsWith('.pt'))
+        : fresh.some(f => f.name.endsWith('.onnx'))
+      if (arrived) {
+        // Grab the whole fresh set (.onnx + .json, or .pt + .nk), not just one.
+        // Best-effort — browsers block downloads fired long after a click (no
+        // user gesture), so the green Download button (a real gesture) is the
+        // reliable path.
+        downloadMany(fresh.map(f => f.name))
+        setPhase(fmt, { kind: 'ready' })
         return
       }
       if (Date.now() > deadline) { setPhase(fmt, { kind: 'timeout', jobId: jobId ?? undefined }); return }
@@ -323,11 +349,11 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
           ckptLabel={ckptLabel}
           jobsBase={jobsBase}
           onExport={() => void runExport('flame')}
-          onDownload={triggerDownload}
+          onDownload={() => downloadSet('flame')}
         />
         <ExportCard
           title="Export for Nuke"
-          hint="TorchScript (.cat + .nk + .pt)"
+          hint="TorchScript (.pt + .nk)"
           phase={phases.nuke}
           existing={nukePrimary}
           extraCount={Math.max(0, nukeFiles.length - 1)}
@@ -336,7 +362,7 @@ export function DownloadsPanel({ job }: DownloadsPanelProps) {
           ckptLabel={ckptLabel}
           jobsBase={jobsBase}
           onExport={() => void runExport('nuke')}
-          onDownload={triggerDownload}
+          onDownload={() => downloadSet('nuke')}
         />
       </div>
 
@@ -465,7 +491,7 @@ function ExportCard({
   ckptLabel: string
   jobsBase: string
   onExport: () => void
-  onDownload: (relPath: string) => void
+  onDownload: () => void   // downloads the format's full export set
 }) {
   const busy  = phase.kind === 'submitting' || phase.kind === 'requested' || phase.kind === 'converting'
   const ready = phase.kind === 'ready'
@@ -521,14 +547,14 @@ function ExportCard({
         {ready && (
           <button
             type="button"
-            onClick={() => onDownload(phase.path)}
+            onClick={onDownload}
             className="text-xs font-semibold px-2.5 py-1 rounded-md bg-[#16a34a] text-white hover:bg-[#15803d]"
           >
             Download ↓
           </button>
         )}
         {existing && !busy && !ready && (
-          <button type="button" onClick={() => onDownload(existing.name)} className="text-[10px] text-[#7E3AF2] hover:underline">
+          <button type="button" onClick={onDownload} className="text-[10px] text-[#7E3AF2] hover:underline">
             ↓ latest
           </button>
         )}
