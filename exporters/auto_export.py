@@ -21,6 +21,23 @@ def _timestamp_suffix():
     return datetime.now().strftime('_%m%d%y_%H%M')
 
 
+def _eager_model(m):
+    """Unwrap DDP / torch.compile wrappers (in any order) to the underlying eager
+    nn.Module. train.py wraps the model in torch.compile(mode='reduce-overhead');
+    you can't deepcopy or torch.onnx-export / torch.jit-trace a dynamo-optimized
+    module ("using FX to torch.jit.trace a dynamo-optimized function"), so we
+    must export from the original module. No-op for an already-eager model (e.g.
+    the standalone export job that rebuilds via create_model)."""
+    for _ in range(4):
+        if isinstance(m, DDP):
+            m = m.module
+        elif hasattr(m, '_orig_mod'):   # torch.compile OptimizedModule
+            m = m._orig_mod
+        else:
+            break
+    return m
+
+
 def export_flame(model, config, output_dir, epoch, resolution, loss_mode='l1', ckpt_prefix='model'):
     """Export model to ONNX + JSON for Flame / After Effects.
 
@@ -41,8 +58,8 @@ def export_flame(model, config, output_dir, epoch, resolution, loss_mode='l1', c
     json_path = os.path.join(export_subdir, f'{base_name}.json')
 
     try:
-        # Unwrap DDP if needed
-        raw_model = model.module if isinstance(model, DDP) else model
+        # Unwrap DDP + torch.compile to the eager module (can't trace a compiled one)
+        raw_model = _eager_model(model)
 
         # Clone weights into a fresh model on CPU to avoid disturbing training
         import copy
@@ -122,8 +139,8 @@ def export_nuke(model, config, output_dir, epoch, resolution, loss_mode='l1', ck
     cat_path = os.path.join(export_subdir, f'{base_name}.cat')
 
     try:
-        # Unwrap DDP if needed
-        raw_model = model.module if isinstance(model, DDP) else model
+        # Unwrap DDP + torch.compile to the eager module (can't trace a compiled one)
+        raw_model = _eager_model(model)
 
         import copy
         base_model_cpu = copy.deepcopy(raw_model).cpu()
