@@ -23,7 +23,7 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import {
   submitJob, uploadInputTarball, GPU_TYPES, DEFAULT_IMAGE, type GpuKey,
-  writeDiscoveredFilesBase, getJob, fetchOutputFile, shareSyncBaseUrl, getToken,
+  writeDiscoveredFilesBase, getJob, fetchOutputFile, shareSyncBaseUrl, getToken, getRefreshContext,
 } from '@/lib/spark'
 import { packInputTarball } from '@/lib/spark-packer'
 import { putControlFile, outputDavUrl } from '@/lib/sharesync'
@@ -384,6 +384,11 @@ export async function POST(req: Request) {
         // output-subdir key in env. Only when ShareSync is configured.
         const controlKey   = outputDir.split('/').filter(Boolean).pop() ?? safeName
         const controlToken = filesBase ? await getToken() : ''
+        // Refresh material so the job can mint fresh bearers itself — the
+        // control-channel poll + inline-export self-upload run for the whole
+        // (multi-hour) run, long after controlToken expires. Falls back to the
+        // static bearer when unavailable.
+        const refreshCtx   = filesBase ? await getRefreshContext() : null
         const computeMode: ComputeMode = body.computeMode === 'smart' ? 'smart' : 'instant'
         const maxRetriesOnInterrupt = computeMode === 'smart'
           ? Math.max(0, Math.min(5, Math.floor(body.maxRetriesOnInterrupt ?? 2)))
@@ -417,6 +422,10 @@ export async function POST(req: Request) {
               TUNET_FILES_BASE:  filesBase,
               TUNET_BEARER:      controlToken,
               TUNET_CONTROL_KEY: controlKey,
+            } : {}),
+            ...(refreshCtx ? {
+              TUNET_REFRESH_TOKEN: refreshCtx.refreshToken,
+              TUNET_REFRESH_URL:   refreshCtx.refreshUrl,
             } : {}),
             // Training alert prefs (read by api/cron/training-alerts).
             // Only include if email is set — empty email = opted out.

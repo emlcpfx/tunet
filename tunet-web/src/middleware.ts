@@ -6,7 +6,10 @@ function isPublicPath(pathname: string): boolean {
     pathname.startsWith('/api/auth') ||
     pathname.startsWith('/sign-in') ||
     pathname.startsWith('/sign-up') ||
-    pathname.startsWith('/api/webhooks')
+    pathname.startsWith('/api/webhooks') ||
+    // Running jobs (no browser session) swap their refresh token for a fresh
+    // access token here; it authenticates via the refresh token in the body.
+    pathname.startsWith('/api/spark/refresh')
   )
 }
 

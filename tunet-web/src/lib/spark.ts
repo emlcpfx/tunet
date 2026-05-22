@@ -97,6 +97,30 @@ export async function getToken(): Promise<string> {
   return tok
 }
 
+/**
+ * Refresh material to hand a long-running job so it can mint fresh Spark bearers
+ * itself (the access token baked at submit expires in minutes; renders/training
+ * run far longer). Returns the caller's Keycloak refresh token plus the absolute
+ * URL of our /api/spark/refresh proxy (which holds the client secret). The job
+ * POSTs the refresh token there when its token nears expiry. Null when there's
+ * no refresh token or no configured base URL — callers then fall back to the
+ * static (short-lived) bearer, i.e. prior behaviour.
+ */
+export async function getRefreshContext(): Promise<{ refreshToken: string; refreshUrl: string } | null> {
+  const cookieStore = await cookies()
+  const cookieHeader = cookieStore.getAll().map((c) => `${c.name}=${c.value}`).join('; ')
+  const jwt = await getJwt({
+    req: { headers: { cookie: cookieHeader } },
+    secret: process.env.AUTH_SECRET,
+    secureCookie: useSecureCookie,
+  })
+  const refreshToken = jwt?.refreshToken
+  if (typeof refreshToken !== 'string' || !refreshToken) return null
+  const base = (process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? '').replace(/\/+$/, '')
+  if (!base) return null
+  return { refreshToken, refreshUrl: `${base}/api/spark/refresh` }
+}
+
 async function sparkFetch<T = unknown>(
   method: 'GET' | 'POST' | 'DELETE',
   path: string,

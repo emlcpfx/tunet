@@ -13,7 +13,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import {
-  submitJob, uploadInputTarball, getToken, writeDiscoveredFilesBase,
+  submitJob, uploadInputTarball, getToken, getRefreshContext, writeDiscoveredFilesBase,
 } from '@/lib/spark'
 import {
   loadComfyPreset, loadComfyWorkflow, buildComfyPatches, buildComfyEnv,
@@ -129,10 +129,12 @@ export async function POST(req: Request) {
         // comfy_run.py self-uploads /output to ShareSync after rendering using
         // this bearer, so it must outlive the render. (See note in lib/comfy.ts.)
         const uploadToken = await getToken()
+        const refreshCtx  = await getRefreshContext()
         const env = buildComfyEnv(preset, uploadToken, {
           hasPatches:   isUi && patches.length > 0,
           loras:        body.loras,
           readyTimeout: body.readyTimeout,
+          refresh:      refreshCtx,
         })
         const rawName = typeof body.values?.['__name'] === 'string' ? (body.values['__name'] as string).trim() : ''
         const jobName = rawName || `comfy-${preset.key}`

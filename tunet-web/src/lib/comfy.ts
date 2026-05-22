@@ -159,19 +159,25 @@ export interface ComfyLora { url: string; file: string; strength: number }
 /**
  * The job env block comfy_run.py reads. `uploadToken` is the Spark bearer it
  * uses post-render to self-upload /output to ShareSync (the agent doesn't sync
- * it). NOTE: the token must outlive the render — pass a sufficiently long-lived
- * token (see the submit route).
+ * it). The render can outlast that short-lived token, so we also pass refresh
+ * material (TUNET_REFRESH_TOKEN/URL): comfy_run mints a fresh bearer via the
+ * /api/spark/refresh proxy right before uploading. uploadToken stays as the
+ * initial/fallback bearer for jobs without refresh material.
  */
 export function buildComfyEnv(
   preset: ComfyPreset,
   uploadToken: string,
-  opts: { hasPatches: boolean; loras?: ComfyLora[]; readyTimeout?: number },
+  opts: { hasPatches: boolean; loras?: ComfyLora[]; readyTimeout?: number; refresh?: { refreshToken: string; refreshUrl: string } | null },
 ): Record<string, string> {
   const env: Record<string, string> = {
     COMFY_WORKFLOW:       '/input/workflow.json',
     COMFY_READY_TIMEOUT:  String(opts.readyTimeout ?? 300),
     COMFY_RUN_ID:         crypto.randomBytes(16).toString('hex'),
     COMFY_UPLOAD_TOKEN:   uploadToken,
+  }
+  if (opts.refresh) {
+    env.TUNET_REFRESH_TOKEN = opts.refresh.refreshToken
+    env.TUNET_REFRESH_URL   = opts.refresh.refreshUrl
   }
   if (opts.hasPatches) env.COMFY_PATCHES = '/input/patches.json'
   if (preset.lora_default) {

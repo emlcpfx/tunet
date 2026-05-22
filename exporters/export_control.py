@@ -21,6 +21,7 @@ this is a silent no-op for desktop training):
 
 import os
 import json
+import time
 import logging
 import urllib.request
 import urllib.parse
@@ -28,6 +29,44 @@ import urllib.parse
 _last_nonce: int = 0
 _output_dav: str | None = None       # cached job output WebDAV base (from meta.json)
 _meta_tried: bool = False
+
+# Cached Spark bearer for the control channel (see _bearer).
+_tok: dict = {'access': '', 'exp': 0.0, 'refresh': ''}
+
+
+def _bearer() -> str:
+    """A currently-valid Spark bearer for control-channel reads + self-uploads.
+
+    The token baked into the job env (TUNET_BEARER) expires in minutes, but a
+    run polls/exports for hours. When refresh material is present
+    (TUNET_REFRESH_TOKEN/URL) we mint a fresh access token via tunet-web's
+    /api/spark/refresh proxy, cached until ~1 min before expiry, and track the
+    rotated refresh token. Falls back to the static TUNET_BEARER when no refresh
+    material is configured (legacy jobs). Never raises."""
+    refresh_url = os.environ.get('TUNET_REFRESH_URL', '')
+    if not _tok['refresh']:
+        _tok['refresh'] = os.environ.get('TUNET_REFRESH_TOKEN', '')
+    static = os.environ.get('TUNET_BEARER', '')
+    if not (refresh_url and _tok['refresh']):
+        return static
+    now = time.time()
+    if _tok['access'] and now < _tok['exp'] - 60:
+        return _tok['access']
+    try:
+        body = json.dumps({'refreshToken': _tok['refresh']}).encode()
+        r = urllib.request.Request(refresh_url, data=body, method='POST',
+                                   headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(r, timeout=20) as resp:
+            data = json.loads(resp.read())
+        if data.get('accessToken'):
+            _tok['access'] = data['accessToken']
+            _tok['exp'] = now + int(data.get('expiresIn') or 300)
+            if data.get('refreshToken'):
+                _tok['refresh'] = data['refreshToken']
+            return _tok['access']
+    except Exception as e:
+        logging.warning(f"[export-control] token refresh failed: {e}")
+    return _tok['access'] or static
 
 
 def _req(url: str, token: str, method: str = 'GET', data: bytes | None = None,
@@ -57,7 +96,7 @@ def poll_export_request() -> dict | None:
     """
     global _last_nonce
     base  = os.environ.get('TUNET_FILES_BASE', '').rstrip('/')
-    token = os.environ.get('TUNET_BEARER', '')
+    token = _bearer()
     key   = os.environ.get('TUNET_CONTROL_KEY', '')
     if not (base and token and key):
         return None  # no control channel configured (e.g. local training)
@@ -102,7 +141,7 @@ def run_export(model, config, ckpt_prefix, export_res, completed_ep,
 
     new_files = [p for p in _list_exports(out_dir) if p not in before]
     base  = os.environ.get('TUNET_FILES_BASE', '').rstrip('/')
-    token = os.environ.get('TUNET_BEARER', '')
+    token = _bearer()
     key   = os.environ.get('TUNET_CONTROL_KEY', '')
     if base and token and key:
         _self_upload(new_files, out_dir, base, key, token)

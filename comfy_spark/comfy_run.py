@@ -561,13 +561,50 @@ def _webdav(method, url, token, data=None):
     return urllib.request.urlopen(req, timeout=900)
 
 
+_tok = {"access": "", "exp": 0.0, "refresh": ""}
+
+
+def _bearer():
+    """A currently-valid Spark bearer for the self-upload. COMFY_UPLOAD_TOKEN is
+    baked at submit and expires in minutes, but a render can run far longer — so
+    when refresh material is present (TUNET_REFRESH_TOKEN/URL) we mint a fresh
+    token via tunet-web's /api/spark/refresh proxy, cached until ~1 min before
+    expiry, tracking the rotated refresh token. Falls back to COMFY_UPLOAD_TOKEN
+    when no refresh material is set (legacy jobs). Never raises."""
+    refresh_url = env("TUNET_REFRESH_URL")
+    if not _tok["refresh"]:
+        _tok["refresh"] = env("TUNET_REFRESH_TOKEN") or ""
+    static = env("COMFY_UPLOAD_TOKEN") or ""
+    if not (refresh_url and _tok["refresh"]):
+        return static
+    now = time.time()
+    if _tok["access"] and now < _tok["exp"] - 60:
+        return _tok["access"]
+    try:
+        body = json.dumps({"refreshToken": _tok["refresh"]}).encode()
+        req = urllib.request.Request(refresh_url, data=body, method="POST",
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+        if data.get("accessToken"):
+            _tok["access"] = data["accessToken"]
+            _tok["exp"] = now + int(data.get("expiresIn") or 300)
+            if data.get("refreshToken"):
+                _tok["refresh"] = data["refreshToken"]
+            return _tok["access"]
+    except Exception as e:  # noqa: BLE001
+        log(f"token refresh failed: {e}")
+    return _tok["access"] or static
+
+
 def upload_outputs(output_dir):
     """The Spark agent (v1.177) doesn't ship /output to ShareSync — only its log
     archive. So upload our own outputs there via WebDAV PUT, into the job's own
     output folder (the same place --download and the web UI read). We find that
     folder by looking up our own job via the COMFY_RUN_ID marker. Best-effort:
     logs failures, never raises."""
-    token, run_id = env("COMFY_UPLOAD_TOKEN"), env("COMFY_RUN_ID")
+    run_id = env("COMFY_RUN_ID")
+    token = _bearer()
     api = env("COMFY_SPARK_API", "https://api.prod.aapse1.sparkcloud.studio")
     if not token or not run_id:
         return
@@ -611,7 +648,8 @@ def upload_outputs(output_dir):
                     pass
             try:
                 with open(p, "rb") as f:
-                    _webdav("PUT", base + "/" + "/".join(segs), token, data=f.read())
+                    # refresh per-file: a big render upload can outlast one token
+                    _webdav("PUT", base + "/" + "/".join(segs), _bearer(), data=f.read())
                 log(f"  uploaded {rel} ({os.path.getsize(p) / 1048576:.1f} MB)")
                 n += 1
             except Exception as e:  # noqa: BLE001
