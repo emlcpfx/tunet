@@ -47,34 +47,44 @@ def _mkcol(url: str, token: str) -> None:
         pass  # already exists / racing — harmless
 
 
-def maybe_handle_export_request(model, config, ckpt_prefix, export_res, completed_ep) -> None:
-    """Poll the control file once; if a new request is present, export + upload.
+def poll_export_request() -> dict | None:
+    """Check the control file once. Returns {'flame': bool, 'nuke': bool} for a
+    NEW request (and marks it consumed via the nonce), else None.
 
-    Fully defensive: any failure is logged and swallowed so the training loop is
-    never disrupted by the control channel.
+    Cheap — a single small GET. Split from the export itself so the training loop
+    can do this on rank 0 only, then coordinate the (collective) export across all
+    ranks. Fully defensive: any failure returns None rather than raising.
     """
     global _last_nonce
     base  = os.environ.get('TUNET_FILES_BASE', '').rstrip('/')
     token = os.environ.get('TUNET_BEARER', '')
     key   = os.environ.get('TUNET_CONTROL_KEY', '')
     if not (base and token and key):
-        return  # no control channel configured (e.g. local training)
+        return None  # no control channel configured (e.g. local training)
 
     ctrl = f"{base}/_tunet_control/{urllib.parse.quote(key)}"
     try:
         reqd  = json.loads(_req(f"{ctrl}/export_request.json", token, timeout=5))
         nonce = int(reqd.get('nonce', 0))
     except Exception:
-        return  # no request yet / unreachable / malformed
+        return None  # no request yet / unreachable / malformed
 
     if nonce <= _last_nonce:
-        return
+        return None
     _last_nonce = nonce
     want_flame = bool(reqd.get('flame'))
     want_nuke  = bool(reqd.get('nuke'))
     if not (want_flame or want_nuke):
-        return
+        return None
+    return {'flame': want_flame, 'nuke': want_nuke}
 
+
+def run_export(model, config, ckpt_prefix, export_res, completed_ep,
+               want_flame: bool, want_nuke: bool) -> None:
+    """Export the current model inline and self-upload the new files. The caller
+    has already decided (via poll_export_request) that an export was requested.
+    Defensive: failures are logged and swallowed so training is never disrupted.
+    """
     logging.info(f"[export-control] on-demand export (flame={want_flame}, nuke={want_nuke}) @ epoch {completed_ep}")
     out_dir = config.data.output_dir
     before  = set(_list_exports(out_dir))
@@ -91,7 +101,22 @@ def maybe_handle_export_request(model, config, ckpt_prefix, export_res, complete
         return
 
     new_files = [p for p in _list_exports(out_dir) if p not in before]
-    _self_upload(new_files, out_dir, base, key, token)
+    base  = os.environ.get('TUNET_FILES_BASE', '').rstrip('/')
+    token = os.environ.get('TUNET_BEARER', '')
+    key   = os.environ.get('TUNET_CONTROL_KEY', '')
+    if base and token and key:
+        _self_upload(new_files, out_dir, base, key, token)
+
+
+def maybe_handle_export_request(model, config, ckpt_prefix, export_res, completed_ep) -> None:
+    """Convenience for single-process / epoch-boundary use: poll once and export
+    if a new request is present. Multi-GPU callers should use poll_export_request
+    + run_export with their own broadcast/barrier coordination instead.
+    """
+    req = poll_export_request()
+    if req:
+        run_export(model, config, ckpt_prefix, export_res, completed_ep,
+                   req['flame'], req['nuke'])
 
 
 def _list_exports(out_dir: str) -> list[str]:
