@@ -425,6 +425,80 @@ def rewrite_output(workflow, spec, anchor, prefix, fps, colorspace):
     return workflow
 
 
+# ── input image-sequence ingestion (EXR/… plates in) ─────────────────────────
+
+# Loaders that emit an IMAGE batch on output slot 0 — swappable in place for a
+# sequence loader (the IMAGE consumers keep their [id, 0] links). A VIDEO-object
+# loader (core LoadVideo) is NOT here: its slot 0 is a VIDEO, not IMAGE.
+IMAGE_BATCH_LOADERS = ["VHS_LoadVideo", "VHS_LoadImagesPath", "VHS_LoadImages", "LoadImage"]
+
+
+def build_seq_loader(seq):
+    """The replacement loader node for a packed frame sequence. EXR only for now
+    (CoCoTools LoadExrSequence, IMAGE on slot 0). Returns None for kinds we don't
+    have a loader for yet (png/dpx folders) so the caller leaves the input alone."""
+    if seq.get("kind") == "exr":
+        return {"class_type": "LoadExrSequence",
+                "inputs": {"sequence_path": seq["pattern"],
+                           "start_frame": int(seq["start"]), "end_frame": int(seq["end"]),
+                           "frame_step": int(seq.get("step", 1)), "normalize": False}}
+    return None
+
+
+def find_input_loader(workflow):
+    for cls in IMAGE_BATCH_LOADERS:
+        for nid, node in workflow.items():
+            if node.get("class_type") == cls:
+                return nid
+    return None
+
+
+def rewrite_input(workflow, seq, anchor):
+    """Swap the workflow's primary IMAGE-batch loader for a sequence loader (in
+    place, so [loader, 0] IMAGE consumers stay wired), encode scene-linear EXR ->
+    display sRGB for the model, and drop the old loader's now-dangling non-IMAGE
+    outputs (audio / fps / frame_count — a frame sequence has none)."""
+    loader_def = build_seq_loader(seq)
+    if not loader_def:
+        log(f"WARNING: --input-sequence kind {seq.get('kind')!r} has no loader yet "
+            f"(EXR only) — leaving the preset's own input.")
+        return workflow
+    lid = str(anchor) if anchor else find_input_loader(workflow)
+    if not lid or lid not in workflow:
+        log("WARNING: --input-sequence set but no swappable IMAGE loader "
+            "(VHS_LoadVideo/VHS_LoadImages/LoadImage) found — leaving the input.")
+        return workflow
+    old = workflow[lid].get("class_type")
+    workflow[lid] = loader_def                       # in-place: [lid,0] stays IMAGE
+    log(f"Input rewrite: node {lid} {old} -> LoadExrSequence "
+        f"({seq['pattern']} frames {seq['start']}-{seq['end']})")
+
+    if (seq.get("colorspace") or "linear") == "linear":   # EXR is scene-linear
+        cs = "inseq_cs"
+        for nid, node in workflow.items():           # send IMAGE consumers through the encode
+            if nid == cs:
+                continue
+            for k, v in (node.get("inputs") or {}).items():
+                if isinstance(v, list) and len(v) == 2 and str(v[0]) == lid and int(v[1]) == 0:
+                    node["inputs"][k] = [cs, 0]
+        workflow[cs] = {"class_type": "ColorspaceNode",
+                        "inputs": {"images": [lid, 0],
+                                   "from_colorspace": "sRGB Linear", "to_colorspace": "sRGB"}}
+        log(f"  + ColorspaceNode {cs} (scene-linear EXR -> display sRGB for the model)")
+
+    dropped = 0                                      # old loader's audio/fps/etc. are gone
+    for nid, node in workflow.items():
+        if nid in (lid, "inseq_cs"):
+            continue
+        for k, v in list((node.get("inputs") or {}).items()):
+            if isinstance(v, list) and len(v) == 2 and str(v[0]) == lid and int(v[1]) >= 1:
+                del node["inputs"][k]
+                dropped += 1
+    if dropped:
+        log(f"  dropped {dropped} link(s) off the old loader's non-IMAGE outputs (no audio/fps in a sequence)")
+    return workflow
+
+
 # ── prompt lifecycle ──────────────────────────────────────────────────────────
 
 # Model-name COMBO inputs whose "value not in list" errors are expected on
@@ -777,6 +851,11 @@ def main():
             for op in patches:
                 apply_patch(workflow, op["node"], op["path"], op["value"])
             log(f"Applied {len(patches)} patch(es).")
+
+        # 5a2. Input image-sequence ingestion (swap the loader for a frame seq) --
+        in_seq = json.loads(env("COMFY_INPUT_SEQ", "null"))
+        if in_seq:
+            workflow = rewrite_input(workflow, in_seq, json.loads(env("COMFY_INPUT_SEQ_ANCHOR", "null")))
 
         # 5b. Splice the stackable Tier-1 LoRA chain onto the model path -------
         lora_stack = json.loads(env("COMFY_LORAS", "[]"))

@@ -106,6 +106,40 @@ def print_outputs(reg):
         print(f"  {name:14s} [{spec.get('kind','?'):8s}] {spec.get('label','')}")
 
 
+SEQ_EXTS = {".exr": "exr", ".dpx": "dpx", ".png": "img", ".jpg": "img",
+            ".jpeg": "img", ".tif": "img", ".tiff": "img"}
+
+
+def detect_sequence(folder):
+    """Find a numbered frame sequence in `folder` and return its #### pattern, frame
+    range, kind, and file list. Picks the largest consistent (prefix, ext, pad) group."""
+    import re
+    if not os.path.isdir(folder):
+        sys.exit(f"ERROR: --input-sequence {folder!r} is not a folder")
+    groups = {}
+    for fn in sorted(os.listdir(folder)):
+        stem, ext = os.path.splitext(fn)
+        if ext.lower() not in SEQ_EXTS:
+            continue
+        m = re.search(r"(\d+)$", stem)
+        if not m:
+            continue
+        key = (stem[:m.start()], ext.lower(), len(m.group(1)))
+        groups.setdefault(key, []).append((int(m.group(1)), fn))
+    if not groups:
+        sys.exit(f"ERROR: no numbered frames (name####.ext) found in {folder} "
+                 f"(looked for {sorted(SEQ_EXTS)})")
+    (prefix, ext, pad), frames = max(groups.items(), key=lambda kv: len(kv[1]))
+    frames.sort()
+    nums = [n for n, _ in frames]
+    return {
+        "kind": SEQ_EXTS[ext],
+        "pattern": f"/input/seq/{prefix}{'#' * pad}{ext}",
+        "start": nums[0], "end": nums[-1], "step": 1,
+        "files": [os.path.join(folder, fn) for _, fn in frames],
+    }
+
+
 # ── Auth (self-contained; same shape as spark_launch.py) ──────────────────────
 
 _token = None
@@ -653,8 +687,9 @@ def print_catalog(catalog):
 
 # ── Tarball builder ───────────────────────────────────────────────────────────
 
-def build_tar(workflow_obj, input_files, patches=None):
-    """Pack /input/workflow.json + /input/comfy_run.py (+ patches.json) + media."""
+def build_tar(workflow_obj, input_files, patches=None, seq_files=None):
+    """Pack /input/workflow.json + /input/comfy_run.py (+ patches.json) + media
+    (+ a /input/seq/ frame sequence for --input-sequence)."""
     tmp = tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False)
     tmp.close()
     with tarfile.open(tmp.name, "w:gz") as tf:
@@ -675,6 +710,13 @@ def build_tar(workflow_obj, input_files, patches=None):
             mb = os.path.getsize(p) / 1024 / 1024
             print(f"[pack] {os.path.basename(p)} ({mb:.1f} MB)")
             tf.add(p, arcname=os.path.basename(p))
+        # frame sequence (--input-sequence) -> /input/seq/, referenced by the swapped loader
+        seq_mb = 0.0
+        for p in (seq_files or []):
+            seq_mb += os.path.getsize(p) / 1024 / 1024
+            tf.add(p, arcname=f"seq/{os.path.basename(p)}")
+        if seq_files:
+            print(f"[pack] {len(seq_files)} sequence frame(s) ({seq_mb:.1f} MB) → /input/seq/")
     print(f"[pack] → {os.path.getsize(tmp.name) / 1024 / 1024:.1f} MB")
     return tmp.name
 
@@ -684,6 +726,10 @@ def build_tar(workflow_obj, input_files, patches=None):
 def main():
     ap = argparse.ArgumentParser(description="Run a ComfyUI workflow on Spark Fuse")
     ap.add_argument("video", nargs="?", help="(preset mode) primary input media file")
+    ap.add_argument("--input-sequence", metavar="DIR",
+                    help="(v2v presets) feed a folder of frames (EXR sequence) as the input plate "
+                         "instead of a clip: swaps the input loader for LoadExrSequence and converts "
+                         "scene-linear EXR -> sRGB for the model. Replaces the positional input.")
     ap.add_argument("--preset", help="named preset under presets/ (e.g. ltx_Obscura_Remova)")
     ap.add_argument("--workflow", help="(generic) path to an API-format workflow JSON")
     ap.add_argument("--input", action="append", default=[],
