@@ -1,0 +1,1100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Spark Flint — A Friendly Walkthrough</title>
+<meta name="description" content="Learn how to train your own AI models on Spark Flint. Plain-English guide to datasets, jobs, training curves, previews, and every setting." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --purple:        #7E3AF2;
+    --purple-light:  #ae69f4;
+    --purple-dark:   #6C2BD9;
+    --purple-bg:     #F7F4FC;
+    --ink:           #111827;
+    --body:          #374151;
+    --gray:          #6b7280;
+    --faint:         #9ca3af;
+    --line:          #e8e7ee;
+    --bg:            #fbfaff;
+    --card:          #ffffff;
+    --green:         #16A34A;
+    --green-bg:      #F0FDF4;
+    --amber:         #D97706;
+    --amber-bg:      #FFFBEB;
+    --red:           #EF4444;
+    --red-bg:        #FEF2F2;
+    --blue:          #2563EB;
+    --shadow:        0 1px 2px rgba(16,24,40,.04), 0 4px 16px rgba(16,24,40,.05);
+    --shadow-lg:     0 8px 30px rgba(124,58,242,.10);
+    --radius:        16px;
+    --mono:          'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans:          'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; scroll-padding-top: 84px; }
+  body {
+    font-family: var(--sans);
+    color: var(--body);
+    background: var(--bg);
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  h1, h2, h3, h4 { color: var(--ink); line-height: 1.2; letter-spacing: -0.02em; }
+  a { color: var(--purple); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  strong { color: var(--ink); font-weight: 600; }
+  code {
+    font-family: var(--mono); font-size: .86em;
+    background: var(--purple-bg); color: var(--purple-dark);
+    padding: .12em .42em; border-radius: 6px; font-weight: 500;
+  }
+
+  /* ── Top nav ─────────────────────────────────────────────── */
+  header.nav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(251,250,255,.82);
+    backdrop-filter: saturate(180%) blur(14px);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav-inner {
+    max-width: 1180px; margin: 0 auto; padding: 12px 24px;
+    display: flex; align-items: center; gap: 18px;
+  }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 800; color: var(--ink); font-size: 16px; letter-spacing: -.02em; }
+  .brand .mark {
+    width: 30px; height: 30px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--purple), var(--purple-light));
+    display: grid; place-items: center; box-shadow: 0 4px 12px rgba(124,58,242,.35);
+  }
+  .brand .mark svg { width: 18px; height: 18px; }
+  .brand .sub { font-size: 11px; color: var(--faint); font-weight: 600; margin-left: -3px; letter-spacing: .04em; text-transform: uppercase; }
+  .nav-links { display: flex; gap: 2px; margin-left: auto; flex-wrap: wrap; }
+  .nav-links a {
+    color: var(--gray); font-size: 13.5px; font-weight: 500;
+    padding: 6px 11px; border-radius: 8px; white-space: nowrap;
+  }
+  .nav-links a:hover { background: var(--purple-bg); color: var(--purple-dark); text-decoration: none; }
+  .nav-links a.active { color: var(--purple-dark); background: var(--purple-bg); font-weight: 600; }
+  .nav-toggle { display: none; margin-left: auto; background: none; border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; cursor: pointer; }
+
+  /* ── Layout ──────────────────────────────────────────────── */
+  .layout { max-width: 880px; margin: 0 auto; padding: 0 24px; }
+  main { padding-bottom: 120px; min-width: 0; }
+
+  /* ── Contents sidebar (desktop only) ─────────────────────── */
+  aside.toc { display: none; }
+  .toc-inner { padding-bottom: 20px; }
+  .toc-title { font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); margin-bottom: 12px; padding-left: 16px; }
+  .toc-nav { display: flex; flex-direction: column; border-left: 2px solid var(--line); }
+  .toc-nav a {
+    font-size: 13.5px; font-weight: 500; color: var(--gray); line-height: 1.4;
+    padding: 8px 16px; margin-left: -2px;
+    border-left: 2px solid transparent; border-radius: 0 8px 8px 0;
+    transition: color .15s ease, border-color .15s ease, background .15s ease, padding-left .15s ease;
+  }
+  .toc-nav a:hover { color: var(--purple-dark); background: var(--purple-bg); text-decoration: none; }
+  .toc-nav a.active { color: var(--purple-dark); font-weight: 600; border-left-color: var(--purple); background: var(--purple-bg); padding-left: 20px; }
+
+  @media (min-width: 1040px) {
+    .layout { max-width: 1180px; display: grid; grid-template-columns: 216px minmax(0, 1fr); gap: 56px; align-items: start; }
+    aside.toc { display: block; position: sticky; top: 92px; align-self: start; max-height: calc(100vh - 110px); overflow-y: auto; }
+    .nav-links { display: none; }
+    .nav-toggle { display: none; }
+  }
+  section { padding-top: 76px; }
+  .section-tag {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--purple); background: var(--purple-bg);
+    padding: 5px 12px; border-radius: 999px; margin-bottom: 18px;
+  }
+  h2 { font-size: clamp(26px, 4vw, 34px); font-weight: 800; }
+  section > p.lead { font-size: 18px; color: var(--gray); margin-top: 14px; max-width: 60ch; }
+  h3 { font-size: 21px; font-weight: 700; margin: 40px 0 12px; }
+  h4 { font-size: 16px; font-weight: 700; margin: 24px 0 8px; }
+  p { margin: 12px 0; }
+  ul, ol { margin: 12px 0; padding-left: 22px; }
+  li { margin: 7px 0; }
+
+  /* ── Hero ────────────────────────────────────────────────── */
+  .hero {
+    position: relative; overflow: hidden;
+    background:
+      radial-gradient(1200px 500px at 70% -10%, rgba(174,105,244,.18), transparent 60%),
+      radial-gradient(900px 500px at 10% 0%, rgba(124,58,242,.12), transparent 55%);
+    border-bottom: 1px solid var(--line);
+    padding: 0 24px;
+  }
+  .hero-inner { max-width: 880px; margin: 0 auto; padding: 84px 0 72px; text-align: center; }
+  .hero h1 { font-size: clamp(36px, 6.5vw, 60px); font-weight: 800; letter-spacing: -.03em; }
+  .hero h1 .grad {
+    background: linear-gradient(120deg, var(--purple), var(--purple-light) 60%, #c89bff);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .hero p { font-size: 20px; color: var(--gray); max-width: 56ch; margin: 22px auto 0; }
+  .hero .pill {
+    display: inline-flex; align-items: center; gap: 8px; margin-bottom: 26px;
+    background: var(--card); border: 1px solid var(--line); box-shadow: var(--shadow);
+    padding: 7px 16px; border-radius: 999px; font-size: 13px; font-weight: 600; color: var(--purple-dark);
+  }
+  .hero .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px rgba(22,163,74,.18); }
+  .hero-cta { margin-top: 36px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 13px 24px; border-radius: 12px; font-weight: 600; font-size: 15px; cursor: pointer;
+    transition: transform .12s ease, box-shadow .12s ease;
+  }
+  .btn:hover { text-decoration: none; transform: translateY(-1px); }
+  .btn-primary { background: linear-gradient(135deg, var(--purple), var(--purple-light)); color: #fff; box-shadow: var(--shadow-lg); }
+  .btn-ghost { background: var(--card); color: var(--ink); border: 1px solid var(--line); box-shadow: var(--shadow); }
+
+  /* ── Cards & callouts ────────────────────────────────────── */
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 24px; box-shadow: var(--shadow); margin: 18px 0;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  @media (max-width: 720px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+
+  .callout {
+    display: flex; gap: 14px; align-items: flex-start;
+    border-radius: 14px; padding: 16px 18px; margin: 20px 0; font-size: 15px;
+    border: 1px solid transparent;
+  }
+  .callout .ico { flex: 0 0 auto; width: 24px; height: 24px; margin-top: 1px; }
+  .callout p { margin: 0; }
+  .callout.tip   { background: var(--purple-bg); border-color: #e6dbfb; color: #4a2a8a; }
+  .callout.tip strong { color: var(--purple-dark); }
+  .callout.good  { background: var(--green-bg); border-color: #bbf7d0; color: #14532d; }
+  .callout.good strong { color: #166534; }
+  .callout.warn  { background: var(--amber-bg); border-color: #fde68a; color: #854d0e; }
+  .callout.warn strong { color: #92400e; }
+  .meta { font-size: 13px; color: var(--faint); }
+
+  .metaphor {
+    border-left: 3px solid var(--purple-light);
+    background: linear-gradient(90deg, var(--purple-bg), transparent);
+    padding: 14px 18px; border-radius: 0 12px 12px 0; margin: 20px 0; font-size: 15.5px;
+  }
+  .metaphor b { color: var(--purple-dark); }
+
+  /* ── Step list ───────────────────────────────────────────── */
+  .steps { counter-reset: step; margin: 24px 0; }
+  .step { position: relative; padding: 4px 0 24px 56px; }
+  .step:not(:last-child)::after { content: ""; position: absolute; left: 17px; top: 38px; bottom: 0; width: 2px; background: var(--line); }
+  .step .num {
+    counter-increment: step; position: absolute; left: 0; top: 0;
+    width: 36px; height: 36px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--purple), var(--purple-light)); color: #fff;
+    display: grid; place-items: center; font-weight: 700; font-size: 15px;
+    box-shadow: 0 4px 10px rgba(124,58,242,.3);
+  }
+  .step .num::before { content: counter(step); }
+  .step h4 { margin: 6px 0 4px; font-size: 17px; }
+  .step p { margin: 4px 0; }
+
+  /* ── Preset cards ────────────────────────────────────────── */
+  .preset { border-radius: 14px; border: 1px solid var(--line); padding: 18px; background: var(--card); box-shadow: var(--shadow); }
+  .preset h4 { margin: 0 0 6px; display: flex; align-items: center; gap: 8px; font-size: 16px; }
+  .preset .em { font-size: 22px; }
+  .preset p { font-size: 14px; color: var(--gray); margin: 0; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+  .chip { font-size: 11px; font-weight: 600; color: var(--purple-dark); background: var(--purple-bg); padding: 3px 9px; border-radius: 999px; }
+
+  /* ── Comparison table ────────────────────────────────────── */
+  .table-wrap { overflow-x: auto; margin: 22px 0; border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+  table { width: 100%; border-collapse: collapse; min-width: 560px; background: var(--card); }
+  th, td { text-align: left; padding: 14px 18px; border-bottom: 1px solid var(--line); font-size: 14.5px; vertical-align: top; }
+  thead th { background: #faf9ff; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--gray); font-weight: 700; }
+  tbody tr:last-child td { border-bottom: none; }
+  td.feat { font-weight: 600; color: var(--ink); width: 30%; }
+  .yes { color: var(--green); font-weight: 600; }
+  .partial { color: var(--amber); font-weight: 600; }
+  .no { color: var(--faint); }
+  td .flint-col { color: var(--purple-dark); }
+  th.flint { color: var(--purple-dark); }
+  th.flint::before { content: "✦ "; }
+
+  /* ── Mockups ─────────────────────────────────────────────── */
+  .mock { background: #14141a; border-radius: 14px; padding: 16px; box-shadow: var(--shadow); margin: 22px 0; }
+  .mock-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .mock-cell { display: flex; flex-direction: column; gap: 6px; }
+  .mock-cell svg { width: 100%; height: auto; border-radius: 8px; display: block; background: #0c0c10; }
+  .mock-label { text-align: center; font-size: 12px; font-weight: 600; color: #e6e6ee; font-family: var(--mono); }
+  .mock-label span { display: block; font-size: 10.5px; color: #8b8b9a; font-weight: 400; font-family: var(--sans); }
+  .mock-caption { color: #a1a1ad; font-size: 12.5px; text-align: center; margin-top: 12px; font-family: var(--mono); }
+  @media (max-width: 560px) { .mock-grid { grid-template-columns: repeat(2, 1fr); } }
+
+  .legend { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 18px; }
+  @media (max-width: 560px) { .legend { grid-template-columns: 1fr; } }
+  .legend .item { display: flex; gap: 12px; align-items: flex-start; }
+  .legend .sw { flex: 0 0 auto; width: 34px; height: 34px; border-radius: 8px; display: grid; place-items: center; font-weight: 700; color: #fff; font-size: 13px; font-family: var(--mono); }
+  .legend .item h4 { margin: 0; font-size: 14.5px; }
+  .legend .item p { margin: 2px 0 0; font-size: 13px; color: var(--gray); }
+
+  /* ── Chart ───────────────────────────────────────────────── */
+  .chart-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; box-shadow: var(--shadow); margin: 22px 0; }
+  .chart-card svg { width: 100%; height: auto; }
+
+  /* ── Analysis chips ──────────────────────────────────────── */
+  .achip-row { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0; }
+  .achip { display: inline-flex; flex-direction: column; gap: 2px; border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; background: var(--card); box-shadow: var(--shadow); min-width: 120px; }
+  .achip .k { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); font-weight: 700; }
+  .achip .v { font-family: var(--mono); font-weight: 600; font-size: 14px; }
+  .v-good { color: var(--green); } .v-warn { color: var(--amber); } .v-bad { color: var(--red); } .v-dim { color: var(--gray); }
+
+  .verdict { display: flex; gap: 12px; align-items: center; padding: 14px 16px; border-radius: 12px; margin: 12px 0; font-size: 14.5px; border: 1px solid var(--line); }
+  .verdict .badge { flex: 0 0 auto; font-family: var(--mono); font-weight: 600; font-size: 12.5px; padding: 5px 10px; border-radius: 8px; }
+  .verdict.go { background: var(--green-bg); border-color: #bbf7d0; }
+  .verdict.go .badge { background: var(--green); color: #fff; }
+  .verdict.hold { background: var(--amber-bg); border-color: #fde68a; }
+  .verdict.hold .badge { background: var(--amber); color: #fff; }
+  .verdict.stop { background: var(--red-bg); border-color: #fecaca; }
+  .verdict.stop .badge { background: var(--red); color: #fff; }
+
+  /* ── Settings (details/summary) ──────────────────────────── */
+  details.group {
+    border: 1px solid var(--line); border-radius: 14px; margin: 14px 0; background: var(--card);
+    box-shadow: var(--shadow); overflow: hidden;
+  }
+  details.group > summary {
+    list-style: none; cursor: pointer; padding: 18px 20px; display: flex; align-items: center; gap: 14px;
+    font-weight: 700; color: var(--ink); font-size: 16.5px;
+  }
+  details.group > summary::-webkit-details-marker { display: none; }
+  details.group > summary .gico { width: 38px; height: 38px; border-radius: 10px; background: var(--purple-bg); display: grid; place-items: center; flex: 0 0 auto; }
+  details.group > summary .gico svg { width: 20px; height: 20px; color: var(--purple); }
+  details.group > summary .gsub { font-weight: 400; font-size: 13px; color: var(--gray); display: block; margin-top: 1px; }
+  details.group > summary .chev { margin-left: auto; transition: transform .2s ease; color: var(--faint); }
+  details.group[open] > summary .chev { transform: rotate(90deg); }
+  details.group > summary:hover { background: #fcfbff; }
+  .group-body { padding: 0 20px 8px; border-top: 1px solid var(--line); }
+
+  .setting { padding: 16px 0; border-bottom: 1px dashed var(--line); }
+  .setting:last-child { border-bottom: none; }
+  .setting .top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .setting .name { font-family: var(--mono); font-weight: 600; color: var(--ink); font-size: 14.5px; }
+  .setting .badge-def { font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 999px; background: var(--purple-bg); color: var(--purple-dark); }
+  .setting .badge-leave { font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 999px; background: #f1f5f9; color: var(--gray); }
+  .setting p { margin: 7px 0 0; font-size: 14px; color: var(--body); }
+  .setting .opts { margin: 8px 0 0; padding-left: 0; list-style: none; }
+  .setting .opts li { margin: 4px 0; font-size: 13.5px; color: var(--gray); padding-left: 16px; position: relative; }
+  .setting .opts li::before { content: "–"; position: absolute; left: 0; color: var(--purple-light); }
+  .setting .opts b { font-family: var(--mono); color: var(--ink); font-weight: 600; font-size: 12.5px; }
+
+  /* ── Footer ──────────────────────────────────────────────── */
+  footer { border-top: 1px solid var(--line); background: var(--card); }
+  .foot-inner { max-width: 880px; margin: 0 auto; padding: 40px 24px; text-align: center; color: var(--gray); font-size: 14px; }
+  .foot-inner .brand { justify-content: center; margin-bottom: 10px; }
+
+  .toc-mini { font-size: 13px; color: var(--faint); margin-top: 8px; }
+
+  @media (max-width: 860px) {
+    .nav-links { display: none; position: absolute; top: 100%; left: 0; right: 0; background: var(--card); border-bottom: 1px solid var(--line); flex-direction: column; padding: 8px; }
+    .nav-links.open { display: flex; }
+    .nav-links a { padding: 10px 12px; }
+    .nav-toggle { display: block; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════ NAV ══════════════════ -->
+<header class="nav">
+  <div class="nav-inner">
+    <div class="brand">
+      <span class="mark">
+        <svg viewBox="0 0 24 24" fill="#fff"><path d="m12 2-2.2 6.5a2 2 0 0 1-1.3 1.3L2 12l6.5 2.2a2 2 0 0 1 1.3 1.3L12 22l2.2-6.5a2 2 0 0 1 1.3-1.3L22 12l-6.5-2.2a2 2 0 0 1-1.3-1.3z"/></svg>
+      </span>
+      Spark <span class="sub">Flint</span>
+    </div>
+    <button class="nav-toggle" aria-label="Menu" onclick="document.getElementById('navlinks').classList.toggle('open')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#374151" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+    </button>
+    <nav class="nav-links" id="navlinks">
+      <a href="#what">What it is</a>
+      <a href="#vs">vs CopyCat</a>
+      <a href="#data">Datasets</a>
+      <a href="#submit">Submit a job</a>
+      <a href="#progress">The numbers</a>
+      <a href="#analysis">Analysis</a>
+      <a href="#preview">Preview</a>
+      <a href="#advanced">Settings</a>
+    </nav>
+  </div>
+</header>
+
+<!-- ══════════════════ HERO ══════════════════ -->
+<div class="hero">
+  <div class="hero-inner">
+    <span class="pill"><span class="dot"></span> Managed GPU training · no machine of your own required</span>
+    <h1>Train your own AI tool,<br><span class="grad">one shot at a time.</span></h1>
+    <p>Spark Flint teaches a small AI model to do <em>one</em> repetitive task on your footage — paint-out, beauty cleanup, roto — by showing it your own before-and-after frames. This is the friendly, no-jargon guide to using it.</p>
+    <div class="hero-cta">
+      <a class="btn btn-primary" href="#what">Start the walkthrough →</a>
+      <a class="btn btn-ghost" href="#advanced">Jump to settings</a>
+    </div>
+    <p class="toc-mini">~10 min read · no prior machine-learning knowledge needed</p>
+  </div>
+</div>
+
+<div class="layout">
+
+<aside class="toc" aria-label="Contents">
+  <div class="toc-inner">
+    <p class="toc-title">Contents</p>
+    <nav class="toc-nav">
+      <a href="#what" data-spy>① What it is</a>
+      <a href="#vs" data-spy>② vs CopyCat</a>
+      <a href="#data" data-spy>③ Datasets</a>
+      <a href="#submit" data-spy>④ Submit a job</a>
+      <a href="#progress" data-spy>⑤ The numbers</a>
+      <a href="#analysis" data-spy>⑥ Training analysis</a>
+      <a href="#preview" data-spy>⑦ Preview</a>
+      <a href="#advanced" data-spy>⑧ Settings</a>
+    </nav>
+  </div>
+</aside>
+
+<main>
+
+<!-- ══════════════════ 1. WHAT IT IS ══════════════════ -->
+<section id="what">
+  <span class="section-tag">① The big idea</span>
+  <h2>What does Spark Flint actually do?</h2>
+  <p class="lead">It learns a single, repeatable image fix from your examples — then applies that fix to every other frame for you.</p>
+
+  <div class="metaphor">
+    <b>Think of it as an apprentice retoucher.</b> You sit down and fix the first 30 frames of a shot by hand — remove a wire, clean up skin, whatever. The apprentice watches every "before → after" you do. Once it's seen enough, it can finish the remaining 970 frames in the same style, on its own. Spark Flint <i>is</i> that apprentice — and the "watching" part is what we call <b>training</b>.
+  </div>
+
+  <p>Under the hood it's a small neural network that does <strong>image-to-image</strong> mapping: feed it a frame, it hands back a fixed version. It doesn't "understand" your shot — it just gets very, very good at copying the specific change you demonstrated. That's why one trained model does one job well, rather than everything poorly.</p>
+
+  <h3>What it's great for</h3>
+  <p>When you pick "New Job", you start from a <strong>preset</strong> — a bundle of sensible settings tuned for a common VFX task. You can train from scratch with any of these:</p>
+
+  <div class="grid2">
+    <div class="preset">
+      <h4><span class="em">✨</span> Beauty / Paint Fix</h4>
+      <p>Best for <strong>small, local fixes</strong> — blemishes, wire/rig removal, skin retouch. It focuses hard on just the area you changed so tiny edits don't get washed out, and it's tuned to keep skin and texture looking real.</p>
+      <div class="chips"><span class="chip">small fixes</span><span class="chip">most popular</span><span class="chip">auto-mask</span></div>
+    </div>
+    <div class="preset">
+      <h4><span class="em">🪄</span> Paintout / Cleanup</h4>
+      <p>Best for removing <strong>large objects</strong> and cleaning big areas. Tuned for smooth, even blends across the fill, and it skips the untouched parts of the frame so training time goes where the actual work is.</p>
+      <div class="chips"><span class="chip">large areas</span><span class="chip">smooth blends</span></div>
+    </div>
+    <div class="preset">
+      <h4><span class="em">🎭</span> Roto / Matte</h4>
+      <p>Turn a plate into a black-and-white matte. You show it plate → matte pairs and it learns to pull the matte on new frames.</p>
+      <div class="chips"><span class="chip">matte</span><span class="chip">B/W output</span></div>
+    </div>
+    <div class="preset">
+      <h4><span class="em">🔧</span> General Image-to-Image</h4>
+      <p>No masking — it treats the <strong>whole frame equally</strong>. Reach for it when the <em>entire</em> image changes (a grade, an AOV, a global look), rather than for small spot fixes.</p>
+      <div class="chips"><span class="chip">whole-frame</span><span class="chip">global looks</span></div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+    <p><strong>One model = one shot, one task.</strong> A model trained to remove a rig from <em>this</em> shot won't magically remove rigs from a different shot. That's normal — it's specialized on purpose. New shot? Train a new model (it's fast and cheap).</p>
+  </div>
+</section>
+
+<!-- ══════════════════ 2. VS COPYCAT ══════════════════ -->
+<section id="vs">
+  <span class="section-tag">② How it's different</span>
+  <h2>Spark Flint vs. CopyCat</h2>
+  <p class="lead">If you've used Nuke's CopyCat, you already get the concept. Spark Flint is the same idea — show examples, get a model — with a lot more under the hood, and it doesn't tie up your workstation.</p>
+
+  <p>Foundry's CopyCat pioneered "train-by-example" right inside Nuke, and it's excellent. Spark Flint takes that same workflow and runs it on <strong>rented cloud GPUs</strong>, adds VFX-specific presets and live coaching, and — crucially — exports back to Nuke <em>and</em> Flame <em>and</em> After Effects, so you're not locked to one app.</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Feature</th><th>Nuke CopyCat</th><th class="flint">Spark Flint</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="feat">Where it runs</td>
+          <td>Your local GPU — ties up the workstation for hours</td>
+          <td class="flint-col"><span class="yes">Rented cloud GPUs</span>, billed per-second. Your machine stays free.</td>
+        </tr>
+        <tr>
+          <td class="feat">Hardware needed</td>
+          <td>A beefy GPU on your box</td>
+          <td class="flint-col"><span class="yes">None.</span> Pick anything from a small T4 up to an RTX PRO 6000.</td>
+        </tr>
+        <tr>
+          <td class="feat">Masking the area to fix</td>
+          <td>Paint masks by hand</td>
+          <td class="flint-col"><span class="yes">Auto-mask</span> — it finds the changed pixels by comparing your before/after for you.</td>
+        </tr>
+        <tr>
+          <td class="feat">Roto / matte training</td>
+          <td>Image-to-image only</td>
+          <td class="flint-col"><span class="yes">Yes</span> — a dedicated Roto preset (segmentation loss).</td>
+        </tr>
+        <tr>
+          <td class="feat">Live coaching</td>
+          <td>Loss number + preview</td>
+          <td class="flint-col"><span class="yes">Trend / Plateau / "should I stop?"</span> analysis, cost-per-epoch, and email alerts.</td>
+        </tr>
+        <tr>
+          <td class="feat">Quality controls</td>
+          <td>A handful of knobs</td>
+          <td class="flint-col"><span class="yes">Multiple model types &amp; loss functions</span> (incl. perceptual LPIPS for skin/beauty).</td>
+        </tr>
+        <tr>
+          <td class="feat">Where the model works</td>
+          <td>Nuke's Inference node (<code>.cat</code>)</td>
+          <td class="flint-col"><span class="yes">Nuke <code>.cat</code> + Flame + After Effects</span> (ONNX). Train once, use anywhere.</td>
+        </tr>
+        <tr>
+          <td class="feat">EXR / scene-linear</td>
+          <td><span class="partial">Supported</span></td>
+          <td class="flint-col"><span class="yes">Supported</span>, with linear-aware previews.</td>
+        </tr>
+        <tr>
+          <td class="feat">Resume / fine-tune</td>
+          <td><span class="partial">Limited</span></td>
+          <td class="flint-col"><span class="yes">Yes</span> — continue a run or fine-tune from an earlier model.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>The features people love most</h3>
+  <div class="grid3">
+    <div class="card" style="margin:0">
+      <h4 style="margin-top:0">🖥️ Your workstation stays free</h4>
+      <p class="meta">Training happens in the cloud, so you can keep comping while a model bakes. No more "GPU busy until tomorrow."</p>
+    </div>
+    <div class="card" style="margin:0">
+      <h4 style="margin-top:0">🎯 Auto-mask</h4>
+      <p class="meta">Tiny fixes (a blemish that's 0.3% of frame) used to get drowned out. Auto-mask makes the model care about the part you actually changed.</p>
+    </div>
+    <div class="card" style="margin:0">
+      <h4 style="margin-top:0">🚦 It tells you when to stop</h4>
+      <p class="meta">No more guessing. The live analysis says "training well", "plateau", or "stop" so you don't burn money on a finished model.</p>
+    </div>
+  </div>
+
+  <div class="callout good">
+    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg>
+    <p><strong>Coming from CopyCat?</strong> The mental model is identical: <em>before/after frames in → a trained model out</em>. Everything below just shows you the Spark Flint version of each step.</p>
+  </div>
+</section>
+
+<!-- ══════════════════ 3. DATASETS ══════════════════ -->
+<section id="data">
+  <span class="section-tag">③ Creating a dataset</span>
+  <h2>Building your before/after pairs</h2>
+  <p class="lead">A dataset is just two folders of matching frames: the "before" and the "after". Get this right and everything else is easy.</p>
+
+  <div class="metaphor">
+    <b>It's a stack of flashcards.</b> Front of the card = the messy frame (<b>Source</b>). Back of the card = how you want it to look (<b>Target</b>). The model studies the stack until it can predict the back from the front.
+  </div>
+
+  <h3>The two folders</h3>
+  <div class="grid2">
+    <div class="card" style="margin:0">
+      <h4 style="margin-top:0">📁 Source <span class="meta">(the "before")</span></h4>
+      <p class="meta" style="margin-top:6px">Your original frames — the ones with the problem. Folder can be named <code>src</code>, <code>source</code>, <code>in</code>, or <code>input</code>.</p>
+    </div>
+    <div class="card" style="margin:0">
+      <h4 style="margin-top:0">📁 Target <span class="meta">(the "after")</span></h4>
+      <p class="meta" style="margin-top:6px">The same frames, fixed by hand. Folder can be named <code>dst</code>, <code>dest</code>, <code>out</code>, <code>output</code>, or <code>target</code>.</p>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+    <p><strong>Filenames must match across the two folders.</strong> <code>frame_001.exr</code> in Source needs a <code>frame_001.exr</code> in Target. That's how the model knows which "after" goes with which "before". Mismatched names = that pair is skipped.</p>
+  </div>
+
+  <h3>How many frames?</h3>
+  <p>You don't need many — <strong>20–50 well-chosen pairs is plenty</strong> for most shots. What matters more than quantity is <em>variety</em>: include frames that cover the range of motion, lighting, and angles in your shot. If the apprentice only ever sees the subject facing left, it'll struggle when they turn right.</p>
+
+  <h3>Optional: a validation set</h3>
+  <p>You can also add <code>val_src</code> / <code>val_dst</code> folders with a few held-out frames the model <em>never trains on</em>. These are the model's "pop quiz" — a fair test of whether it actually learned the task or just memorized the study set. Totally optional, but nice for honest previews.</p>
+
+  <h3>Folder layout, all together</h3>
+  <div class="card">
+    <pre style="font-family:var(--mono); font-size:13px; color:var(--body); margin:0; line-height:1.9; overflow-x:auto;">my_shot/
+├─ <span style="color:var(--purple-dark);font-weight:600">src/</span>        <span style="color:var(--faint)"># before frames  → frame_001.exr, frame_002.exr …</span>
+├─ <span style="color:var(--purple-dark);font-weight:600">dst/</span>        <span style="color:var(--faint)"># after frames   → frame_001.exr, frame_002.exr … (names match!)</span>
+├─ val_src/   <span style="color:var(--faint)"># optional held-out "before" frames</span>
+└─ val_dst/   <span style="color:var(--faint)"># optional held-out "after" frames</span></pre>
+  </div>
+  <p class="meta">Supported formats: PNG, JPG/JPEG, EXR, TIF/TIFF, BMP, WEBP. EXR keeps your scene-linear data intact.</p>
+
+  <div class="callout good">
+    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg>
+    <p><strong>Always "Review pairs" before you submit.</strong> Spark Flint makes you eyeball every Source ↔ Target ↔ Diff before a paid run can start. Thirty seconds here catches the classic disaster — a misaligned or wrong-folder dataset — before it costs you a single cent of GPU time.</p>
+  </div>
+</section>
+
+<!-- ══════════════════ 4. SUBMIT ══════════════════ -->
+<section id="submit">
+  <span class="section-tag">④ Submitting a job</span>
+  <h2>Starting a training run</h2>
+  <p class="lead">Five short steps on the "New Job" page. The form fills in smart defaults — you mostly just confirm.</p>
+
+  <div class="steps">
+    <div class="step">
+      <span class="num"></span>
+      <h4>Pick a mode</h4>
+      <p><strong>New</strong> trains from scratch (the usual choice). <strong>Resume</strong> continues an earlier run where it left off. <strong>Fine-tune</strong> starts from an existing model's weights — handy when a similar shot already has a good model.</p>
+    </div>
+    <div class="step">
+      <span class="num"></span>
+      <h4>Name it</h4>
+      <p>A friendly label like <code>hero_beauty_v3</code>. This becomes the output folder name and the title you'll see on the dashboard. Convention: <code>&lt;project&gt;_&lt;task&gt;_&lt;version&gt;</code>.</p>
+    </div>
+    <div class="step">
+      <span class="num"></span>
+      <h4>Point it at your data</h4>
+      <p>Pick your project folder and Spark Flint auto-detects the <code>src/</code> and <code>dst/</code> subfolders and counts your pairs. Then hit <strong>Review pairs</strong> to approve them. (You'll upload the frames to storage; the form shows you the path.)</p>
+    </div>
+    <div class="step">
+      <span class="num"></span>
+      <h4>Choose a preset &amp; a GPU</h4>
+      <p>Pick the preset that matches your task (Beauty, Paintout, Roto, General). Then pick a GPU — bigger/faster costs more per hour but finishes sooner. The form shows a live <strong>cost &amp; time estimate</strong> based on your frame count and settings.</p>
+    </div>
+    <div class="step">
+      <span class="num"></span>
+      <h4>Submit</h4>
+      <p>That's it. The job provisions a GPU, starts training, and your dashboard goes live with the loss curve and preview updating every few seconds.</p>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+    <p><strong>You don't have to set an end time.</strong> By default a run trains until <em>you</em> stop it — and the live analysis (next section) tells you exactly when that should be. You can also set a step limit for hands-off overnight runs, and turn on <strong>email alerts</strong> so you're pinged when it plateaus instead of babysitting.</p>
+  </div>
+</section>
+
+<!-- ══════════════════ 5. THE NUMBERS ══════════════════ -->
+<section id="progress">
+  <span class="section-tag">⑤ Reading the numbers</span>
+  <h2>Steps, epochs, loss &amp; the curve</h2>
+  <p class="lead">Four words show up everywhere once training starts. Here's what each one means — no math required.</p>
+
+  <div class="grid2">
+    <div class="card" style="margin:0">
+      <h4 style="margin-top:0">👣 Step</h4>
+      <p class="meta">One practice rep. The model looks at a small crop, guesses the fix, checks it against your "after", and nudges itself to do better. Thousands of these add up.</p>
+    </div>
+    <div class="card" style="margin:0">
+      <h4 style="margin-top:0">📚 Epoch</h4>
+      <p class="meta">One full lap through the study material. By default that's 500 steps. "Epoch 12" just means it's on its 12th pass — a friendly progress counter.</p>
+    </div>
+    <div class="card" style="margin:0">
+      <h4 style="margin-top:0">🎯 Loss</h4>
+      <p class="meta">How wrong the model currently is — like a golf score. It measures the gap between the model's guess and your real "after". <strong>Lower is better.</strong></p>
+    </div>
+    <div class="card" style="margin:0">
+      <h4 style="margin-top:0">📉 Training curve</h4>
+      <p class="meta">Loss plotted over time. A healthy run drops fast, then flattens. The shape tells you almost everything about how it's going.</p>
+    </div>
+  </div>
+
+  <h3>What a healthy training curve looks like</h3>
+  <div class="chart-card">
+    <svg viewBox="0 0 640 300" role="img" aria-label="A training loss curve that drops steeply then flattens into a plateau">
+      <!-- grid -->
+      <g stroke="#eef0f4" stroke-width="1">
+        <line x1="60" y1="40"  x2="600" y2="40"/>
+        <line x1="60" y1="100" x2="600" y2="100"/>
+        <line x1="60" y1="160" x2="600" y2="160"/>
+        <line x1="60" y1="220" x2="600" y2="220"/>
+      </g>
+      <!-- axes -->
+      <line x1="60" y1="40" x2="60" y2="250" stroke="#cbd0d8" stroke-width="1.5"/>
+      <line x1="60" y1="250" x2="600" y2="250" stroke="#cbd0d8" stroke-width="1.5"/>
+      <!-- axis labels -->
+      <text x="14" y="48"  font-family="'JetBrains Mono',monospace" font-size="11" fill="#9ca3af">high</text>
+      <text x="20" y="246" font-family="'JetBrains Mono',monospace" font-size="11" fill="#9ca3af">low</text>
+      <text x="2" y="150" font-family="Inter,sans-serif" font-size="12" fill="#6b7280" transform="rotate(-90 12 150)">Loss (error)</text>
+      <text x="320" y="284" font-family="Inter,sans-serif" font-size="12" fill="#6b7280" text-anchor="middle">Time / epochs →</text>
+
+      <!-- raw noisy dots -->
+      <g fill="#d8c7f6">
+        <circle cx="80" cy="58" r="2.5"/><circle cx="100" cy="74" r="2.5"/><circle cx="120" cy="92" r="2.5"/>
+        <circle cx="145" cy="120" r="2.5"/><circle cx="170" cy="138" r="2.5"/><circle cx="195" cy="160" r="2.5"/>
+        <circle cx="225" cy="172" r="2.5"/><circle cx="260" cy="186" r="2.5"/><circle cx="300" cy="192" r="2.5"/>
+        <circle cx="345" cy="200" r="2.5"/><circle cx="395" cy="203" r="2.5"/><circle cx="445" cy="206" r="2.5"/>
+        <circle cx="500" cy="205" r="2.5"/><circle cx="555" cy="208" r="2.5"/>
+      </g>
+      <!-- smoothed curve -->
+      <path d="M75 54 C 130 70, 150 140, 210 165 S 330 198, 420 205 S 540 209, 575 210"
+            fill="none" stroke="#7E3AF2" stroke-width="3.5" stroke-linecap="round"/>
+
+      <!-- zone annotations -->
+      <line x1="75" y1="262" x2="200" y2="262" stroke="#16A34A" stroke-width="2"/>
+      <text x="137" y="278" font-family="Inter,sans-serif" font-size="12" font-weight="600" fill="#16A34A" text-anchor="middle">learning fast</text>
+      <line x1="205" y1="262" x2="360" y2="262" stroke="#D97706" stroke-width="2"/>
+      <text x="282" y="278" font-family="Inter,sans-serif" font-size="12" font-weight="600" fill="#D97706" text-anchor="middle">refining</text>
+      <line x1="365" y1="262" x2="575" y2="262" stroke="#9ca3af" stroke-width="2"/>
+      <text x="470" y="278" font-family="Inter,sans-serif" font-size="12" font-weight="600" fill="#6b7280" text-anchor="middle">plateau · diminishing returns</text>
+
+      <!-- best marker -->
+      <circle cx="500" cy="205" r="6" fill="none" stroke="#16A34A" stroke-width="2.5"/>
+      <text x="500" y="186" font-family="'JetBrains Mono',monospace" font-size="11" fill="#16A34A" text-anchor="middle" font-weight="600">★ best</text>
+    </svg>
+  </div>
+
+  <ul>
+    <li><strong>Steep drop at the start</strong> — the model is learning the obvious stuff fast. This is normal and exciting.</li>
+    <li><strong>The knee / flattening</strong> — easy wins are done; now it's polishing fine detail.</li>
+    <li><strong>The flat plateau</strong> — it's basically as good as it'll get with this data. More training here mostly just costs money.</li>
+    <li><strong>The faint dots</strong> are the raw, noisy per-epoch loss; the bold line is the smoothed trend. Watch the <em>line</em>, not the jitter.</li>
+  </ul>
+
+  <div class="callout warn">
+    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+    <p><strong>If the curve goes <em>up</em> and stays up, that's a red flag.</strong> Usually it means the learning rate is too high, or some of your pairs are mismatched. Stop, fix it, and restart — don't let it cook.</p>
+  </div>
+
+  <h3>The other stats, quickly</h3>
+  <p>Beside the curve you'll see a strip of numbers. The ones worth knowing:</p>
+  <ul>
+    <li><strong>Loss Best</strong> (green) — the lowest loss the model has hit so far, and which epoch it happened. Your real "high score".</li>
+    <li><strong>Val Loss</strong> — the score on the held-out pop-quiz frames. If this stops dropping while training loss keeps falling, the model is starting to memorize rather than learn.</li>
+    <li><strong>PSNR / SSIM / LPIPS</strong> — different rulers for "how close to the target?" Higher PSNR/SSIM = closer; lower LPIPS = looks more realistic to a human eye. You don't need to chase these; the preview is the real judge.</li>
+    <li><strong>Cost / Epoch</strong> — a live running estimate of what each lap is costing you. Great for deciding when "good enough" is good enough.</li>
+  </ul>
+</section>
+
+<!-- ══════════════════ 6. ANALYSIS ══════════════════ -->
+<section id="analysis">
+  <span class="section-tag">⑥ Training analysis</span>
+  <h2>The "should I stop?" panel</h2>
+  <p class="lead">Reading curves is a skill. So Spark Flint reads it for you and posts a plain-language verdict. These four chips are your dashboard's coach.</p>
+
+  <div class="achip-row">
+    <div class="achip"><span class="k">Trend</span><span class="v v-good">Improving</span></div>
+    <div class="achip"><span class="k">Recent change</span><span class="v v-good">−4.2%</span></div>
+    <div class="achip"><span class="k">Plateau</span><span class="v v-warn">Best 12ep ago</span></div>
+    <div class="achip"><span class="k">Status</span><span class="v v-good">Training well</span></div>
+  </div>
+
+  <h3>What each chip means</h3>
+  <div class="setting"><div class="top"><span class="name">Trend</span></div>
+    <p>The big-picture direction of the smoothed loss over the recent window.</p>
+    <ul class="opts">
+      <li><b>Improving</b> — loss is still falling. Keep going.</li>
+      <li><b>Flat</b> — barely moving. It may be done, or just resting between gains.</li>
+      <li><b>Diverging</b> — loss is climbing. Something's wrong (see below).</li>
+    </ul>
+  </div>
+  <div class="setting"><div class="top"><span class="name">Recent Change</span></div>
+    <p>How much loss moved in the latest window, as a percentage. A negative number is good — it means loss dropped. <code>−4.2%</code> = "4% better recently."</p>
+  </div>
+  <div class="setting"><div class="top"><span class="name">Plateau</span></div>
+    <p>How long ago the model hit its best score. <em>"Best 12ep ago"</em> means it set a new record 12 epochs back. The longer this gets, the more likely it's finished.</p>
+    <ul class="opts">
+      <li><b>under 10 epochs</b> — fresh progress, all good (green).</li>
+      <li><b>10–30 epochs</b> — slowing down, keep an eye on it (amber).</li>
+      <li><b>30+ epochs</b> — probably as good as it gets (red).</li>
+    </ul>
+  </div>
+  <div class="setting"><div class="top"><span class="name">Status</span><span class="badge-def">the one to act on</span></div>
+    <p>The bottom-line recommendation that blends the other three into a single call. If you only read one chip, read this one.</p>
+  </div>
+
+  <h3>The verdicts, and what to do</h3>
+  <div class="verdict go">
+    <span class="badge">Training well</span>
+    <span>Loss is dropping (or a new best just landed). <strong>Let it keep running.</strong></span>
+  </div>
+  <div class="verdict hold">
+    <span class="badge">Slowing — keep watching</span>
+    <span>Gains are getting small. Glance at the <a href="#preview">preview</a> — if it already looks right, you can stop and save money.</span>
+  </div>
+  <div class="verdict hold">
+    <span class="badge">Plateau — may stop</span>
+    <span>No new best in ~30 epochs. Usually done. Check the preview, then stop if it looks good.</span>
+  </div>
+  <div class="verdict stop">
+    <span class="badge">Stop — no new best in 50+ epochs</span>
+    <span>It's coasting. Further training is mostly wasted spend. <strong>Stop it.</strong></span>
+  </div>
+  <div class="verdict stop">
+    <span class="badge">Stop — diverging, lower LR</span>
+    <span>Loss is rising. Stop, lower the <a href="#advanced">learning rate</a> (or check for bad pairs), and restart.</span>
+  </div>
+
+  <div class="callout tip">
+    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+    <p><strong>The numbers advise; the preview decides.</strong> A "plateau" with a preview that already looks perfect means you're done — ship it. The analysis exists so you stop paying for a model that finished ten minutes ago. Turn on <strong>email alerts</strong> to get pinged on plateau/diverge without watching the screen.</p>
+  </div>
+</section>
+
+<!-- ══════════════════ 7. PREVIEW ══════════════════ -->
+<section id="preview">
+  <span class="section-tag">⑦ Reading the preview</span>
+  <h2>The preview grid, decoded</h2>
+  <p class="lead">Every few seconds the model shows its homework: a strip of columns comparing what it was given, what you wanted, and what it produced. This is the most honest signal of all.</p>
+
+  <p>Each <strong>row is one sample frame</strong> (it shows up to three). The <strong>columns</strong>, left to right, are always in this order:</p>
+
+  <div class="mock">
+    <div class="mock-grid">
+      <!-- SOURCE -->
+      <div class="mock-cell">
+        <svg viewBox="0 0 120 120">
+          <defs><linearGradient id="bg1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3a4a63"/><stop offset="1" stop-color="#23303f"/></linearGradient></defs>
+          <rect width="120" height="120" fill="url(#bg1)"/>
+          <circle cx="60" cy="54" r="30" fill="#caa07a"/>
+          <circle cx="60" cy="100" r="34" fill="#b88a64"/>
+          <circle cx="72" cy="50" r="5" fill="#c0392b"/>
+        </svg>
+        <div class="mock-label">SOURCE<span>the "before"</span></div>
+      </div>
+      <!-- TARGET -->
+      <div class="mock-cell">
+        <svg viewBox="0 0 120 120">
+          <rect width="120" height="120" fill="url(#bg1)"/>
+          <circle cx="60" cy="54" r="30" fill="#caa07a"/>
+          <circle cx="60" cy="100" r="34" fill="#b88a64"/>
+        </svg>
+        <div class="mock-label">TARGET<span>your "after"</span></div>
+      </div>
+      <!-- PREDICTION -->
+      <div class="mock-cell">
+        <svg viewBox="0 0 120 120">
+          <rect width="120" height="120" fill="url(#bg1)"/>
+          <circle cx="60" cy="54" r="30" fill="#caa07a"/>
+          <circle cx="60" cy="100" r="34" fill="#b88a64"/>
+          <circle cx="72" cy="50" r="3" fill="#c0392b" opacity="0.18"/>
+        </svg>
+        <div class="mock-label">PREDICTION<span>model's attempt</span></div>
+      </div>
+      <!-- DIFF -->
+      <div class="mock-cell">
+        <svg viewBox="0 0 120 120">
+          <defs><radialGradient id="heat" cx="60%" cy="42%" r="22%"><stop offset="0" stop-color="#ffea00"/><stop offset="0.5" stop-color="#ff7a00"/><stop offset="1" stop-color="#0a0a14"/></radialGradient></defs>
+          <rect width="120" height="120" fill="#0a0a14"/>
+          <rect width="120" height="120" fill="url(#heat)"/>
+        </svg>
+        <div class="mock-label">DIFF<span>where they differ</span></div>
+      </div>
+    </div>
+    <div class="mock-caption">training_preview.jpg — one row per sample, refreshed every ~5s while live</div>
+  </div>
+
+  <div class="legend">
+    <div class="item"><span class="sw" style="background:#3a4a63">1</span><div><h4>Source</h4><p>What the model was handed — your unedited frame.</p></div></div>
+    <div class="item"><span class="sw" style="background:#16A34A">2</span><div><h4>Target</h4><p>The answer — your hand-fixed frame. This is the goal it's aiming for.</p></div></div>
+    <div class="item"><span class="sw" style="background:#7E3AF2">3</span><div><h4>Prediction</h4><p>The model's current attempt. <strong>When this matches column 2, you're done.</strong></p></div></div>
+    <div class="item"><span class="sw" style="background:linear-gradient(135deg,#ff7a00,#ffea00)">4</span><div><h4>Diff</h4><p>A heatmap of the gap between Prediction and Target. Hot = still wrong, dark = matching.</p></div></div>
+  </div>
+
+  <h3>How to read it</h3>
+  <ul>
+    <li><strong>Early on:</strong> the Prediction looks mushy or just like the Source, and the Diff is bright. Normal — it hasn't learned yet.</li>
+    <li><strong>Going well:</strong> the Prediction creeps toward the Target and the Diff goes <em>dark and cool</em>. A near-black Diff is the picture of success.</li>
+    <li><strong>Done:</strong> when you genuinely can't tell Prediction from Target, stop training. That's the finish line — trust your eyes over any number.</li>
+  </ul>
+
+  <h3>Extra columns you might see</h3>
+  <div class="grid2">
+    <div class="card" style="margin:0">
+      <h4 style="margin-top:0">🎯 Auto-mask column</h4>
+      <p class="meta">If auto-mask is on (Beauty/Paintout presets), an extra column shows the white-on-black map of <em>which pixels the model is told to care about</em> — the area that changed between your before and after.</p>
+    </div>
+    <div class="card" style="margin:0">
+      <h4 style="margin-top:0">🖊️ Mask column</h4>
+      <p class="meta">If you supplied your own masks, they appear as a column too, right after Source — so you can confirm the right region is being emphasized.</p>
+    </div>
+  </div>
+
+  <h3>Training vs. Validation tabs</h3>
+  <p>The preview has two tabs. <strong>Training</strong> uses frames the model studies from. <strong>Validation</strong> uses the held-out pop-quiz frames it has never trained on — the more honest test. If Validation looks as good as Training, your model truly generalizes. You can also expand any preview to full-screen and zoom/pan to pixel-peep.</p>
+</section>
+
+<!-- ══════════════════ 8. ADVANCED SETTINGS ══════════════════ -->
+<section id="advanced">
+  <span class="section-tag">⑧ Advanced settings</span>
+  <h2>Every dial, in plain English</h2>
+  <p class="lead">Here's the honest truth: a preset already sets all of these well. You can train great models without opening a single group below. They're here for when you want more control.</p>
+
+  <div class="callout good">
+    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg>
+    <p><strong>Rule of thumb:</strong> change <em>one</em> thing at a time, and only if a preset isn't getting you there. If you're not sure — leave it. The defaults are the result of a lot of real runs. Tap a section to expand it.</p>
+  </div>
+
+  <!-- GROUP A -->
+  <details class="group">
+    <summary>
+      <span class="gico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg></span>
+      <span>Model &amp; image quality<span class="gsub">How big the model is and how much detail it sees</span></span>
+      <span class="chev"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></span>
+    </summary>
+    <div class="group-body">
+      <div class="setting"><div class="top"><span class="name">model_type</span><span class="badge-leave">leave it</span></div>
+        <p>The model's architecture (its "brain shape").</p>
+        <ul class="opts">
+          <li><b>unet</b> — fast, general-purpose.</li>
+          <li><b>msrn</b> — sharper fine detail, trains a bit slower.</li>
+        </ul>
+      </div>
+      <div class="setting"><div class="top"><span class="name">model_size_dims</span><span class="badge-def">128 is the sweet spot</span></div>
+        <p>How much "brainpower" the model has. Bigger isn't always better — it just costs more VRAM and time.</p>
+        <ul class="opts">
+          <li><b>64</b> lightweight · <b>128</b> balanced · <b>256</b> higher quality · <b>512</b> maximum (lots of VRAM).</li>
+        </ul>
+      </div>
+      <div class="setting"><div class="top"><span class="name">resolution</span><span class="badge-def">512</span></div>
+        <p>The size of crop the model studies each step — like a magnifying glass sliding over your frame. Bigger sees more context but is much slower (cost rises with the square of the size).</p>
+        <ul class="opts">
+          <li><b>256</b> fast, small fixes · <b>512</b> great default · <b>768–1024</b> big blends, heavy VRAM.</li>
+        </ul>
+      </div>
+      <div class="setting"><div class="top"><span class="name">overlap_factor</span><span class="badge-def">0.25–0.5</span></div>
+        <p>How much neighbouring crops overlap as they tile across the frame. More overlap = smoother, seam-free blends but more training time.</p>
+        <ul class="opts">
+          <li><b>0.0</b> fastest, risks seams · <b>0.25</b> balanced · <b>0.5</b> sharper edges · <b>0.75</b> seamless big paint fixes.</li>
+        </ul>
+      </div>
+      <div class="setting"><div class="top"><span class="name">color_space</span><span class="badge-def">auto</span></div>
+        <p>Must match your footage. <b>srgb</b> for normal 8-bit images (PNG/JPG); <b>linear</b> for scene-linear 32-bit EXR. Wrong choice = blown highlights or muddy shadows. Leave on auto and it picks from your file type.</p>
+      </div>
+    </div>
+  </details>
+
+  <!-- GROUP B -->
+  <details class="group">
+    <summary>
+      <span class="gico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20v-6M6 20V10M18 20V4"/></svg></span>
+      <span>Learning behaviour<span class="gsub">How the model measures mistakes and how fast it adapts</span></span>
+      <span class="chev"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></span>
+    </summary>
+    <div class="group-body">
+      <div class="setting"><div class="top"><span class="name">loss</span><span class="badge-def">set by preset</span></div>
+        <p>How the model scores its own mistakes — its definition of "wrong".</p>
+        <ul class="opts">
+          <li><b>l1</b> — pixel difference. Sharp, stable, best all-rounder.</li>
+          <li><b>l2</b> — smoother, can blur fine detail.</li>
+          <li><b>l1+lpips</b> — adds a "looks real to a human" score. Best for skin/beauty.</li>
+          <li><b>weighted</b> — a custom blend of the above (power users).</li>
+          <li><b>bce+dice</b> — only for roto/matte (black-and-white output).</li>
+        </ul>
+      </div>
+      <div class="setting"><div class="top"><span class="name">lr</span> <span class="meta">(learning rate)</span><span class="badge-def">1e-4</span></div>
+        <p>How big a step the model takes each time it corrects itself. Too small = slow; too big = unstable.</p>
+        <ul class="opts">
+          <li>Loss falling too slowly? Try a little <b>faster</b> (3e-4).</li>
+          <li>Loss spiking up and never recovering? Your LR is <b>too high</b> — go slower (5e-5).</li>
+        </ul>
+      </div>
+      <div class="setting"><div class="top"><span class="name">lr_scheduler</span><span class="badge-def">none</span></div>
+        <p>Whether the learning rate changes over time. <b>none</b> keeps it constant (simple, good); <b>cosine</b> eases it down over long runs; <b>plateau</b> drops it automatically when loss stalls.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">lambda_lpips</span><span class="badge-def">0.1–0.3</span></div>
+        <p>Only active with <code>l1+lpips</code>. How much the model prioritises "looking right" over matching exact pixels. Higher = sharper/more realistic but can drift; above 0.5 risks artifacts.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">l1_weight · l2_weight · lpips_weight</span></div>
+        <p>The individual ingredient amounts when <code>loss = weighted</code>. A blend of L1 (sharp) + a little L2 (smooth) + a little LPIPS (realistic). Power-user territory.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">use_amp</span><span class="badge-def">on</span></div>
+        <p>Trains roughly 2× faster using less GPU memory, with almost no quality cost. Leave it on. (Only turn off in the very rare case of NaN losses.)</p>
+      </div>
+    </div>
+  </details>
+
+  <!-- GROUP C -->
+  <details class="group">
+    <summary>
+      <span class="gico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+      <span>Length &amp; scheduling<span class="gsub">How long it runs and how big each batch is</span></span>
+      <span class="chev"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></span>
+    </summary>
+    <div class="group-body">
+      <div class="setting"><div class="top"><span class="name">batch_size</span><span class="badge-def">Auto</span></div>
+        <p>How many crops the model studies per step. Bigger = steadier learning but more VRAM. <b>Auto</b> probes your GPU and picks the largest that fits. Drop to 2 if you ever hit out-of-memory.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">iterations_per_epoch</span><span class="badge-def">500</span></div>
+        <p>How many steps make one "lap" before it saves a checkpoint and runs validation. Lower = saves more often (nice for watching); higher = slightly faster overall.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">max_steps</span><span class="badge-def">0 = run until you stop</span></div>
+        <p>An optional auto-stop limit. Leave at 0 to train until you (or the analysis) decide to stop. Set a number for hands-off overnight or queued runs.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">progressive_resolution</span></div>
+        <p>Start at low resolution to learn shapes fast, then scale up to full detail. Speeds up early training — recommended for roto/matte work.</p>
+      </div>
+    </div>
+  </details>
+
+  <!-- GROUP D -->
+  <details class="group">
+    <summary>
+      <span class="gico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/></svg></span>
+      <span>Focus &amp; masks<span class="gsub">Tell the model which part of the frame matters</span></span>
+      <span class="chev"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></span>
+    </summary>
+    <div class="group-body">
+      <div class="setting"><div class="top"><span class="name">use_auto_mask</span><span class="badge-def">on for Beauty/Paintout</span></div>
+        <p>Automatically builds a mask by comparing your before/after — changed pixels become "important", identical pixels are ignored. No manual mask painting needed. Great for beauty, paint, cleanup.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">auto_mask_gamma</span><span class="badge-def">0.5–1.0</span></div>
+        <p>Adjusts how generously the auto-mask spreads. <b>Below 1.0</b> grows the white area (good for subtle beauty work); <b>above 1.0</b> tightens it; <b>1.0</b> leaves it as-is.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">use_mask_loss + mask_weight</span><span class="badge-def">weight 100 for tiny fixes</span></div>
+        <p>Makes masked (white) areas count more toward the score, so the model can't "win" by just copying the untouched background. Essential for small fixes — a lipstick smudge that's 0.3% of frame needs a high weight (e.g. 100) or the model ignores it.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">use_mask_input</span><span class="badge-leave">advanced</span></div>
+        <p>Feeds the mask to the model as an extra channel alongside RGB, so it can treat masked/unmasked areas differently. Note: this changes the model's shape — you can't toggle it mid-training.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">skip_empty_patches + threshold</span></div>
+        <p>Skips crops where the before and after are identical, so training time is spent only where there's an actual change to learn. Needs auto-mask on. The threshold sets how different a pixel must be to "count".</p>
+      </div>
+    </div>
+  </details>
+
+  <!-- GROUP E -->
+  <details class="group">
+    <summary>
+      <span class="gico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/></svg></span>
+      <span>Augmentations<span class="gsub">Show the model extra variety so it generalizes</span></span>
+      <span class="chev"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></span>
+    </summary>
+    <div class="group-body">
+      <p style="margin:14px 0 4px; font-size:14px; color:var(--gray)">Augmentations randomly tweak your training frames (flip, nudge, re-light) so the model sees more variety than you actually shot — like quizzing the apprentice with the same flashcards held at different angles. The same tweak is applied to both Source and Target so pairs stay aligned.</p>
+      <div class="setting"><div class="top"><span class="name">aug_hflip</span></div>
+        <p>Randomly mirror frames left-to-right. Good for most tasks; skip it for text or anything direction-specific.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">aug_affine (+ keep_ratio)</span></div>
+        <p>Random scale / shift / rotate / shear. Helps the model cope with slight alignment differences. Keep aspect ratio on so paired frames stay registered.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">aug_gamma</span></div>
+        <p>Randomly shifts the brightness curve so the model handles varying exposure.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">aug_color (brightness · contrast · saturation)</span></div>
+        <p>Randomly nudges color and tone. Use it when your dataset has varied lighting or grades; skip it when your footage is already well-matched or color-critical.</p>
+      </div>
+    </div>
+  </details>
+
+  <!-- GROUP F -->
+  <details class="group">
+    <summary>
+      <span class="gico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg></span>
+      <span>Saving, previews &amp; alerts<span class="gsub">How often it checkpoints, previews, and pings you</span></span>
+      <span class="chev"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></span>
+    </summary>
+    <div class="group-body">
+      <div class="setting"><div class="top"><span class="name">preview_batch_interval</span><span class="badge-def">50</span></div>
+        <p>Save a fresh preview image every N steps. Lower = see progress sooner (each preview costs a little GPU time). 0 disables previews.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">preview_refresh_rate</span></div>
+        <p>How many preview saves between panel refreshes — keeps the UI snappy during heavy training.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">log_interval</span><span class="badge-def">5</span></div>
+        <p>How often the loss number is printed to the log. Lower = noisier log, higher = cleaner.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">keep_last_checkpoints</span><span class="badge-def">4</span></div>
+        <p>How many older saved models to keep on disk (plus the newest). More = more rollback options, more storage used.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">early stopping (enable · patience · stop)</span></div>
+        <p>A safety net. When loss stops improving for <em>patience</em> epochs (default 30), it saves a "best so far" checkpoint. Leave <b>stop</b> off to keep training but bank the best model; turn it on to halt automatically.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">Email alerts</span></div>
+        <p>Optionally get an email when the run <b>plateaus/finishes</b> or starts <b>diverging</b>, so you can stop it without watching the dashboard. One email per kind, with a cooldown so you're not spammed.</p>
+      </div>
+    </div>
+  </details>
+
+  <!-- GROUP G -->
+  <details class="group">
+    <summary>
+      <span class="gico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></span>
+      <span>Exporting your model<span class="gsub">Get a file you can drop into Nuke, Flame or After Effects</span></span>
+      <span class="chev"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></span>
+    </summary>
+    <div class="group-body">
+      <div class="setting"><div class="top"><span class="name">auto_export_interval</span><span class="badge-def">every 10 epochs</span></div>
+        <p>Export the model automatically every N epochs during training, so a ready-to-use file appears in your Downloads panel without stopping the run. 0 disables it.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">auto_export_flame</span> <span class="meta">(ONNX)</span><span class="badge-def">on</span></div>
+        <p>Exports an ONNX model that drops straight into <b>Autodesk Flame</b>'s ML node and <b>Adobe After Effects</b> (e.g. Cleanplate FX).</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">auto_export_nuke</span> <span class="meta">(.cat)</span></div>
+        <p>Exports a TorchScript model plus a Nuke helper script. Run the helper in Nuke to produce the <code>.cat</code> file for the <b>Inference</b> node — exactly like a CopyCat result.</p>
+      </div>
+      <div class="setting"><div class="top"><span class="name">finetune_from</span></div>
+        <p>Start a new run from an existing model's weights instead of from scratch — useful when a similar shot already trained well. Only the weights load; the optimizer resets.</p>
+      </div>
+    </div>
+  </details>
+
+  <div class="callout tip" style="margin-top:28px">
+    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+    <p><strong>That's the whole tool.</strong> Pick a preset, show it good before/after pairs, watch the preview until Prediction matches Target, then stop and export. Everything above is just the "why" behind the buttons. Now go train something. ✦</p>
+  </div>
+</section>
+
+</main>
+
+</div><!-- /.layout -->
+
+<footer>
+  <div class="foot-inner">
+    <div class="brand">
+      <span class="mark">
+        <svg viewBox="0 0 24 24" fill="#fff"><path d="m12 2-2.2 6.5a2 2 0 0 1-1.3 1.3L2 12l6.5 2.2a2 2 0 0 1 1.3 1.3L12 22l2.2-6.5a2 2 0 0 1 1.3-1.3L22 12l-6.5-2.2a2 2 0 0 1-1.3-1.3z"/></svg>
+      </span>
+      Spark <span class="sub">Flint</span>
+    </div>
+    <p>Managed GPU training for TuNet models. · A friendly walkthrough.</p>
+    <p class="meta" style="margin-top:8px">Defaults and numbers in this guide mirror the live New Job form. When in doubt, trust the preview.</p>
+  </div>
+</footer>
+
+<script>
+  // Scroll-spy: highlight the current section in BOTH the top nav and the
+  // Contents sidebar. Both sets of links point at the same section ids, so we
+  // group every link by its target id and light up all matches together.
+  (function () {
+    var links = Array.prototype.slice.call(document.querySelectorAll('.nav-links a, .toc-nav a'));
+    var byId = {};
+    links.forEach(function (a) {
+      var id = a.getAttribute('href').slice(1);
+      (byId[id] = byId[id] || []).push(a);
+    });
+    var sections = Object.keys(byId)
+      .map(function (id) { return document.getElementById(id); })
+      .filter(Boolean);
+
+    function setActive(id) {
+      links.forEach(function (l) { l.classList.remove('active'); });
+      (byId[id] || []).forEach(function (l) { l.classList.add('active'); });
+    }
+
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) setActive(e.target.id);
+      });
+    }, { rootMargin: '-45% 0px -50% 0px', threshold: 0 });
+
+    sections.forEach(function (s) { observer.observe(s); });
+
+    // Close the mobile menu on tap
+    links.forEach(function (a) {
+      a.addEventListener('click', function () { document.getElementById('navlinks').classList.remove('open'); });
+    });
+  })();
+</script>
+
+</body>
+</html>

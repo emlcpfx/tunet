@@ -59,8 +59,8 @@ export const PRESETS: Record<PresetKey, Preset> = {
   general: {
     key:         'general',
     name:        'General Image-to-Image',
-    description: 'Balanced defaults for arbitrary src→dst mapping. MSRN with L1 loss. Good baseline.',
-    tags:        ['MSRN', 'L1', 'general purpose'],
+    description: 'No masking — treats the whole frame equally. Reach for it when the entire image changes (a grade, an AOV, a global look), not for small spot fixes.',
+    tags:        ['whole-frame', 'global looks'],
     model:    { model_type: 'msrn', model_size_dims: 64, recurrence_steps: 2 },
     data:     { resolution: 512, overlap_factor: 0.5 },
     training: { loss: 'l1', lambda_lpips: 0, lr: 1e-4, iterations_per_epoch: 500 },
@@ -71,8 +71,8 @@ export const PRESETS: Record<PresetKey, Preset> = {
   beauty: {
     key:         'beauty',
     name:        'Beauty / Paint Fix',
-    description: 'Skin retouch, blemish removal, wire/rig removal, paint cleanup. Auto-mask focuses learning on changed areas. L1+LPIPS preserves fine detail.',
-    tags:        ['MSRN', 'L1+LPIPS', 'Auto-Mask'],
+    description: 'Best for small, local fixes — blemishes, wire/rig removal, skin retouch. Focuses hard on just the area you changed so tiny edits aren\'t washed out, and is tuned to keep skin and texture looking real.',
+    tags:        ['small fixes', 'most popular', 'auto-mask'],
     model:    { model_type: 'msrn', model_size_dims: 64, recurrence_steps: 2 },
     data:     { resolution: 512, overlap_factor: 0.5 },
     training: { loss: 'l1+lpips', lambda_lpips: 0.2, lr: 1e-4, iterations_per_epoch: 500 },
@@ -96,8 +96,8 @@ export const PRESETS: Record<PresetKey, Preset> = {
   paintout: {
     key:         'paintout',
     name:        'Paintout / Cleanup',
-    description: 'Heavy modification: paint-out objects, large area cleanup. Higher overlap for seamless blends. Weighted L1+L2 loss.',
-    tags:        ['MSRN', 'Weighted', 'Auto-Mask'],
+    description: 'Best for removing large objects and cleaning big areas. Tuned for smooth, even blends across the fill, and skips the untouched parts of the frame so training goes where the work is.',
+    tags:        ['large areas', 'smooth blends', 'auto-mask'],
     model:    { model_type: 'msrn', model_size_dims: 64, recurrence_steps: 2 },
     data:     { resolution: 512, overlap_factor: 0.75 },
     training: {
@@ -116,8 +116,8 @@ export const PRESETS: Record<PresetKey, Preset> = {
   roto: {
     key:         'roto',
     name:        'Roto / Matte',
-    description: 'Segmentation and matte extraction. Source = plate, destination = B/W matte. Binary output via BCE+Dice loss.',
-    tags:        ['UNet', 'BCE+Dice', 'progressive'],
+    description: 'Turn a plate into a black-and-white matte. Show it plate → matte pairs and it learns to pull the matte on new frames.',
+    tags:        ['matte', 'B/W output'],
     model:    { model_type: 'unet', model_size_dims: 128 },
     data:     { resolution: 512, overlap_factor: 0.25 },
     training: { loss: 'bce+dice', lambda_lpips: 0, lr: 3e-4, iterations_per_epoch: 500 },

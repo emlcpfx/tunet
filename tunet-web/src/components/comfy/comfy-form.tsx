@@ -13,6 +13,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { uploadComfyInput } from '@/lib/upload-stage'
+import { parseComfyFormState } from '@/lib/comfy-form-state'
 
 // ── Types (shape of /api/comfy/presets) ──────────────────────────────────────
 
@@ -83,9 +84,11 @@ interface PhaseEvent {
   files?: number; kb?: number; ms?: number
 }
 
-export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
+export function ComfyForm({ jobsBase = '/jobs', cloneFromId = null }: { jobsBase?: string; cloneFromId?: string | null }) {
   const [presets, setPresets] = useState<Preset[] | null>(null)
   const [loadErr, setLoadErr] = useState<string | null>(null)
+  const [clonedFrom, setClonedFrom] = useState<string | null>(null)
+  const clonedRef = useRef(false)
   const [key, setKey]         = useState('')
   const [values, setValues]   = useState<Record<string, unknown>>({})
   const [gpu, setGpu]         = useState('rtxpro6000')
@@ -115,6 +118,47 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // ?clone=<jobId>: rehydrate the form from the source job's TUNET_FORM_STATE
+  // stash (preset + prompt + knobs + gpu/mode/name). The input clip is NOT
+  // cloned — the user re-picks it (same as the training clone not re-using the
+  // dataset). Older jobs without a stash fall back to selecting their preset.
+  useEffect(() => {
+    if (!cloneFromId || !presets || clonedRef.current) return
+    clonedRef.current = true
+    ;(async () => {
+      try {
+        const res = await fetch(`/api/spark/jobs/${cloneFromId}`, { cache: 'no-store' })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data = await res.json()
+        const job = data.job as { id: string; env?: Record<string, string> } | undefined
+        if (!job) throw new Error('source job not found')
+
+        const fs = parseComfyFormState(job.env?.TUNET_FORM_STATE)
+        const presetKey = fs?.presetKey ?? job.env?.TUNET_PRESET
+        const p = presets.find(x => x.key === presetKey)
+        if (!p) { setErr(`Clone source used preset "${presetKey ?? '?'}", which isn't available here.`); return }
+
+        // Start from the preset's defaults, then overlay the cloned values so
+        // params the source didn't set keep sane defaults.
+        const defaults: Record<string, unknown> = {}
+        for (const [n, spec] of Object.entries(p.params)) {
+          if (n === 'video' || n === 'mask' || n === 'face') continue
+          if (spec.default !== undefined) defaults[n] = spec.default
+        }
+        setKey(p.key)
+        setValues({ ...defaults, ...(fs?.values ?? {}) })
+        setGpu(fs?.gpu || p.gpu || 'rtxpro6000')
+        setMode((fs?.mode as 'instant' | 'smart') || (p.mode as 'instant' | 'smart') || 'instant')
+        setName(fs?.name || '')
+        setFile2(null); setDoneJob(null); setErr(null); setEvents([])
+        setClonedFrom(job.id)
+      } catch (e) {
+        setErr(e instanceof Error ? `Clone failed: ${e.message}` : 'Clone failed')
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot once presets load
+  }, [presets, cloneFromId])
+
   const preset = useMemo(() => presets?.find(p => p.key === key) ?? null, [presets, key])
 
   function selectPreset(p: Preset) {
@@ -129,6 +173,7 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
     setGpu(p.gpu || 'rtxpro6000')
     setMode((p.mode as 'instant' | 'smart') || 'instant')
     setDoneJob(null); setErr(null); setEvents([])
+    setClonedFrom(null)   // a manual preset switch is no longer "this clone"
   }
 
   // Match the desktop tool: probe the picked clip and fill fps + frame count so
@@ -246,6 +291,21 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
 
       {preset && (
         <div className="space-y-4">
+          {/* Cloned-from notice — settings are pre-filled; the clip is re-picked. */}
+          {clonedFrom && (
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-[#e9d5ff] bg-[#faf5ff] px-4 py-2.5 text-sm text-[#6b21a8]">
+              <span>
+                Cloned from{' '}
+                <Link href={`${jobsBase}/${clonedFrom}`} className="font-mono text-xs text-[#7E3AF2] hover:underline">
+                  {clonedFrom.slice(0, 8)}
+                </Link>
+                {' '}— settings pre-filled. Re-select your input clip{secondary ? ' and reference image' : ''} before submitting.
+              </span>
+              <button type="button" onClick={() => setClonedFrom(null)} aria-label="Dismiss"
+                className="flex-shrink-0 text-[#9ca3af] hover:text-[#6b21a8]">✕</button>
+            </div>
+          )}
+
           {/* Preset picker */}
           <Card>
             <Label>Workflow preset</Label>

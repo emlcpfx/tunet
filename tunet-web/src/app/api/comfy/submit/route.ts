@@ -20,6 +20,7 @@ import {
   comfyInstanceType, comfyCommand, packComfyTarball, comfySecondaryParam,
   type ComfyLora, type ComfyPatch,
 } from '@/lib/comfy'
+import { buildComfyFormState } from '@/lib/comfy-form-state'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -168,6 +169,19 @@ export async function POST(req: Request) {
         env.TUNET_PRESET   = preset.key
         env.TUNET_MODE     = 'comfy'
         const mode = body.mode === 'smart' ? 'smart' : 'instant'
+        // Stash the form values (prompt + knobs) so the job page can show what
+        // this render used and the Clone button can rehydrate the form. The clip
+        // is NOT stashed — it's re-picked on clone (like the training dataset).
+        // Mirrors training's TUNET_FORM_STATE; discriminated by `presetKey`.
+        const stashValues: Record<string, unknown> = { ...(body.values ?? {}) }
+        delete stashValues.__name
+        env.TUNET_FORM_STATE = JSON.stringify(buildComfyFormState({
+          presetKey: preset.key,
+          gpu:       body.gpu ?? preset.gpu ?? 'rtxpro6000',
+          mode,
+          name:      rawName,
+          values:    stashValues,
+        }))
         const submitResp = await submitJob({
           name:            jobName,
           instanceType:    comfyInstanceType(preset, body.gpu),

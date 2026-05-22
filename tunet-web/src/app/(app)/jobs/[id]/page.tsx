@@ -13,7 +13,7 @@ import { notFound } from 'next/navigation'
 import { getJob } from '@/lib/spark'
 import {
   type SparkJob, jobLabel, jobRuntimeMs, formatRuntime, formatStarted, jobGpuDisplay,
-  ACTIVE_STATUSES, derivedStatus,
+  ACTIVE_STATUSES, derivedStatus, isComfyJob,
 } from '@/lib/spark-types'
 import { LiveStatusBadge } from '@/components/spark/live-status-badge'
 import { JobLiveView } from '@/components/spark/job-live-view'
@@ -25,6 +25,8 @@ import { PreviewImages } from '@/components/spark/preview-images'
 import { DownloadsPanel } from '@/components/spark/downloads-panel'
 import { JobSettingsPanel } from '@/components/spark/job-settings-panel'
 import { ComfyOutputsPanel } from '@/components/comfy/comfy-outputs-panel'
+import { loadComfyPreset } from '@/lib/comfy'
+import { parseComfyFormState } from '@/lib/comfy-form-state'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -59,8 +61,9 @@ export default async function JobDetailPage({
   // EZ-Comfy jobs share this route but are a different beast — a one-shot
   // ComfyUI render, not a training run. They have no loss curve, no training
   // stats, and their deliverables are rendered media (not .pth/.onnx). Branch
-  // the body to a comfy-specific layout. Marker is set by /api/comfy/submit.
-  const isComfy = job.env?.TUNET_MODE === 'comfy'
+  // the body to a comfy-specific layout. Detected by the cpfx_comfy tag (every
+  // comfy job carries it — web AND CLI submissions); see isComfyJob.
+  const isComfy = isComfyJob(job)
 
   return (
     <div className="space-y-5 animate-slide-in">
@@ -91,13 +94,24 @@ export default async function JobDetailPage({
             </Link>
           )}
           {isComfy ? (
-            <Link
-              href="/comfy"
-              className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#e5e7eb] text-[#374151] hover:bg-[#F9FAFB] transition-colors"
-              title="Start a new EZ-Comfy render"
-            >
-              New render
-            </Link>
+            <>
+              {!isLive && (
+                <Link
+                  href={`/comfy?clone=${job.id}`}
+                  className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#7E3AF2] text-[#7E3AF2] hover:bg-[#faf5ff] transition-colors"
+                  title="Start a new render pre-filled with this job's prompt + settings"
+                >
+                  Clone
+                </Link>
+              )}
+              <Link
+                href="/comfy"
+                className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#e5e7eb] text-[#374151] hover:bg-[#F9FAFB] transition-colors"
+                title="Start a new EZ-Comfy render"
+              >
+                New render
+              </Link>
+            </>
           ) : (
             <Link
               href={`/jobs/new?clone=${job.id}`}
@@ -138,6 +152,7 @@ export default async function JobDetailPage({
             <ComfyInfo label="GPU"    value={jobGpuDisplay(job)} />
             <ComfyInfo label="LoRA"   value={comfyLoraSummary(job.env)} mono />
           </div>
+          <ComfyRenderSettings job={job} />
           <section>
             <ComfyOutputsPanel job={job} />
           </section>
@@ -205,6 +220,48 @@ function ComfyInfo({ label, value, mono }: { label: string; value: string; mono?
       <span className="text-[10px] uppercase tracking-wider text-[#9ca3af] font-semibold">{label}</span>
       <span className={`text-sm text-[#111827] truncate ${mono ? 'font-mono' : ''}`} title={value}>{value}</span>
     </span>
+  )
+}
+
+/**
+ * The prompt + knobs a comfy render actually used, read from the TUNET_FORM_STATE
+ * env stash the submit route writes. Labels come from the preset's param `ui`
+ * metadata. Multiline params (prompt / negative) get full-width text blocks; the
+ * rest render as an inline label/value strip. Renders nothing for jobs submitted
+ * before the stash existed (older renders carry no recorded settings).
+ */
+function ComfyRenderSettings({ job }: { job: SparkJob }) {
+  const fs = parseComfyFormState(job.env?.TUNET_FORM_STATE)
+  if (!fs) return null
+
+  const params = loadComfyPreset(fs.presetKey)?.params ?? {}
+  const uiOf = (k: string) => (params[k]?.ui ?? {}) as { label?: string; widget?: string }
+  const labelOf = (k: string) => uiOf(k).label || k
+
+  const entries = Object.entries(fs.values)
+    .filter(([k, v]) => k !== 'video' && k !== 'mask' && k !== 'face' && v !== undefined && v !== null && v !== '')
+  if (entries.length === 0) return null
+
+  const prompts = entries.filter(([k]) => uiOf(k).widget === 'multiline')
+  const scalars = entries.filter(([k]) => uiOf(k).widget !== 'multiline')
+
+  return (
+    <section className="bg-white border border-[#e5e7eb] rounded-lg p-4 space-y-3">
+      <h2 className="text-sm font-semibold text-[#111827]">Render settings</h2>
+      {prompts.map(([k, v]) => (
+        <div key={k}>
+          <p className="text-[10px] uppercase tracking-wider text-[#9ca3af] font-semibold mb-1">{labelOf(k)}</p>
+          <p className="text-sm text-[#374151] whitespace-pre-wrap bg-[#F9FAFB] border border-[#f3f4f6] rounded-md px-3 py-2">
+            {String(v)}
+          </p>
+        </div>
+      ))}
+      {scalars.length > 0 && (
+        <div className="flex flex-wrap gap-x-6 gap-y-1.5 pt-1">
+          {scalars.map(([k, v]) => <ComfyInfo key={k} label={labelOf(k)} value={String(v)} mono />)}
+        </div>
+      )}
+    </section>
   )
 }
 

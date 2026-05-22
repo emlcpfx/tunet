@@ -92,6 +92,28 @@ export function Sidebar() {
             </Link>
           )
         })}
+
+        {/* Help — opens the standalone walkthrough (static /guide.html, no auth
+            gate; excluded from the middleware matcher). New tab so it doesn't
+            interrupt whatever the user was doing in the app. */}
+        <a
+          href="/guide.html"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors duration-150 text-[#374151] hover:bg-[#F9FAFB]"
+        >
+          <span className="text-[#6b7280]">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+              <path d="M12 17h.01"/>
+            </svg>
+          </span>
+          Help &amp; Guide
+          <svg className="ml-auto text-[#9ca3af]" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M7 17 17 7M7 7h10v10"/>
+          </svg>
+        </a>
       </div>
 
       {/* User */}

@@ -11,6 +11,7 @@ export interface SparkJob {
   image?:                   string
   command?:                 string[]
   env?:                     Record<string, string>
+  tags?:                    string[]
   output_share_sync_path?:  string
   instance_type_sku_id?:    number
   instance_type_name?:      string
@@ -36,6 +37,21 @@ export interface SparkJob {
   // across retry attempts. null until the first attempt completes. An
   // estimate — NOT the authoritative billed amount (Spark Fuse v1.17 §13.5.2).
   total_attempted_compute_cost_usd_estimate?: string | null
+}
+
+/** The grouping tag every EZ-Comfy job carries (added at submit alongside the
+ *  mandatory cpfx_tunet billing tag). See api/comfy/submit and comfy_spark. */
+export const COMFY_TAG = 'cpfx_comfy'
+
+/**
+ * Is this an EZ-Comfy render (vs a TuNet training run)? Detect by the cpfx_comfy
+ * TAG, which EVERY comfy job carries — both web (api/comfy/submit) and CLI
+ * (comfy_spark/comfy_launch.py) submissions. The older `TUNET_MODE === 'comfy'`
+ * env marker is only set by the web path, so CLI/other comfy jobs were misrouted
+ * to the training layout (no outputs/downloads); kept here as a fallback.
+ */
+export function isComfyJob(j: SparkJob): boolean {
+  return (j.tags ?? []).includes(COMFY_TAG) || j.env?.TUNET_MODE === 'comfy'
 }
 
 export const ACTIVE_STATUSES = new Set(['queued', 'provisioning', 'running'])
