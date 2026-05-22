@@ -7,7 +7,7 @@
  * The bearer stays server-side (same token spark.ts uses on api.* and files.*).
  */
 import 'server-only'
-import { getToken } from './spark'
+import { getToken, encodePathSegments } from './spark'
 
 export function spaceBase(): string {
   return (process.env.SPARK_FILES_BASE_URL ?? '').replace(/\/+$/, '')
@@ -44,8 +44,16 @@ export async function putControlFile(key: string, file: string, obj: unknown): P
   }
 }
 
-/** The job's output WebDAV base = space base + its output_share_sync_path. */
+/**
+ * The job's output WebDAV base = space base + its output_share_sync_path.
+ * The path segments are percent-encoded (e.g. "Spark Fuse Jobs" → "Spark%20Fuse%20Jobs")
+ * — without this the raw space lands in the job's meta.json and the in-container
+ * urllib upload rejects it ("URL can't contain control characters"). spaceBase()
+ * is already encoded (%24 for the space-id $); encodePathSegments is idempotent
+ * so it won't double-encode it.
+ */
 export function outputDavUrl(outputSharePath: string | null | undefined): string | null {
   if (!outputSharePath) return null
-  return `${spaceBase()}/${outputSharePath.replace(/^\/+/, '').replace(/\/+$/, '')}`
+  const rel = outputSharePath.replace(/^\/+/, '').replace(/\/+$/, '')
+  return `${spaceBase()}/${encodePathSegments(rel)}`
 }

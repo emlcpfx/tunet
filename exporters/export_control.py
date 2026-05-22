@@ -174,7 +174,10 @@ def _self_upload(files: list[str], out_dir: str, base: str, key: str, token: str
         logging.warning("[export-control] output ShareSync URL unknown — export saved to /output, "
                         "will sync to ShareSync when the job exits")
         return
-    dav = dav.rstrip('/')
+    # Encode any raw spaces the base URL may carry (e.g. ".../Spark Fuse Jobs/...")
+    # — urllib rejects URLs with control chars/spaces. Only spaces are at risk;
+    # existing %xx escapes are untouched (so no double-encoding).
+    dav = dav.rstrip('/').replace(' ', '%20')
     for f in files:
         rel   = os.path.relpath(f, out_dir).replace(os.sep, '/')  # e.g. exports/flame/foo.onnx
         parts = rel.split('/')

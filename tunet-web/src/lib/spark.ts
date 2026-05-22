@@ -395,7 +395,7 @@ export async function openLogStream(jobId: string): Promise<Response> {
  * first so we don't double-encode it to `Compute%2520Jobs`. A stray literal
  * '%' that can't be decoded falls back to encoding the segment as-is.
  */
-function encodePathSegments(p: string): string {
+export function encodePathSegments(p: string): string {
   return p
     .split('/')
     .map(seg => {
