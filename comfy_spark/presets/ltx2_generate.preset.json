@@ -86,6 +86,10 @@
       "ui": { "label": "Frames (length)", "widget": "number", "min": 9, "max": 497, "step": 8,
               "section": "Advanced", "order": 3,
               "tooltip": "Frame count; LTX REQUIRES 8*n+1 (..., 121, 161). Output container runs ~30fps here, so 121 frames ~= 4s. LTX-2.3 max ~10s @50fps (4K) or ~20s @25fps (1080p). (src: LTX-2.3 docs)" } },
+    "steps":    { "node": "4966", "path": "inputs.steps", "default": 15,
+      "ui": { "label": "Sampler steps", "widget": "number", "min": 6, "max": 40, "step": 1,
+              "section": "Advanced", "order": 4,
+              "tooltip": "Denoising steps (LTXVScheduler). 15 is the tuned baseline. More steps = cleaner detail/motion at higher cost; diminishing returns past ~25-30. CLI: --set 4966.inputs.steps <n>. (src: LTX-2.3 example workflow)" } },
     "video":    { "node": "2004", "path": "inputs.image" }
   }
 }

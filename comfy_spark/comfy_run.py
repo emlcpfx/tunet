@@ -55,6 +55,7 @@ Environment (set by comfy_launch.py):
 import base64
 import json
 import os
+import shutil
 import socket
 import struct
 import subprocess
@@ -102,7 +103,14 @@ def http_json(url, method="GET", payload=None, timeout=60):
 
 def download(url, dest, label="file"):
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    req = urllib.request.Request(url, headers={"User-Agent": "comfy_run/1.0"})
+    headers = {"User-Agent": "comfy_run/1.0"}
+    # Gated HF repos (e.g. Lightricks/LTX-2.3) return 401 without a token. Pass one
+    # through when present so license-gated weights download (set COMFY_HF_TOKEN /
+    # HF_TOKEN on the client; comfy_launch forwards it to the job env).
+    tok = env("COMFY_HF_TOKEN") or env("HF_TOKEN")
+    if tok and "huggingface.co" in url:
+        headers["Authorization"] = f"Bearer {tok}"
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
         total_mb = total / 1048576
@@ -144,26 +152,101 @@ def ensure_comfyui(comfy_home, bundle):
 
 
 def fetch_nodes(comfy_home, repos):
-    """Clone custom-node repos into custom_nodes and pip-install their reqs.
-    Idempotent: a repo already present is left as-is (warm-start reuse)."""
+    """Install custom-node packs into custom_nodes and pip-install their reqs.
+    Each entry is either:
+      - a git URL string  → `git clone --depth 1` (HEAD), or
+      - {"name","zip"}     → download+unzip a PINNED Comfy Registry version
+        (e.g. https://cdn.comfy.org/<owner>/<id>/<ver>/node.zip) to escape
+        upstream widget-schema drift (see EZ_COMFY / KJNodes 1.0.8 case).
+    Idempotent: a pack already present is left as-is (warm-start reuse)."""
     if not repos:
         return
     cn = os.path.join(comfy_home, "custom_nodes")
     os.makedirs(cn, exist_ok=True)
-    for url in repos:
-        name = url.rstrip("/").split("/")[-1]
-        dest = os.path.join(cn, name)
-        if os.path.isdir(dest):
-            log(f"node pack present: {name}")
-        else:
-            log(f"cloning node pack: {name}")
-            if subprocess.run(["git", "clone", "--depth", "1", url, dest]).returncode != 0:
-                log(f"WARNING: git clone failed for {name} — workflow may not load")
+    for entry in repos:
+        if isinstance(entry, dict) and entry.get("zip"):
+            name = entry.get("name") or entry["zip"].rstrip("/").split("/")[-1].replace(".zip", "")
+            dest = os.path.join(cn, name)
+            if os.path.isdir(dest):
+                log(f"node pack present (pinned): {name}")
+            elif not _fetch_node_zip(entry["zip"], dest, name):
                 continue
+        else:
+            url = entry
+            name = url.rstrip("/").split("/")[-1]
+            dest = os.path.join(cn, name)
+            if os.path.isdir(dest):
+                log(f"node pack present: {name}")
+            else:
+                log(f"cloning node pack: {name}")
+                if subprocess.run(["git", "clone", "--depth", "1", url, dest]).returncode != 0:
+                    log(f"WARNING: git clone failed for {name} — workflow may not load")
+                    continue
         req = os.path.join(dest, "requirements.txt")
         if os.path.isfile(req):
             log(f"pip install -r {name}/requirements.txt")
             subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", req])
+
+
+def _fetch_node_zip(url, dest, name):
+    """Download a Comfy Registry node.zip and extract it as custom_nodes/<name>.
+    The registry zip holds the pack files (sometimes under a single top dir);
+    flatten that case. Returns True on success."""
+    import zipfile, tempfile
+    log(f"downloading pinned node pack: {name} <- {url}")
+    tmp_zip = dest + ".zip"
+    try:
+        download(url, tmp_zip, f"{name}.zip")
+        tmp_dir = dest + ".unz"
+        if os.path.isdir(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        with zipfile.ZipFile(tmp_zip) as z:
+            z.extractall(tmp_dir)
+        # If the archive is a single top-level dir, use its contents as the pack.
+        entries = [e for e in os.listdir(tmp_dir) if not e.startswith("__MACOSX")]
+        root = (os.path.join(tmp_dir, entries[0])
+                if len(entries) == 1 and os.path.isdir(os.path.join(tmp_dir, entries[0]))
+                else tmp_dir)
+        shutil.move(root, dest)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log(f"WARNING: pinned fetch failed for {name} ({e}) — workflow may not load")
+        return False
+    finally:
+        for p in (tmp_zip, dest + ".unz"):
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            elif os.path.isfile(p):
+                os.remove(p)
+
+
+def precheck_model_access(comfy_home, models):
+    """Cheap 1-byte Range request per model URL BEFORE pulling any weight, so a
+    gated/inaccessible file (HTTP 401/403) fails the job FAST with a clear message
+    instead of after a 40+ GB download of the others. Skips files already present
+    and non-huggingface URLs we can't usefully precheck. Best-effort: a network
+    blip or odd status is ignored (the real download will surface it)."""
+    tok = env("COMFY_HF_TOKEN") or env("HF_TOKEN")
+    blocked = []
+    for m in models:
+        if os.path.isfile(os.path.join(comfy_home, m["dest"])) and os.path.getsize(os.path.join(comfy_home, m["dest"])) > 0:
+            continue
+        url = m["url"]
+        headers = {"User-Agent": "comfy_run/1.0", "Range": "bytes=0-0"}
+        if tok and "huggingface.co" in url:
+            headers["Authorization"] = f"Bearer {tok}"
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30):
+                pass                                    # 200/206 → accessible
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                blocked.append((m["dest"], e.code, url))
+        except Exception:                               # noqa: BLE001 — let download surface it
+            pass
+    if blocked:
+        lines = "\n".join(f"  HTTP {c}  {d}\n    {u}" for d, c, u in blocked)
+        sys.exit(f"ERROR: {len(blocked)} weight(s) gated/inaccessible — accept the repo "
+                 f"license and/or fix the HF token scope (no large download was started):\n{lines}")
 
 
 def fetch_models(comfy_home, models):
@@ -174,6 +257,46 @@ def fetch_models(comfy_home, models):
             log(f"model present: {m['dest']}")
             continue
         download(m["url"], dest, os.path.basename(dest))
+
+
+def ensure_input_audio(input_dir):
+    """AV-aware LTX graphs (faceswap, …) extract audio from the input clip via
+    VHS/ffmpeg; a SILENT clip (e.g. a VFX plate with no audio stream) makes that
+    fail with a non-zero ffmpeg exit and kills the render. Best-effort guard:
+    give any audio-less input video a silent stereo track (video stream COPIED,
+    so it's fast + lossless, container/name preserved). No-op when the clip
+    already has audio or ffmpeg/ffprobe are unavailable; never fatal."""
+    exts = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v")
+    if not os.path.isdir(input_dir):
+        return
+    for fn in os.listdir(input_dir):
+        ext = os.path.splitext(fn)[1].lower()
+        if ext not in exts:
+            continue
+        path = os.path.join(input_dir, fn)
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-loglevel", "error", "-select_streams", "a",
+                 "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
+                capture_output=True, text=True, timeout=60)
+            if probe.stdout.strip():
+                continue                                   # already has audio
+            acodec = "libopus" if ext == ".webm" else "aac"
+            tmp = path + ".audiofix" + ext
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", path,
+                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                 "-shortest", "-c:v", "copy", "-c:a", acodec, tmp],
+                capture_output=True, text=True, timeout=300)
+            if r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
+                os.replace(tmp, path)
+                log(f"audio guard: added silent track to {fn} (input had none)")
+            else:
+                if os.path.isfile(tmp):
+                    os.remove(tmp)
+                log(f"audio guard: could not add audio to {fn}: {r.stderr[:160]}")
+        except Exception as e:  # noqa: BLE001 — never fatal
+            log(f"audio guard: skipped {fn} ({e})")
 
 
 def relay(stream, prefix):
@@ -211,16 +334,247 @@ def _is_widget(definition):
     return isinstance(t, list) or t in WIDGET_SCALARS
 
 
+def _heal_combos(ct, inputs, info, raw_widgets):
+    """SELF-HEAL upstream widget drift: a node pack can rename/reorder a combo's
+    options between when a graph was authored and the version installed now, so a
+    saved widget value lands on the wrong combo input (e.g. ResizeImageMaskNode
+    gets scale_method='scale to multiple', but the live combo is interpolation
+    methods). For each combo input whose value isn't a valid option, swap in a
+    value from this node's own widget pool that IS valid; else fall back to the
+    combo's default / first option; else drop it (node default). Only acts on
+    INVALID combos, so healthy graphs are untouched. Returns repair notes."""
+    spec = info.get("input", {}) or {}
+    combos, defaults = {}, {}
+    for group in ("required", "optional"):
+        for name, d in (spec.get(group) or {}).items():
+            if not (isinstance(d, (list, tuple)) and d):
+                continue
+            meta = d[1] if len(d) > 1 and isinstance(d[1], dict) else {}
+            # object_info combo formats: v1 = [[opt,...], {meta}]; some nodes put
+            # the options in meta["options"] with d[0] a type tag ("COMBO"/"ENUM").
+            # object_info combo formats: v1 = [[opt,...], {meta}]; v3 IO nodes use
+            # ["COMBO", {"options":[opt,...], "default":...}] — handle both. Options
+            # must be STRINGS: a DynamicCombo also exposes "options" but as
+            # [{key,inputs},...] dicts — those are handled by the DynamicCombo
+            # mapper, NOT here (treating them as combo values corrupts the input).
+            opts = d[0] if isinstance(d[0], list) else meta.get("options")
+            # Only NON-EMPTY string-option lists. An empty list = a model dropdown
+            # with no weights downloaded (convert-only) — value is fine at render.
+            if isinstance(opts, list) and opts and all(isinstance(o, str) for o in opts):
+                combos[name] = opts
+                if "default" in meta:
+                    defaults[name] = meta["default"]
+    pool = [v for v in (raw_widgets or []) if isinstance(v, str)]
+    notes = []
+    for name, val in list(inputs.items()):
+        if name not in combos or not isinstance(val, str) or val in combos[name]:
+            continue
+        repl = next((v for v in pool if v in combos[name]), None)
+        if repl is None and name in defaults and defaults[name] in combos[name]:
+            repl = defaults[name]
+        if repl is None and combos[name]:
+            repl = combos[name][0]
+        if repl is not None:
+            inputs[name] = repl
+            notes.append(f"{ct}.{name}: '{val}' invalid -> '{repl}'")
+        else:
+            del inputs[name]
+            notes.append(f"{ct}.{name}: '{val}' invalid -> dropped (node default)")
+    return notes
+
+
+_SUBGRAPH_SKIP = {"Note", "MarkdownNote"}
+_SUBGRAPH_DATA = {"IMAGE", "LATENT", "MODEL", "CLIP", "VAE", "CONDITIONING", "MASK",
+                  "VIDEO", "AUDIO", "CLIP_VISION", "CONTROL_NET", "STYLE_MODEL",
+                  "GLIGEN", "UPSCALE_MODEL", "SIGMAS", "SAMPLER", "GUIDER", "NOISE"}
+
+
+def _inline_subgraph_instance(graph, inst, sub):
+    """Inline ONE subgraph instance into the flat graph (generalised from
+    presets/wan22.derive.py). Litegraph boundary virtual ids: inner links from
+    origin_id -10 are the subgraph's inputs, links to target_id -20 its outputs.
+    Promoted-widget boundary inputs keep their value on the inner node (link
+    dropped); real data wires (IMAGE/LATENT/…) are rewired across the boundary.
+    Renumbers only inner ids that collide with kept outer ids, and re-syncs each
+    node's inputs[].link / outputs[].links to the rebuilt links array (the
+    converter traces edges via inputs[].link — stale ids would prune the graph)."""
+    nodes, links = graph["nodes"], graph["links"]
+    base_nid = max([n["id"] for n in nodes] + [graph.get("last_node_id") or 0])
+    base_lid = max([l[0] for l in links] + [graph.get("last_link_id") or 0], default=0)
+
+    out_nodes = [n for n in nodes if n["id"] != inst["id"] and n.get("type") not in _SUBGRAPH_SKIP]
+    out_ids = {n["id"] for n in out_nodes}
+    new_links = [l for l in links if inst["id"] not in (l[1], l[3])]
+
+    inst_in_src = {}
+    for ii in inst.get("inputs", []):
+        if ii.get("link") is not None:
+            src = next((l for l in links if l[0] == ii["link"]), None)
+            if src:
+                inst_in_src[ii["name"]] = (src[1], src[2])
+    inst_out_dst = []
+    for oi in inst.get("outputs", []):
+        dsts = []
+        for lk in (oi.get("links") or []):
+            l = next((x for x in links if x[0] == lk), None)
+            if l:
+                dsts.append((l[3], l[4]))
+        inst_out_dst.append(dsts)
+
+    inner_keep = [n for n in sub["nodes"] if n.get("type") not in _SUBGRAPH_SKIP]
+    nid_map, nxt = {}, base_nid
+    for n in inner_keep:
+        if n["id"] in out_ids:
+            nxt += 1
+            nid_map[n["id"]] = nxt
+        else:
+            nid_map[n["id"]] = n["id"]
+    for n in inner_keep:
+        m = dict(n)
+        m["id"] = nid_map[n["id"]]
+        out_nodes.append(m)
+
+    sub_inputs = sub.get("inputs", [])
+    lid = base_lid
+
+    def add(src_n, src_s, dst_n, dst_s, typ):
+        nonlocal lid
+        lid += 1
+        new_links.append([lid, src_n, src_s, dst_n, dst_s, typ])
+
+    for il in sub.get("links", []):
+        oid, oslot = il["origin_id"], il["origin_slot"]
+        tid, tslot, typ = il["target_id"], il["target_slot"], il.get("type")
+        if tid == -20:                                  # boundary OUTPUT
+            if oid in nid_map and oslot < len(inst_out_dst):
+                for dst_n, dst_s in inst_out_dst[oslot]:
+                    add(nid_map[oid], oslot, dst_n, dst_s, typ)
+            continue
+        if tid not in nid_map:                          # target dropped (note)
+            continue
+        if oid == -10:                                  # boundary INPUT
+            bi = sub_inputs[oslot] if oslot < len(sub_inputs) else {}
+            if bi.get("type") in _SUBGRAPH_DATA:        # real data wire → rewire
+                src = inst_in_src.get(bi.get("name"))
+                if src:
+                    add(src[0], src[1], nid_map[tid], tslot, bi.get("type"))
+            # else: promoted widget — value already on the inner node, drop the link
+            continue
+        if oid not in nid_map:                          # origin dropped (note)
+            continue
+        add(nid_map[oid], oslot, nid_map[tid], tslot, typ)
+
+    # re-sync per-node connection metadata to the rebuilt links array
+    by_id = {n["id"]: n for n in out_nodes}
+    for n in out_nodes:
+        for s in (n.get("inputs") or []):
+            s["link"] = None
+        for o in (n.get("outputs") or []):
+            o["links"] = []
+    for lk in new_links:
+        lid_, src, sslot, dst, dslot = lk[0], lk[1], lk[2], lk[3], lk[4]
+        dn = by_id.get(dst)
+        if dn and dslot < len(dn.get("inputs") or []):
+            dn["inputs"][dslot]["link"] = lid_
+        sn = by_id.get(src)
+        if sn and sslot < len(sn.get("outputs") or []):
+            sn["outputs"][sslot].setdefault("links", []).append(lid_)
+
+    graph["nodes"] = out_nodes
+    graph["links"] = new_links
+    graph["last_node_id"] = max(n["id"] for n in out_nodes)
+    graph["last_link_id"] = lid
+
+
+def flatten_subgraphs(graph):
+    """Inline ComfyUI subgraph definitions so the flat UI→API converter can ingest
+    them (it is flat-graph only). Handles any number of subgraph definitions /
+    instances and nesting: repeatedly inline each instance (a node whose `type`
+    equals a subgraph definition id) until none remain. No-op if the graph has no
+    `definitions.subgraphs`."""
+    defs = (graph.get("definitions") or {}).get("subgraphs") or []
+    if not defs:
+        return graph
+    sub_by_id = {s["id"]: s for s in defs}
+    n = 0
+    for _ in range(2000):                               # guard against cycles
+        inst = next((nd for nd in graph["nodes"] if nd.get("type") in sub_by_id), None)
+        if inst is None:
+            break
+        _inline_subgraph_instance(graph, inst, sub_by_id[inst["type"]])
+        n += 1
+    graph.pop("definitions", None)
+    if n:
+        log(f"Flattened {n} subgraph instance(s) → flat graph ({len(graph['nodes'])} nodes).")
+    return graph
+
+
+def _map_widgets_dynamic_combo(inputs, ordered, wv, connected):
+    """Positional widget mapping for nodes that have a COMFY_DYNAMICCOMBO_V3 input
+    (ComfyUI v3 IO, e.g. core ResizeImageMaskNode's `resize_type`). A DynamicCombo
+    serializes to the API as:  inputs[id] = <selected option key>  PLUS the SELECTED
+    option's nested inputs as  inputs[id.<nested>] = <value>  (the `parent.child`
+    prefix the frontend uses). The flat mapper skips it (it isn't a scalar/combo
+    widget), leaving the node missing a required arg at execute time — this rebuilds
+    it from the option schema in object_info. Walks widgets_values in input order,
+    expanding a DynamicCombo into its selection + the chosen option's nested widgets;
+    wired nested inputs (already emitted as id.<nested> by the link pass) just
+    consume their stale value so following widgets stay aligned."""
+    idx = 0
+
+    def _skip_control():
+        nonlocal idx
+        if idx < len(wv) and isinstance(wv[idx], str) and wv[idx] in CONTROL_VALUES:
+            idx += 1
+
+    for name, d in ordered:
+        io_type = d[0] if isinstance(d, (list, tuple)) and d else None
+        if io_type == "COMFY_DYNAMICCOMBO_V3":
+            if idx >= len(wv):
+                break
+            sel = wv[idx]; idx += 1
+            inputs[name] = sel                              # selected option key
+            meta = d[1] if len(d) > 1 and isinstance(d[1], dict) else {}
+            opt = next((o for o in (meta.get("options") or []) if o.get("key") == sel), None)
+            nested = []
+            if opt:
+                ni = opt.get("inputs", {}) or {}
+                for g in ("required", "optional"):
+                    nested.extend((nid, ndef) for nid, ndef in (ni.get(g) or {}).items())
+            for nid, ndef in nested:
+                full = f"{name}.{nid}"
+                if full in connected:                       # wired → consume stale value
+                    if idx < len(wv):
+                        idx += 1; _skip_control()
+                elif _is_widget(ndef):
+                    if idx >= len(wv):
+                        break
+                    inputs[full] = wv[idx]; idx += 1; _skip_control()
+        elif _is_widget(d):
+            if name in connected:
+                if idx < len(wv):
+                    idx += 1; _skip_control()
+                continue
+            if idx >= len(wv):
+                break
+            inputs[name] = wv[idx]; idx += 1; _skip_control()
+        # else: pure socket input (no widget value to consume)
+
+
 def ui_to_api(graph, object_info):
     """Convert a ComfyUI UI/graph export to API (/prompt) format using the live
     node schema. Mirrors the frontend's graphToPrompt for the cases this tool
     targets: active nodes only, scalar/combo widgets, named or positional
     widgets_values, control_after_generate offsets. Bypassed (mode 4) and muted
     (mode 2) nodes are dropped — if a kept node depended on one, /prompt fails
-    loudly rather than rendering something wrong."""
+    loudly rather than rendering something wrong. Combo values that don't match
+    the live schema are self-healed (see _heal_combos); subgraph definitions are
+    inlined first (see flatten_subgraphs)."""
+    flatten_subgraphs(graph)
     links = {L[0]: (L[1], L[2]) for L in graph.get("links", [])}
     api = {}
     skipped = []
+    healed = []
     for node in graph["nodes"]:
         if node.get("mode", 0) in (2, 4):
             skipped.append((node["id"], node["type"]))
@@ -237,6 +591,11 @@ def ui_to_api(graph, object_info):
         for slot in node.get("inputs", []) or []:
             link_id = slot.get("link")
             name = slot.get("name")
+            # NOTE: a dotted input name like "num_guides.image_1" is a ComfyUI
+            # DynamicCombo (grouped dynamic input, e.g. KJNodes LTXVAddGuideMulti).
+            # The backend wants these GROUPED into a single "num_guides" structured
+            # value, which this flat converter does not synthesize — such graphs
+            # won't run until DynamicCombo support is added (see SMOKE_TEST_REPORT).
             if link_id is not None and link_id in links:
                 origin_node, origin_slot = links[link_id]
                 inputs[name] = [str(origin_node), origin_slot]
@@ -254,6 +613,12 @@ def ui_to_api(graph, object_info):
             for name, val in wv.items():
                 if name in valid and name not in connected:
                     inputs[name] = val
+        elif isinstance(wv, list) and any(
+                isinstance(d, (list, tuple)) and d and d[0] == "COMFY_DYNAMICCOMBO_V3"
+                for _, d in ordered):
+            # Node has a DynamicCombo input → use the DynamicCombo-aware mapper.
+            # (Scoped to these nodes so the well-tested flat path below is unchanged.)
+            _map_widgets_dynamic_combo(inputs, ordered, wv, connected)
         elif isinstance(wv, list):
             # Positional widget mapping. Two graphToPrompt subtleties:
             #  (a) a widget converted to an input socket usually leaves its stale
@@ -280,9 +645,14 @@ def ui_to_api(graph, object_info):
                 idx += 1
                 if idx < len(wv) and isinstance(wv[idx], str) and wv[idx] in CONTROL_VALUES:
                     idx += 1  # control_after_generate companion
+        healed += _heal_combos(ct, inputs, info, wv if isinstance(wv, list) else None)
         api[nid] = {"class_type": ct, "inputs": inputs}
     if skipped:
         log(f"Skipped {len(skipped)} muted/bypassed node(s): {skipped}")
+    if healed:
+        log(f"Self-healed {len(healed)} combo value(s) vs the live schema:")
+        for h in healed:
+            log(f"  • {h}")
     # Prune to nodes reachable from output nodes — graphToPrompt drops dead-ends
     # (loggers, previews, anything not feeding a save/output node). Including them
     # only invites validation errors on nodes that wouldn't even execute.
@@ -525,13 +895,19 @@ def validate_graph(port, workflow):
         return
     def _expected(er):
         # Errors that are artifacts of convert-only (no weights, no input clip),
-        # not conversion bugs: model COMBO files absent, and the input video/image
-        # files absent.
+        # not conversion bugs: model COMBO files absent, and the input clip absent.
         t = er.get("type")
         name = (er.get("extra_info") or {}).get("input_name")
-        if t == "value_not_in_list" and name in MODEL_INPUTS:
+        details = (er.get("details") or "").rstrip()
+        # A 'value not in list' against an EMPTY list means the dropdown had no
+        # options — i.e. the weights for that loader aren't downloaded (every
+        # convert-only model input looks like this). A NON-empty list with a bad
+        # value is a real graph/version bug. This catches model inputs generically
+        # without enumerating every loader's field name.
+        if t == "value_not_in_list" and (details.endswith("[]") or name in MODEL_INPUTS):
             return True
-        if t == "custom_validation_failed" and name in {"video", "audio", "image"}:
+        # Input media absent: LoadVideo uses 'file'; others use video/audio/image.
+        if t == "custom_validation_failed" and name in {"video", "audio", "image", "file"}:
             return True
         return False
 
@@ -545,6 +921,7 @@ def validate_graph(port, workflow):
         log(json.dumps(real, indent=1)[:3000])
     else:
         log("VALIDATION OK — /prompt accepted the graph (model files aside).")
+    return real
 
 
 def ws_progress(port, client_id, workflow):
@@ -627,11 +1004,28 @@ def ws_progress(port, client_id, workflow):
 
 
 def queue_prompt(port, workflow, client_id):
-    resp = http_json(f"http://{HOST}:{port}/prompt", method="POST",
-                     payload={"prompt": workflow, "client_id": client_id})
+    try:
+        resp = http_json(f"http://{HOST}:{port}/prompt", method="POST",
+                         payload={"prompt": workflow, "client_id": client_id})
+    except urllib.error.HTTPError as e:
+        # /prompt returns 400 with a JSON body listing the offending nodes+inputs.
+        # urlopen raises before we can read it — so capture + log it here, else the
+        # actual reason (e.g. "Value not in list", "Required input is missing") is lost.
+        body = ""
+        try:
+            body = e.read().decode()
+        except Exception:  # noqa: BLE001
+            pass
+        log(f"ERROR: ComfyUI rejected the workflow (HTTP {e.code}) at /prompt:")
+        try:
+            j = json.loads(body)
+            log(json.dumps(j.get("node_errors") or j, indent=2)[:4000])
+        except Exception:  # noqa: BLE001
+            log(body[:4000] or "(no response body)")
+        return None
     if "error" in resp or resp.get("node_errors"):
         log("ERROR: ComfyUI rejected the workflow:")
-        log(json.dumps(resp, indent=2)[:2000])
+        log(json.dumps(resp, indent=2)[:4000])
         return None
     return resp.get("prompt_id")
 
@@ -806,7 +1200,9 @@ def main():
         ensure_comfyui(comfy_home, env("COMFY_BUNDLE"))
         fetch_nodes(comfy_home, json.loads(env("COMFY_FETCH_NODES", "[]")))
         if not convert_only:
-            fetch_models(comfy_home, json.loads(env("COMFY_FETCH_MODELS", "[]")))
+            _models = json.loads(env("COMFY_FETCH_MODELS", "[]"))
+            precheck_model_access(comfy_home, _models)   # fail fast on gated 401/403
+            fetch_models(comfy_home, _models)
             lora_url = env("COMFY_LORA_URL")
             if lora_url:
                 download(lora_url, os.path.join(comfy_home, "models", "loras",
@@ -820,14 +1216,35 @@ def main():
     except Exception as e:  # noqa: BLE001 — fail the job loudly
         sys.exit(f"ERROR: environment assembly failed: {e}")
 
+    # 1b. Stage inputs into a WRITABLE dir. The Spark /input mount is read-only,
+    # so we can't preprocess in place (and nodes that mkdir under input, e.g. the
+    # 3D loader's /input/3d, warn). Copy the clips somewhere writable, point
+    # ComfyUI there, and run the silent-clip audio guard on the copies.
+    if not convert_only and os.path.isdir(input_dir):
+        stage_dir = os.path.join(comfy_home, "input_stage")
+        try:
+            os.makedirs(stage_dir, exist_ok=True)
+            for fn in os.listdir(input_dir):
+                src = os.path.join(input_dir, fn)
+                if os.path.isfile(src):
+                    shutil.copy2(src, os.path.join(stage_dir, fn))
+            input_dir = stage_dir
+            log(f"staged inputs to writable {stage_dir}")
+            ensure_input_audio(input_dir)
+        except Exception as e:  # noqa: BLE001 — fall back to the read-only mount
+            log(f"WARNING: input staging failed ({e}); using {input_dir} as-is")
+
     # 2. Launch ComfyUI --------------------------------------------------------
     extra = env("COMFY_EXTRA_ARGS", "")
     cmd = [sys.executable, "main.py", "--listen", HOST, "--port", str(port),
            "--input-directory", input_dir, "--output-directory", output_dir,
            "--disable-auto-launch"] + (extra.split() if extra else [])
     log(f"Starting ComfyUI: {' '.join(cmd)} (cwd={comfy_home})")
+    # OpenCV won't write EXR unless this is set at process start — needed by HDR /
+    # high-bit savers (e.g. LTXVHDRDecodePostprocess save_exr=True in ltx_hdr).
+    comfy_env = {**os.environ, "OPENCV_IO_ENABLE_OPENEXR": "1"}
     proc = subprocess.Popen(cmd, cwd=comfy_home, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+                            stderr=subprocess.STDOUT, text=True, bufsize=1, env=comfy_env)
     threading.Thread(target=relay, args=(proc.stdout, "  | "), daemon=True).start()
 
     exit_code = 1
@@ -886,10 +1303,12 @@ def main():
                 print(blob[i:i + 120], flush=True)
             print("===WF_API_B64_END===", flush=True)
             log("COMFY_CONVERT_ONLY set — emitted graph (to /output and log), skipping render.")
-            validate_graph(port, workflow)
+            real = validate_graph(port, workflow)
             upload_outputs(output_dir)
             hold_for_sync()
-            return 0
+            # Exit non-zero on a real validation failure so a smoke-test loop can
+            # gate on the job status (model/input-absence errors are filtered out).
+            return 1 if real else 0
 
         # 6. Queue + wait ------------------------------------------------------
         client_id = f"spark-{int(time.time())}"

@@ -111,6 +111,28 @@ def flatten(template_path):
             continue
         add(nid_map[oid], oslot, nid_map[tid], tslot, typ)
 
+    # Sync litegraph's per-node connection metadata to the rebuilt links array.
+    # CRITICAL: the UI->API converter (and ComfyUI) trace edges via each node's
+    # inputs[].link, NOT the links array alone — so stale inputs[].link (left
+    # pointing at the original/renumbered ids) makes the converter resolve nothing
+    # and prune the whole graph down to the output node. Null every slot, then set
+    # the data inputs from new_links; promoted-widget slots stay link=None (their
+    # value lives in widgets_values, which the converter maps from the schema).
+    by_id = {n["id"]: n for n in out_nodes}
+    for n in out_nodes:
+        for s in (n.get("inputs") or []):
+            s["link"] = None
+        for o in (n.get("outputs") or []):
+            o["links"] = []
+    for lk in new_links:
+        lid_, src, sslot, dst, dslot = lk[0], lk[1], lk[2], lk[3], lk[4]
+        dn = by_id.get(dst)
+        if dn and dslot < len(dn.get("inputs") or []):
+            dn["inputs"][dslot]["link"] = lid_
+        sn = by_id.get(src)
+        if sn and sslot < len(sn.get("outputs") or []):
+            sn["outputs"][sslot].setdefault("links", []).append(lid_)
+
     d["nodes"] = out_nodes
     d["links"] = new_links
     d["last_node_id"] = max(n["id"] for n in out_nodes)
@@ -132,6 +154,16 @@ def validate(d):
     # no leftover subgraph instance / virtual ids
     if any(n["id"] < 0 for n in d["nodes"]):
         errs.append("a virtual (-10/-20) node leaked into the flat graph")
+    # per-node inputs[].link must point at a real link in the array (the converter
+    # traces edges via inputs[].link — stale ids prune the graph). This is the bug
+    # the first Spark run hit; keep it caught here.
+    linkids = {l[0] for l in d["links"]}
+    for n in d["nodes"]:
+        for s in (n.get("inputs") or []):
+            lk = s.get("link")
+            if lk is not None and lk not in linkids:
+                errs.append(f"node {n['id']} {n.get('type')} input {s.get('name')!r} "
+                            f"has stale link {lk} (not in links array)")
     return errs
 
 

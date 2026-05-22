@@ -15,6 +15,8 @@
   "_TEMPLATE": "READY-TO-RUN. The TWO shared LTX-2.3 base weights (dev checkpoint, gemma text encoder) are pinned to real URLs — same two as ltx2_generate / ltx_hdr (verified). The distill LoRA is now PINNED to the cond-safe rank-72 variant (not the official rank-384, which dampens the canny/depth/pose conditioning this preset relies on) and the Union-Control IC-LoRA URL is REAL/verified. RUN --convert-only FIRST: it skips the weight pull and surfaces any missing node classes, which is how you confirm the preprocessor node_packs below are right.",
   "_CONTROL": "The graph wires ALL THREE preprocessors (canny 4991, pose 4986 DWPreprocessor, depth 5060/5061 VideoDepthAnything) into the union guide. Which one(s) drive the output depends on the graph's guide wiring; to favor one control type, mute the others or tune the guide via --set after pulling the converted workflow_api.json. Preprocessor MODELS (yolox_l.onnx + dw-ll_ucoco for pose, video_depth_anything_vits.pth for depth) are normally auto-downloaded by their node packs on first run; if a node errors 'model not found', add it to the models list.",
   "_HOWITRUNS": "No-build path: public base image, comfy_run.py clones node_packs (incl. the controlnet-aux + depth-anything preprocessors), downloads weights, converts UI->API, applies patches, optionally splices a Tier-1 --lora stack onto the checkpoint (anchor 3940), and renders. Heaviest cold start of the presets (base weights + preprocessor models).",
+  "_CONSTRAINTS": "IC-LoRA guide constraints (verified by smoke render): (1) output width/height must give an EVEN latent — i.e. each be divisible by 64 (a non-÷64 dim like height 288 -> latent 9 fails 'latent spatial size must be divisible by 2'); 512x512 works. (2) output frame count (length) must be >= the control clip's frame count, else 'conditioning frames exceed the length of the latent sequence' (a 48-frame control clip needs length >= 49, i.e. the next 8n+1). The init image (node 2004 -> LTXVImgToVideoConditionOnly 3159) is BYPASSED by default (node 5019 = true) — structural control comes from the reference VIDEO; the init image only sets the first frame when bypass is turned off.",
+  "_INITIMAGE": "Node 2004 (LoadImage) is the optional init/first-frame image, bypassed by default. It still needs a loadable file; a small placeholder is bundled (static_inputs) so the preset runs with just the control video. To actually use an init frame, pass your own image via --input plus --set 2004.inputs.image=<basename> and --set 5019.inputs.value=false.",
 
   "base": "ltx2.3-22b",
   "lora_catalog": "ltx2.loras.json",
@@ -30,6 +32,7 @@
   "extra_args": "",
 
   "workflow": "ltx_control.workflow.json",
+  "static_inputs": ["ic_placeholder.png"],
 
   "node_packs": [
     "https://github.com/Lightricks/ComfyUI-LTXVideo",
@@ -80,13 +83,13 @@
               "tooltip": "Lightricks' shipped LTX-2 negative (same one used across their example workflows)." } },
     "video":    { "node": "5001", "path": "inputs.file" },
     "width":    { "node": "3059", "path": "inputs.width", "default": 960,
-      "ui": { "label": "Width", "widget": "number", "min": 256, "max": 3840, "step": 32,
+      "ui": { "label": "Width", "widget": "number", "min": 256, "max": 3840, "step": 64,
               "section": "Advanced", "order": 1,
-              "tooltip": "LTX-2.3 up to 4K/UHD (3840x2160); pick from the Resolution dropdown above for known-good sizes (custom values safest divisible by 32). Best matched to the reference clip's aspect. 4K is heavy and only for clips <=10s. (src: LTX-2.3 docs)" } },
-    "height":   { "node": "3059", "path": "inputs.height", "default": 544,
-      "ui": { "label": "Height", "widget": "number", "min": 256, "max": 3840, "step": 32,
+              "tooltip": "LTX-2.3 up to 4K/UHD (3840x2160). For THIS IC-LoRA preset keep width divisible by 64 (the guide needs an even latent; a non-÷64 size errors 'latent must be divisible by 2'). Best matched to the reference clip's aspect. 4K is heavy and only for clips <=10s. (src: LTX-2.3 docs)" } },
+    "height":   { "node": "3059", "path": "inputs.height", "default": 576,
+      "ui": { "label": "Height", "widget": "number", "min": 256, "max": 3840, "step": 64,
               "section": "Advanced", "order": 2,
-              "tooltip": "LTX-2.3 up to 4K/UHD; pick from the Resolution dropdown above for known-good sizes (custom values safest divisible by 32). Match the reference clip's aspect. (src: LTX-2.3 docs)" } },
+              "tooltip": "LTX-2.3 up to 4K/UHD. Keep divisible by 64 for this IC-LoRA preset (even latent). Default 576 (was 544, which gives an odd latent and fails the guide). Match the reference clip's aspect. (src: LTX-2.3 docs)" } },
     "length":   { "node": "3059", "path": "inputs.length", "default": 121,
       "ui": { "label": "Frames (length)", "widget": "number", "min": 9, "max": 497, "step": 8,
               "section": "Advanced", "order": 3,

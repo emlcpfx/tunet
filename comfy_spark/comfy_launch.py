@@ -901,6 +901,15 @@ def main():
             input_files.append(args.mask)
         if args.face:
             input_files.append(args.face)
+        # Static inputs the preset bundles (e.g. a placeholder for an optional/
+        # bypassed loader so the graph runs without a user-supplied second image).
+        # Packed by basename, like any input; the workflow references them so.
+        for sf in (preset.get("static_inputs") or []):
+            sp = os.path.join(PRESETS_DIR, os.path.basename(sf))
+            if os.path.isfile(sp):
+                input_files.append(sp)
+            else:
+                print(f"[warn] static_input {sf!r} not found at {sp}")
         # Presets that declare a `mask` param (e.g. VACE inpainting) need one to
         # render — fail early with the static-vs-video hint rather than at execution.
         if "mask" in preset.get("params", {}) and not args.mask and not args.convert_only:
@@ -914,6 +923,9 @@ def main():
             "prompt": effective_prompt, "negative": args.negative,
             "strength": args.strength, "fps": args.fps, "lora": lora_name,
             "video": os.path.basename(args.video) if args.video else None,
+            # i2v presets name the primary input param "image" (it's a start image,
+            # not a clip); the positional arg feeds it just like a "video" param.
+            "image": os.path.basename(args.video) if args.video else None,
             "mask": os.path.basename(args.mask) if args.mask else None,
             "face": os.path.basename(args.face) if args.face else None,
         }
@@ -988,6 +1000,11 @@ def main():
         "COMFY_RUN_ID": uuid.uuid4().hex,
         "COMFY_UPLOAD_TOKEN": get_token(),
     }
+    # Forward a HuggingFace token (if set locally) so gated weights download on the
+    # node — e.g. Lightricks/LTX-2.3 returns 401 otherwise.
+    _hf = os.environ.get("COMFY_HF_TOKEN") or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+    if _hf:
+        env_vars["COMFY_HF_TOKEN"] = _hf
     if patches_to_pack:
         env_vars["COMFY_PATCHES"] = "/input/patches.json"
     if args.convert_only:
@@ -1077,7 +1094,11 @@ def main():
             print(f"          + {l['name']} @ {l['strength']}  ({l['file']})")
     if args.convert_only:
         print(f"        convert   : emit converted api.json to ShareSync, no render")
-    print(f"        env       : {json.dumps(env_vars)}")
+    # Redact secrets from the printed plan — these env vars still go to the job
+    # (the node needs them), but they shouldn't sit in local stdout/logs.
+    _safe_env = {k: ("<redacted>" if any(s in k.upper() for s in ("TOKEN", "SECRET", "PASSWORD", "KEY"))
+                     else v) for k, v in env_vars.items()}
+    print(f"        env       : {json.dumps(_safe_env)}")
     if patch_ops:
         print("        patches   :")
         for op in patch_ops:

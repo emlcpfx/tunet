@@ -14,6 +14,7 @@
 
   "_TEMPLATE": "READY-TO-RUN. The TWO shared LTX-2.3 base weights (dev checkpoint, gemma text encoder) are pinned to real URLs — the SAME two as ltx2_generate, now verified/pinned. The distill LoRA is now PINNED to the cond-safe rank-72 variant (not the official rank-384) and the HDR IC-LoRA URL itself is REAL/verified. Run --convert-only FIRST (skips the weight pull) to confirm the graph converts and to discover any missing node_packs from the validation errors, then fill weights and render.",
   "_HOWITRUNS": "Same no-build path as the other presets: public base image, comfy_run.py clones node_packs, downloads weights, converts the UI graph to API, applies patches, optionally splices a Tier-1 --lora stack onto the checkpoint (anchor 3940), and renders.",
+  "_CONSTRAINTS": "Output dims should give an even latent (each divisible by 64) for the IC-LoRA guide. HDR output is written as float16 EXR frames (LTXVHDRDecodePostprocess save_exr) — comfy_run sets OPENCV_IO_ENABLE_OPENEXR=1 so OpenCV can write them; a render yields a sequence of frame_#####.exr (plus an mp4 preview). The HDR IC-LoRA weight is gated (Lightricks/LTX-2.3-22b-IC-LoRA-HDR) — accept its HF license for the token's account or the weight download 403s.",
 
   "base": "ltx2.3-22b",
   "lora_catalog": "ltx2.loras.json",

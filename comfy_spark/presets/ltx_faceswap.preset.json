@@ -14,7 +14,7 @@
 
   "_HOWITRUNS": "No-build path (same as the other presets): the public yanwk image runs comfy_run.py, which clones node_packs, downloads the 6 weights onto the Spark node, converts ltx_faceswap.workflow.json (UI graph) -> API via /object_info, applies patches, optionally splices a Tier-1 --lora stack onto the head-swap LoRA (anchor 573), and renders. ALL weights are pinned/verified, so unlike the IC-LoRA presets this is NOT a template — it can run as-is. ~30 GB is fetched on a COLD start (use --idle-hold to keep a warm node). --convert-only skips the model pull and validates the converted graph cheaply.",
   "_DERIVED": "The shipped workflow is NOT the raw Alisson graph. presets/ltx_faceswap.derive.py flattens it for Spark (the raw graph can't convert as-is): (1) flattens ~68 KJNodes Set/Get virtual nodes into direct links — comfy_run's converter has no Set/Get resolution; (2) reconnects through the bypassed alt-LoRA loaders (419/537) onto the head-swap LoRA; (3) rewires the final text encode straight from the 'Positive Prompt' box (498), dropping the Ollama auto-prompt path (OllamaVideoDescriber hits localhost:11434, which doesn't exist on Spark); (4) bypasses the abliterated-gemma CLIP LoRA (424, weight not pinned — re-enable + add its weight for uncensored prompts); (5) mutes the custom-audio loader + the 2 comparison-preview combiners + the dead upscaler loader, leaving node 341 SaveVideo as the single output. Re-run the derive if the upstream graph moves.",
-  "_MODELNOTE": "The UNETLoader is pointed at Kijai's verified 'ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled' (the same distilled 2.3-22b transformer the Obscura preset uses). Alisson's raw graph referenced a private re-quant ('..._input_scaled_v3'); if likeness/quality is off, swap the UNETLoader widget + the models entry for that exact build. The head-swap LoRA is the V3 rank-adaptive (fro-0.98) file; the V3 rank_64 variant is the alternative.",
+  "_MODELNOTE": "The UNETLoader is pointed at the EXACT build Alisson's V3 graph specifies: Kijai's 'ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3' (Kijai/LTX2.3_comfy — the same repo our other weights come from). This was originally substituted with 'distilled-1.1_..._fp8_scaled' on the wrong assumption that the input_scaled_v3 build was private; it's public, and matching it matters — a head-swap LoRA is fit to its base weights, so the revision (base distilled vs 1.1) and quant (input_scaled vs scaled) both affect motion/likeness. The head-swap LoRA is the V3 rank-adaptive (fro-0.98) file; the V3 rank_64 variant is the alternative.",
   "_AUDIO": "LTX-2.3 is audio-aware: the active audio rides the BODY VIDEO's own audio track (node 345 -> the AV-latent path -> CreateVideo). A clip WITH audio gives the best lip motion; a silent clip may need the audio path muted. There is no separate audio input flag — supply audio in the body video.",
   "_GUIDE_MASK": "V3 persistent-template (ReservedRegionFrameComposer, node 360): the face image is composited into a green chroma-key strip on the left, 256px, every frame (chroma is internal only — the final video is the original framing). Per the model card: a SQUARE-ish, well-lit, frontal/3-4 face reference gives the most stable identity; LoRA strength 1.0 is the baseline (>1.0 = stronger identity/hair capture but can distort motion). Mask/face quality matters more than raising strength.",
 
@@ -44,8 +44,8 @@
   ],
 
   "models": [
-    { "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/diffusion_models/ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors",
-      "dest": "models/diffusion_models/ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors" },
+    { "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/diffusion_models/ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors",
+      "dest": "models/diffusion_models/ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors" },
     { "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors",
       "dest": "models/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors" },
     { "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/text_encoders/ltx-2.3_text_projection_bf16.safetensors",
@@ -88,10 +88,10 @@
               "tooltip": "Head-swap LoRA strength. 1.0 is the recommended baseline (best motion fidelity). >1.0 captures identity/hair harder but can distort the original motion; lower if the body/motion warps. Mask + face-reference quality matter more than raising this. (src: BFS V3 model card)" } },
     "video":    { "node": "345", "path": "inputs.video" },
     "face":     { "node": "269", "path": "inputs.image" },
-    "resolution": { "node": "362", "path": "inputs.value", "default": 1024,
+    "resolution": { "node": "362", "path": "inputs.value", "default": 768,
       "ui": { "label": "Base resolution (largest side)", "widget": "number", "min": 512, "max": 1536, "step": 32,
               "section": "Advanced", "order": 1,
-              "tooltip": "The longest output dimension; the other side follows the body clip's aspect. V3 was trained around 768; 1024 is a good default. Higher = sharper but heavier and can wander. Divisible by 32. (src: BFS V3 trained at 768 buckets)" } },
+              "tooltip": "The longest output dimension; the other side follows the body clip's aspect. 768 is what V2/V3 were trained at and what the model card recommends for inference — going higher (e.g. 1024) pushes the model off-distribution and tends to melt the frame. Best framing is close-up / landscape. Divisible by 32. (src: BFS V3 model card — '768 is the recommended inference resolution')" } },
     "fps":      { "node": "358", "path": "inputs.value", "default": 24,
       "ui": { "label": "Frame rate (fps)", "widget": "number", "min": 1, "max": 50, "step": 1,
               "section": "Advanced", "order": 2,
@@ -99,6 +99,14 @@
     "duration": { "node": "427", "path": "inputs.value", "default": 5,
       "ui": { "label": "Duration (seconds)", "widget": "number", "min": 1, "max": 20, "step": 1,
               "section": "Advanced", "order": 3,
-              "tooltip": "Length of the swap in seconds (frames = duration x fps, capped to the body clip). LTX-2.3 max ~10s @50fps or ~20s @25fps. (src: LTX-2.3 docs)" } }
+              "tooltip": "Length of the swap in seconds (frames = duration x fps, capped to the body clip). LTX-2.3 max ~10s @50fps or ~20s @25fps. (src: LTX-2.3 docs)" } },
+    "steps":    { "node": "575", "path": "inputs.steps", "default": 8,
+      "ui": { "label": "Sampler steps", "widget": "number", "min": 4, "max": 30, "step": 1,
+              "section": "Advanced", "order": 4,
+              "tooltip": "Denoising steps for the distilled transformer (bong_tangent schedule). 8 is the tuned baseline. If the swap looks rough or the mouth jitters, try 12-16 — more steps = cleaner motion/detail at higher cost, with diminishing returns past ~20 on a distilled model. CLI: --set 575.inputs.steps <n>." } },
+    "seed":     { "node": "377", "path": "inputs.noise_seed", "default": 0,
+      "ui": { "label": "Seed", "widget": "number", "min": 0, "max": 4294967295, "step": 1,
+              "section": "Advanced", "order": 5,
+              "tooltip": "Random seed. Change it to roll a different result when a take looks cursed; keep it fixed to reproduce one. Same seed + same inputs = same output. CLI: --set 377.inputs.noise_seed <n>." } }
   }
 }

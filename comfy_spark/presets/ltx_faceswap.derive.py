@@ -72,7 +72,7 @@ PASSTHROUGH = {"LoraLoaderModelOnly": {0: "model"},
 
 # filenames the preset's `models` list saves the weights as (must match loaders)
 HEADSWAP_LORA_NAME = "ltxv/ltx2/head_swap_v3_rank_adaptive_fro_098.safetensors"
-UNET_NAME = "ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors"
+UNET_NAME = "ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors"
 
 VIRTUAL_SETGET = {"SetNode", "GetNode"}
 
@@ -192,6 +192,38 @@ def flatten_bypassed_loras(wf):
     return rewired
 
 
+def swap_guide_multi_to_batch(wf):
+    """LTXVAddGuideMulti uses a ComfyUI **DynamicCombo** input (`num_guides`, a
+    single structured value the frontend assembles from image_1/frame_idx_1/
+    strength_1). The flat UI->API converter can't synthesize a DynamicCombo, so
+    the node fails ('unexpected keyword argument'). Swap it for KJNodes'
+    `LTXVAddGuidesFromBatch`, which takes plain inputs `images` (IMAGE batch) +
+    `strength` — converter-friendly. The single V3 guide (node 360's
+    persistent-template output, present on every frame) becomes the images batch.
+    Both nodes return (positive, negative, latent), so downstream is unchanged."""
+    swapped = 0
+    for n in wf["nodes"]:
+        if n.get("type") != "LTXVAddGuideMulti":
+            continue
+        wv = n.get("widgets_values") or []
+        strength = wv[2] if len(wv) >= 3 else 1.0          # [count, frame_idx, strength]
+        n["type"] = "LTXVAddGuidesFromBatch"
+        n["widgets_values"] = [strength]
+        kept = []
+        for ins in (n.get("inputs") or []):
+            nm = ins.get("name", "")
+            if nm in ("positive", "negative", "vae", "latent"):
+                kept.append(ins)
+            elif nm.endswith("image_1") or ins.get("label") == "image_1":
+                ins["name"] = "images"            # the guide image → images batch
+                ins.pop("label", None)
+                kept.append(ins)
+            # drop any other num_guides.* sub-input sockets (frame_idx_*, strength_*)
+        n["inputs"] = kept
+        swapped += 1
+    return swapped
+
+
 def derive(src):
     wf = load(src)
     rewire_prompt_to_manual(wf)
@@ -207,8 +239,10 @@ def derive(src):
     node(wf, N_UNET)["widgets_values"][0] = UNET_NAME
     n_virtual = flatten_setget(wf)               # Set/Get first: concrete links
     n_bypass = flatten_bypassed_loras(wf)        # then reconnect bypassed loaders
+    n_guide = swap_guide_multi_to_batch(wf)      # DynamicCombo -> batch guide node
     print(f"flattened {n_virtual} Set/Get virtual node(s); "
-          f"rewired {n_bypass} link(s) through bypassed LoRA loaders")
+          f"rewired {n_bypass} link(s) through bypassed LoRA loaders; "
+          f"swapped {n_guide} LTXVAddGuideMulti -> LTXVAddGuidesFromBatch")
     return wf
 
 
