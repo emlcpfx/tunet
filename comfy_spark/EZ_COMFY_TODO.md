@@ -249,17 +249,26 @@ chains splice, all links resolve) + launcher dry-runs; GUI dropdown added.)
 - [ ] **Colour**: verify `sRGB`→`sRGB Linear` in `ColorspaceNode` gives a correct
       scene-linear EXR (vs double-applying a transform). Spot-check in Nuke.
 
-### Input image-sequence ingestion (EXR/DPX in) — NOT built yet (next step)
-The symmetric input side of the output system, and the other half of the user's
-"exr/dpx general image sequence support" ask. Design (mirror the output rewrite):
-- [ ] `--input-sequence DIR` packs a frame folder into the tarball (`/input/seq/`).
-- [ ] `comfy_run` rewrites the graph's primary input loader → a sequence loader
-      (`LoadExrSequence` from CoCoTools_IO for EXR, or a folder image loader),
-      rewiring its IMAGE output to wherever the old loader fed (the input analog of
-      `find_output_anchor` / `output_anchor`).
-- [ ] Colour on **ingest**: EXR plates are scene-linear → convert linear→sRGB for
-      the model, then the output side converts back. Get the round-trip right.
-- [ ] DPX in (10-bit log) via CoCoTools too.
+### Input image-sequence ingestion (`--input-sequence`) — EXR built, never run
+The symmetric input side of the output system. `comfy_launch` auto-detects a
+numbered sequence in the folder, packs it to `/input/seq/`, and `comfy_run.rewrite_input`
+**swaps the preset's IMAGE-batch loader in place** for CoCoTools `LoadExrSequence`
+(IMAGE on slot 0, so consumers keep their links), inserts a `ColorspaceNode`
+(scene-linear EXR → display sRGB), and drops the old loader's audio/fps outputs.
+Validated structurally on a synthetic VHS_LoadVideo graph (swap, colour insert,
+consumer rewire, audio drop, links resolve) + launcher dry-run on `ltx_Obscura_Remova`.
+- [ ] **First Spark run**: `--input-sequence ./plate_exr` on a v2v preset; confirm
+      `LoadExrSequence` reads `/input/seq/shot_####.exr` and the swapped graph renders.
+- [ ] **Colour round-trip**: linear→sRGB on ingest vs sRGB→linear on `--output exr32`
+      — verify a plate survives EXR-in → EXR-out without a colour shift (check in Nuke).
+- [ ] **HDR / >1.0 plates**: `normalize=False` keeps values; confirm the model path
+      doesn't clip super-whites badly (or expose `normalize`).
+- [ ] **DPX + PNG/TIFF folders**: only EXR has a loader wired (others error clearly).
+      Add DPX (needs a DPX sequence loader — not in CoCoTools) and a folder image
+      loader (VHS `LoadImagesPath`) keyed by `seq.kind` in `comfy_run.build_seq_loader`.
+- [ ] **VIDEO-object loaders**: presets whose input is core `LoadVideo` (VIDEO out,
+      e.g. `wan_vace_inpaint`) aren't swappable in place — would need an IMAGE→VIDEO
+      bridge (`CreateVideo`). Currently auto-detect skips them; document/handle.
 
 ### Rollout (not done)
 - [ ] Preset/derive files need a **`-SkipWeb` repo deploy** to the prod VPS —

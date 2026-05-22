@@ -72,3 +72,8 @@ The existing six presets are the reference — match their tone and depth.
   its terminal node isn't a `CreateVideo`/`SaveImage`/`VHS_VideoCombine` (i.e.
   auto-detect can't find the final IMAGE). Add a new format by editing the registry
   (save-node chain + `node_pack`), not code. mp4 stays the default preview.
+- **Input sequences** (`--input-sequence DIR`, v2v presets): `comfy_run.rewrite_input`
+  swaps the preset's IMAGE-batch loader (auto-detected `VHS_LoadVideo`/`LoadImage`,
+  or a preset's `input_anchor: {node}`) in place for CoCoTools `LoadExrSequence` and
+  inserts a scene-linear→sRGB `ColorspaceNode`. EXR only today; new kinds = a
+  `build_seq_loader` entry. Core `LoadVideo` (VIDEO-object) presets aren't swappable.
