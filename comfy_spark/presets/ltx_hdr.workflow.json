@@ -1323,7 +1323,7 @@
         "ver": "82bd963cdeb66d023bed8c99324a307020907ef8"
       },
       "widgets_values": [
-        "ltxv/ltx2/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+        "ltxv/ltx2/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors",
         0.5
       ]
     },
@@ -3103,7 +3103,7 @@
       },
       "5125": {
         "inputs": {
-          "lora_name": "ltxv/ltx2/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+          "lora_name": "ltxv/ltx2/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors",
           "strength_model": 0.5,
           "model": [
             "3940",

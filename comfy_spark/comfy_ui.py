@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from tkinter import filedialog, ttk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +31,19 @@ DEFAULT_CATALOG = "ltx2.loras.json"
 
 GPU_CHOICES = ["t4", "a10", "l4", "l40s", "l40sx4", "rtxpro6000", "rtxpro6000x8"]
 CUSTOM_LORA = "(custom URL…)"  # sentinel option in the LoRA picker
+
+
+def _load_output_formats():
+    """Output-format names from outputs/outputs.json (drives the format dropdown)."""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "outputs.json")
+    try:
+        with open(p, encoding="utf-8") as f:
+            return list((json.load(f).get("formats") or {}).keys()) or ["mp4"]
+    except Exception:
+        return ["mp4"]
+
+
+OUTPUT_CHOICES = _load_output_formats()
 # Friendly params map to dedicated flags (so e.g. prompt gets trigger injection);
 # every other declared param is driven generically via --set node.path=value.
 FRIENDLY = {"prompt": "--prompt", "negative": "--negative",
@@ -251,6 +265,9 @@ class App:
         ui = preset.get("ui", {})
         self.title_lbl.config(text=ui.get("title", preset.get("description", "")[:90]))
 
+        # plain-language "what is this?" panel + canonical docs link(s)
+        self._about_section(preset)
+
         # primary input
         prim = ui.get("primary_input")
         needs_input = preset.get("requires_input", True)
@@ -259,8 +276,14 @@ class App:
         # (e.g. wan_vace_inpaint). The launcher auto-picks the static vs mask-video
         # graph from the file extension, so the GUI just needs to pass the path.
         self.mask_var = tk.StringVar()
+        # a face/identity reference image picker, shown for face-swap presets that
+        # declare a `face` param (e.g. ltx_faceswap). Label/tooltip/filetypes come
+        # from the preset's ui.secondary_input metadata when present.
+        self.face_var = tk.StringVar()
         has_mask = "mask" in preset.get("params", {})
-        if prim or needs_input or has_mask:
+        has_face = "face" in preset.get("params", {})
+        sec = ui.get("secondary_input") or {}
+        if prim or needs_input or has_mask or has_face:
             f = ttk.LabelFrame(self.form_host, text="Input", padding=8)
             f.pack(fill="x", pady=6)
             if prim or needs_input:
@@ -278,13 +301,19 @@ class App:
                                 ["All files", "*.*"]],
                                "White = the region to inpaint/remove. A video extension auto-"
                                "selects the per-frame mask-video graph.")
+            if has_face:
+                self._file_row(f, sec.get("label", "Face reference image"), self.face_var,
+                               sec.get("filetypes",
+                                       [["Image", "*.png *.jpg *.jpeg *.webp"], ["All files", "*.*"]]),
+                               sec.get("tooltip", "The identity to swap in (a clear, well-lit "
+                                       "frontal face works best)."))
 
         # declared knobs, grouped by section
         params = preset.get("params", {})
         sections = {}
         for name, spec in params.items():
-            if name == "mask":
-                continue  # handled by the dedicated mask file row above
+            if name in ("mask", "face"):
+                continue  # handled by the dedicated file rows above
             pui = spec.get("ui")
             # sensible fallback: render prompt/negative even without ui metadata
             if not pui and name in ("prompt", "negative"):
@@ -312,6 +341,62 @@ class App:
 
         # output dir + compute
         self._tail_section(preset)
+
+    @staticmethod
+    def _docs_links(preset):
+        """Normalize a preset's `docs` field to [(label, url)]. Accepts a bare URL
+        string, a list of URLs, or a list of {label,url} objects."""
+        docs = preset.get("docs")
+        if not docs:
+            return []
+        if isinstance(docs, str):
+            return [("docs", docs)]
+        out = []
+        for d in docs:
+            if isinstance(d, str):
+                out.append(("docs", d))
+            elif isinstance(d, dict) and d.get("url"):
+                out.append((d.get("label", "docs"), d["url"]))
+        return out
+
+    def _about_section(self, preset):
+        """A plain-English 'what is this workflow' card: what it does, what it
+        takes, the knobs that matter, tags, and clickable links to the canonical
+        docs. Driven entirely by the preset's `about` / `tags` / `docs` metadata."""
+        about = preset.get("about") or {}
+        tags = preset.get("tags") or []
+        links = self._docs_links(preset)
+        if not (about or tags or links):
+            return
+        frame = ttk.LabelFrame(self.form_host, text="About this workflow", padding=8)
+        frame.pack(fill="x", pady=6)
+
+        def field(label, text):
+            row = ttk.Frame(frame)
+            row.pack(fill="x", anchor="w", pady=1)
+            ttk.Label(row, text=label, width=13, anchor="nw",
+                      font=("Segoe UI", 9, "bold")).pack(side="left")
+            ttk.Label(row, text=text, wraplength=620, justify="left").pack(
+                side="left", fill="x", expand=True)
+
+        if about.get("what"):
+            field("What it does", about["what"])
+        if about.get("inputs"):
+            field("Inputs", about["inputs"])
+        if about.get("key_knobs"):
+            field("Key settings", about["key_knobs"])
+        if tags:
+            field("Tags", "   ".join(tags))
+        if links:
+            row = ttk.Frame(frame)
+            row.pack(fill="x", anchor="w", pady=(3, 1))
+            ttk.Label(row, text="Docs", width=13, anchor="nw",
+                      font=("Segoe UI", 9, "bold")).pack(side="left")
+            for label, url in links:
+                link = tk.Label(row, text=f"{label} ↗", fg="#2a6fdb", cursor="hand2",
+                                font=("Segoe UI", 9, "underline"))
+                link.pack(side="left", padx=(0, 12))
+                link.bind("<Button-1>", lambda _e, u=url: webbrowser.open(u))
 
     def _file_row(self, parent, label, var, filetypes, tip, on_change=None):
         row = ttk.Frame(parent)
@@ -559,6 +644,22 @@ class App:
                     width=5).pack(side="left")
         _help(r2, "Only used when Mode = smart: re-launches on preemption [0–5]. Ignored in instant mode.").pack(side="left", padx=6)
 
+        # Output format (high-bit EXR / ProRes). mp4 = the preset's own preview output.
+        r2c = ttk.Frame(frame)
+        r2c.pack(fill="x", pady=3)
+        ttk.Label(r2c, text="Output format", width=18).pack(side="left")
+        self.output_var = tk.StringVar(value="mp4")
+        ttk.Combobox(r2c, textvariable=self.output_var, values=OUTPUT_CHOICES, state="readonly",
+                     width=14).pack(side="left")
+        _help(r2c, "mp4 = the preset's built-in preview. exr32/exr16 = scene-linear OpenEXR "
+                   "sequence for Nuke/AE; prores_* = high-bit ProRes video. Any non-mp4 choice is "
+                   "ADDED alongside the mp4 preview.").pack(side="left", padx=6)
+        ttk.Label(r2c, text="Output fps").pack(side="left", padx=(16, 4))
+        self.output_fps_var = tk.IntVar(value=24)
+        ttk.Spinbox(r2c, from_=1, to=120, increment=1, textvariable=self.output_fps_var,
+                    width=6).pack(side="left")
+        _help(r2c, "Frame rate for video outputs (ProRes). Ignored for EXR/PNG sequences.").pack(side="left", padx=6)
+
         r3 = ttk.Frame(frame)
         r3.pack(fill="x", pady=3)
         ttk.Label(r3, text="Job name", width=18).pack(side="left")
@@ -584,6 +685,10 @@ class App:
         if mask:
             argv += ["--mask", mask]
 
+        face = self.face_var.get().strip()
+        if face:
+            argv += ["--face", face]
+
         for name, getter in self.param_getters.items():
             val = getter()
             if val is None or val == "":
@@ -603,6 +708,9 @@ class App:
                  "--idle-hold", str(self.idle_var.get())]
         if self.mode_var.get() == "smart":
             argv += ["--max-retries", str(self.retries_var.get())]
+        if self.output_var.get() and self.output_var.get() != "mp4":
+            argv += ["--output", self.output_var.get(),
+                     "--output-fps", str(self.output_fps_var.get())]
         name = self.name_var.get().strip()
         if name:
             argv += ["--name", name]

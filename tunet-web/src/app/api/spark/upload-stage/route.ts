@@ -43,7 +43,10 @@ export const maxDuration = 300
 // extraFiles bundle just like a Spark-source resume would.
 // 'comfy_input' is the EZ-Comfy input clip (a single video, uploaded as raw
 // chunks via uploadCheckpoint-style streaming → staged at <stage>/comfy_input/).
-const ALLOWED_ROLES = new Set(['src', 'dst', 'val_src', 'val_dst', 'mask', 'checkpoint', 'comfy_input'])
+// 'comfy_input2' is the EZ-Comfy SECONDARY input for two-input presets (the face
+// reference image for ltx_faceswap, or the mask for wan_vace_inpaint) — same raw
+// chunked upload, into the same stage under a second role dir.
+const ALLOWED_ROLES = new Set(['src', 'dst', 'val_src', 'val_dst', 'mask', 'checkpoint', 'comfy_input', 'comfy_input2'])
 
 function stageDir(stageId: string): string {
   return path.join(os.tmpdir(), 'tunet-stages', stageId)

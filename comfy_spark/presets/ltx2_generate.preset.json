@@ -1,7 +1,18 @@
 {
   "description": "LTX-2.3 22B image-to-video (and text-to-video) GENERATION — the natural home for stacking Tier-1 effect/style/camera LoRAs from the catalog. Graph: Lightricks/ComfyUI-LTXVideo example 'LTX-2.3_T2V_I2V_Single_Stage_Distilled_Full' (the cloud GemmaAPITextEncode nodes are bypassed; the local CLIPTextEncode + LTXAVTextEncoderLoader path is active, so no external API key is needed).",
 
-  "_TEMPLATE": "This preset ships as a TEMPLATE: the three model URLs below are REPLACE_ placeholders because the exact HF paths for the 'dev' checkpoint, the gemma text encoder, and the distilled-lora-384 weren't pinned. comfy_launch.py refuses to submit until you fill them in. Find them with the ComfyUI Manager / model downloader for this workflow (or the LTX-2 HF repos), drop the real 'resolve/main/...' URLs in, then run --convert-only ONCE to validate the converted graph before a paid render.",
+  "docs": [
+    { "label": "LTX-2 docs", "url": "https://docs.ltx.video" },
+    { "label": "Official ComfyUI example workflows", "url": "https://github.com/Lightricks/ComfyUI-LTXVideo/tree/master/example_workflows/2.3" }
+  ],
+  "tags": ["video", "ltx2.3", "text-to-video", "image-to-video", "generation", "lora-stacking", "ready-to-run"],
+  "about": {
+    "what": "Creates a brand-new video — either starting from one image you provide, or from a written description alone. This is the main place to add 'look' extras (style, camera moves, effects) from the LoRA list.",
+    "inputs": "A starting image (for image-to-video) and/or a written description of the scene and action. Optional style/effect add-ons.",
+    "key_knobs": "Prompt — one flowing paragraph covering scene, action, camera move and lighting. Frames — how long the clip is. Resolution — the output size."
+  },
+
+  "_TEMPLATE": "This preset is now FILLED / ready-to-run: the TWO model URLs below (dev checkpoint + gemma encoder) are pinned to real HF URLs — the 'dev' checkpoint and the gemma text encoder (Lightricks/LTX-2.3 + Comfy-Org/ltx-2, verified May 2026). Still run --convert-only ONCE to validate the converted graph before a paid render. NOTE on the distill LoRA: this no longer uses Lightricks' official rank-384 distilled LoRA — it ships the cond-safe rank-72 variant (TenStrip ...ceil72_condsafe) because the rank-384 LoRA is high-capacity enough to dampen conditioning signals on I2V / reference-driven inputs, which is exactly what this preset feeds it. The cond-safe build zeroes the cross-attention / adaLN scale-shift / gate layers, so conditioning passes through; it's safe up to strength 1.0 on a generation pass (the graph keeps its tuned 0.5 / 0.2). See README 'Cond-safe distill LoRA'.",
   "_HOWITRUNS": "Same no-build path as cleanplate: a public ComfyUI base image runs comfy_run.py, which seeds ComfyUI, clones node_packs, downloads the weights, converts the UI graph to API via /object_info, applies patches, splices the --lora stack onto the checkpoint's MODEL output (lora_chain anchor 3940 -> affects both the CFGGuider and MultimodalGuider passes), and renders. Heavier cold start than cleanplate (the dev checkpoint is large).",
   "_LORASTACK": "All --lora entries chain onto the checkpoint (anchor 3940) BEFORE the built-in distillation LoRAs' consumers, so a stacked effect/style LoRA layers with the distill LoRAs across both sampler passes. Effect LoRAs are i2v/t2v, which is exactly what this graph does — e.g. `--lora transition:1.0 shot.png --prompt '...'`.",
 
@@ -28,12 +39,12 @@
   ],
 
   "models": [
-    { "url": "REPLACE_WITH_DEV_CHECKPOINT_URL/ltx-2.3-22b-dev.safetensors",
+    { "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-dev.safetensors",
       "dest": "models/checkpoints/ltx-2.3-22b-dev.safetensors" },
-    { "url": "REPLACE_WITH_GEMMA_TEXT_ENCODER_URL/comfy_gemma_3_12B_it.safetensors",
+    { "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it.safetensors",
       "dest": "models/text_encoders/comfy_gemma_3_12B_it.safetensors" },
-    { "url": "REPLACE_WITH_DISTILL_LORA_URL/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
-      "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-distilled-lora-384-1.1.safetensors" }
+    { "url": "https://huggingface.co/TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments/resolve/main/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors",
+      "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors" }
   ],
 
   "ui": {

@@ -1415,7 +1415,7 @@
         "Node name for S&R": "LoraLoaderModelOnly"
       },
       "widgets_values": [
-        "ltxv/ltx2/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+        "ltxv/ltx2/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors",
         0.5
       ]
     },
@@ -1455,7 +1455,7 @@
         "Node name for S&R": "LoraLoaderModelOnly"
       },
       "widgets_values": [
-        "ltxv/ltx2/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+        "ltxv/ltx2/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors",
         0.2
       ]
     },

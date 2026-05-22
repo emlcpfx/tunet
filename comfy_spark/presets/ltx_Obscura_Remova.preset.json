@@ -1,6 +1,17 @@
 {
   "description": "LTX-2.3 (distilled fp8) video-to-video occlusion / foreground removal using the Obscura Remova LoRA. Graph: axiomgraph/ComfyUIWorkflow 'LTX 2.3 Obscura_Remova'.",
 
+  "docs": [
+    { "label": "Obscura Remova model card", "url": "https://huggingface.co/WepeNerd/Obscura_Remova" },
+    { "label": "LTX-2 docs", "url": "https://docs.ltx.video" }
+  ],
+  "tags": ["video", "ltx2.3", "video-to-video", "object-removal", "cleanplate", "no-mask", "lora-stacking", "ready-to-run"],
+  "about": {
+    "what": "Cleans unwanted things out of a video — a fence, a sign, a stray person, rigging — and rebuilds whatever should be behind them, frame by frame. You don't paint a mask: you just say what to take out. (Filmmakers call the result a 'clean plate'.)",
+    "inputs": "One video clip. Optionally, a short line saying what to remove.",
+    "key_knobs": "Prompt — what to remove, e.g. 'Remove the wooden fence from the foreground.' Strength — how hard it pushes (this graph starts at 2.3; lower it if parts you want to keep get distorted)."
+  },
+
   "_HOWITRUNS": "No-build path: a public ComfyUI base image (image) runs comfy_run.py, which on startup clones node_packs into custom_nodes and downloads models + the LoRA onto the Spark node, then converts ltx_Obscura_Remova.workflow.json (UI graph) to API format via /object_info and renders. Nothing is built or pushed; nothing large touches your computer. Trade-off: ~30 GB is fetched on each COLD start (use --idle-hold to keep a warm node between iterations). --convert-only skips the model download (only node classes are needed for conversion), so it's quick.",
   "_PARAMS": "Node ids come from the UI graph and are preserved through conversion; patches apply post-conversion, so paths target API format. Primitive nodes (432/302) use input name 'value' by convention; if a patch warns 'not in graph' or inputs look wrong, pull the converted workflow_api.json (written to ShareSync) and check field names.",
   "_LORASTACK": "Obscura is the built-in LoRA on node 427 (the workflow's purpose). Extra Tier-1 LoRAs from --lora are chained AFTER it via lora_chain (anchor 427): 326(UNET) -> 427(Obscura) -> your stack -> CFGGuider. Mostly useful for layering a style/effect on top of the cleanplate; for plain generation+effects use the ltx2_generate preset.",

@@ -375,6 +375,56 @@ def inject_lora_chain(workflow, loras, chain):
     return workflow
 
 
+# ── output-format rewrite (high-bit EXR / ProRes etc.) ───────────────────────
+
+# Terminal nodes whose `images` input carries the final RGB frames tensor — the
+# anchor we branch a high-bit saver off. Order = preference when several exist.
+OUTPUT_TERMINALS = ["CreateVideo", "VHS_VideoCombine", "SaveImage", "SaveAnimatedWEBP",
+                    "SaveAnimatedPNG", "SaveWEBM", "PreviewImage"]
+
+
+def find_output_anchor(workflow):
+    """The [node, slot] feeding the `images` input of a terminal save/video node —
+    i.e. the final frames tensor. Lets --output work on any preset without config."""
+    for cls in OUTPUT_TERMINALS:
+        for nid, node in workflow.items():
+            if node.get("class_type") == cls:
+                imgs = (node.get("inputs") or {}).get("images")
+                if isinstance(imgs, list) and len(imgs) == 2:
+                    return [str(imgs[0]), int(imgs[1])]
+    return None
+
+
+def rewrite_output(workflow, spec, anchor, prefix, fps, colorspace):
+    """Splice the chosen format's node chain onto the frames anchor as a PARALLEL
+    branch — the preset's own saver is left intact, so you still get the mp4
+    preview plus the chosen high-bit deliverable. chain[0].in reads the anchor;
+    each subsequent node reads the previous node's output."""
+    if not spec or not spec.get("chain"):
+        return workflow
+    anchor = anchor or find_output_anchor(workflow)
+    if not anchor:
+        log("WARNING: --output set but no frames anchor found (no terminal "
+            "CreateVideo/SaveImage with an 'images' input) — keeping the default output only.")
+        return workflow
+    linear = (colorspace or spec.get("default_colorspace", "as-is")) == "linear"
+    src, added = list(anchor), []
+    for i, step in enumerate(spec["chain"]):
+        if step.get("only_if_linear") and not linear:
+            continue
+        nid = f"out_{i}"
+        inputs = {}
+        for k, v in (step.get("inputs") or {}).items():
+            inputs[k] = prefix if v == "$PREFIX" else (float(fps) if v == "$FPS" else v)
+        inputs[step["in"]] = list(src)
+        workflow[nid] = {"class_type": step["class_type"], "inputs": inputs}
+        added.append(nid)
+        src = [nid, 0]
+    log(f"Output rewrite: +{' -> '.join(added)} ({spec.get('label', '?')}) "
+        f"off frames {anchor}{' [scene-linear]' if linear else ''}")
+    return workflow
+
+
 # ── prompt lifecycle ──────────────────────────────────────────────────────────
 
 # Model-name COMBO inputs whose "value not in list" errors are expected on
@@ -734,6 +784,16 @@ def main():
         if lora_stack and lora_chain:
             workflow = inject_lora_chain(workflow, lora_stack, lora_chain)
             # Re-emit so the saved/reusable api graph reflects the spliced stack.
+            with open(os.path.join(output_dir, "workflow_api.json"), "w") as f:
+                json.dump(workflow, f, indent=2)
+
+        # 5c. Output-format rewrite (high-bit EXR / ProRes; default mp4 = no-op) -
+        out_spec = json.loads(env("COMFY_OUTPUT_SPEC", "null"))
+        if out_spec:
+            workflow = rewrite_output(
+                workflow, out_spec, json.loads(env("COMFY_OUTPUT_ANCHOR", "null")),
+                env("COMFY_OUTPUT_PREFIX", "render"), env("COMFY_OUTPUT_FPS", "24"),
+                env("COMFY_OUTPUT_COLORSPACE"))
             with open(os.path.join(output_dir, "workflow_api.json"), "w") as f:
                 json.dump(workflow, f, indent=2)
 

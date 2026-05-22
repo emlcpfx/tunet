@@ -98,20 +98,29 @@ export async function uploadCheckpoint(
   return uploadRawChunked(file, 'checkpoint', onProgress)
 }
 
-/** EZ-Comfy input clip — same chunked raw upload, staged under 'comfy_input'. */
+/**
+ * EZ-Comfy input — same chunked raw upload, staged under 'comfy_input' by
+ * default. For two-input presets (face-swap, VACE mask), pass
+ * `{ role: 'comfy_input2', stageId }` to drop the SECONDARY file into the SAME
+ * stage as the primary clip, so submit can resolve both from one stageId.
+ */
 export async function uploadComfyInput(
   file: File,
   onProgress?: (sent: number, total: number) => void,
+  opts?: { role?: string; stageId?: string },
 ): Promise<{ stageId: string; filename: string; bytes: number }> {
-  return uploadRawChunked(file, 'comfy_input', onProgress)
+  return uploadRawChunked(file, opts?.role ?? 'comfy_input', onProgress, opts?.stageId)
 }
 
 async function uploadRawChunked(
   file: File,
   role: string,
   onProgress?: (sent: number, total: number) => void,
+  initialStageId?: string,
 ): Promise<{ stageId: string; filename: string; bytes: number }> {
-  let stageId = ''
+  // An initial stageId appends this file to an existing stage (under a new role
+  // dir); the first chunk still uses 'create' mode so it writes a fresh file.
+  let stageId = initialStageId ?? ''
   const total = file.size
   for (let start = 0; start < total; start += CHECKPOINT_CHUNK_BYTES) {
     const end = Math.min(start + CHECKPOINT_CHUNK_BYTES, total)

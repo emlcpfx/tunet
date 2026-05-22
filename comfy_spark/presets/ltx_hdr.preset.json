@@ -1,7 +1,18 @@
 {
   "description": "LTX-2.3 22B HDR enhancement via the IC-LoRA 'LTX-2.3-22b-IC-LoRA-HDR'. Video-to-video: feed an SDR clip, get an HDR-graded look. Graph: Lightricks/ComfyUI-LTXVideo example 'LTX-2.3_ICLoRA_HDR_Distilled' (cloud GemmaAPITextEncode bypassed → local encoder path). This is a TIER-2 / IC-LoRA preset: the IC-LoRA rides a model patch (LTXICLoRALoaderModelOnly) AND a guide-conditioning path (LTXAddVideoICLoRAGuide), so unlike Tier-1 catalog LoRAs it cannot be free-stacked — it ships as its own preset.",
 
-  "_TEMPLATE": "SKETCH / TEMPLATE. The three SHARED LTX-2.3 base weights (dev checkpoint, gemma text encoder, distilled-lora-384) are REPLACE_ placeholders — the SAME three as ltx2_generate; fill them once you've pinned the real HF URLs (comfy_launch.py blocks submit until then). The HDR IC-LoRA URL itself is REAL/verified. Run --convert-only FIRST (skips the weight pull) to confirm the graph converts and to discover any missing node_packs from the validation errors, then fill weights and render.",
+  "docs": [
+    { "label": "HDR IC-LoRA model card", "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-HDR" },
+    { "label": "LTX-2 docs", "url": "https://docs.ltx.video" }
+  ],
+  "tags": ["video", "ltx2.3", "video-to-video", "hdr", "color-grade", "ic-lora", "ready-to-run"],
+  "about": {
+    "what": "Takes an ordinary (SDR) video and re-grades it into an HDR look — brighter highlights and a wider range of light — while keeping the original motion and content.",
+    "inputs": "One video clip.",
+    "key_knobs": "Prompt — keep it tiny (the shipped example is literally 'HDR footage'); the look comes from the video itself, not a long description."
+  },
+
+  "_TEMPLATE": "READY-TO-RUN. The TWO shared LTX-2.3 base weights (dev checkpoint, gemma text encoder) are pinned to real URLs — the SAME two as ltx2_generate, now verified/pinned. The distill LoRA is now PINNED to the cond-safe rank-72 variant (not the official rank-384) and the HDR IC-LoRA URL itself is REAL/verified. Run --convert-only FIRST (skips the weight pull) to confirm the graph converts and to discover any missing node_packs from the validation errors, then fill weights and render.",
   "_HOWITRUNS": "Same no-build path as the other presets: public base image, comfy_run.py clones node_packs, downloads weights, converts the UI graph to API, applies patches, optionally splices a Tier-1 --lora stack onto the checkpoint (anchor 3940), and renders.",
 
   "base": "ltx2.3-22b",
@@ -28,12 +39,12 @@
   ],
 
   "models": [
-    { "url": "REPLACE_WITH_DEV_CHECKPOINT_URL/ltx-2.3-22b-dev.safetensors",
+    { "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-dev.safetensors",
       "dest": "models/checkpoints/ltx-2.3-22b-dev.safetensors" },
-    { "url": "REPLACE_WITH_GEMMA_TEXT_ENCODER_URL/comfy_gemma_3_12B_it.safetensors",
+    { "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it.safetensors",
       "dest": "models/text_encoders/comfy_gemma_3_12B_it.safetensors" },
-    { "url": "REPLACE_WITH_DISTILL_LORA_URL/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
-      "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-distilled-lora-384-1.1.safetensors" },
+    { "url": "https://huggingface.co/TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments/resolve/main/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors",
+      "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors" },
     { "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-HDR/resolve/main/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors",
       "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors" }
   ],

@@ -56,6 +56,8 @@ try:
 except ImportError:
     pass
 
+import comfy_resolve  # local module (same dir); EZ-Comfy dependency resolver
+
 # ── Spark Compute v1 ──────────────────────────────────────────────────────────
 
 SPARK_API = "https://api.prod.aapse1.sparkcloud.studio"
@@ -86,6 +88,23 @@ PRESETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "presets"
 LORAS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "loras")
 RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "comfy_run.py")
 DEFAULT_CATALOG = "ltx2.loras.json"
+OUTPUTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "outputs.json")
+
+
+def load_outputs():
+    """The output-format registry (outputs/outputs.json). Returns {} if absent."""
+    if not os.path.isfile(OUTPUTS_FILE):
+        return {}
+    with open(OUTPUTS_FILE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def print_outputs(reg):
+    fmts = reg.get("formats", {})
+    print(f"{len(fmts)} output format(s) (default '{reg.get('_default', 'mp4')}'):")
+    for name, spec in fmts.items():
+        print(f"  {name:14s} [{spec.get('kind','?'):8s}] {spec.get('label','')}")
+
 
 # ── Auth (self-contained; same shape as spark_launch.py) ──────────────────────
 
@@ -378,6 +397,67 @@ def inspect(workflow_path):
         print(f"  [{nid:>3}] {ct:<28} {lit_str}")
 
 
+# ── EZ-Comfy: resolve a workflow's dependencies (see comfy_resolve.py) ─────────
+
+def resolve_cmd(workflow_path, out_path=None, fetch=True):
+    res = comfy_resolve.resolve_workflow(comfy_resolve.load_graph(workflow_path), fetch=fetch)
+    print(f"{workflow_path}:\n")
+    print(comfy_resolve.format_report(res))
+    if out_path:
+        draft = comfy_resolve.to_draft_preset(res, os.path.basename(workflow_path))
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(draft, f, indent=2, ensure_ascii=False)
+        print(f"\nwrote draft preset -> {out_path}")
+        if res["unresolved"]:
+            print(f"  fill the {len(res['unresolved'])} REPLACE_ model URL(s), then --convert-only to validate.")
+
+
+def resolve_selftest(fetch=False):
+    """Resolve every shipped preset's workflow and diff against its hand-written
+    node_packs / models. The model diff is the hard correctness signal (a
+    declared weight the resolver misses is a regression); node-pack drift is a
+    warning, since hand lists go stale relative to the graph."""
+    preset_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "presets")
+    norm = comfy_resolve._norm_repo
+    regressions = 0
+    for fn in sorted(os.listdir(preset_dir)):
+        if not fn.endswith(".preset.json"):
+            continue
+        preset = json.load(open(os.path.join(preset_dir, fn), encoding="utf-8"))
+        wf = preset.get("workflow")
+        if not wf or not os.path.isfile(os.path.join(preset_dir, wf)):
+            continue
+        res = comfy_resolve.resolve_workflow(
+            comfy_resolve.load_graph(os.path.join(preset_dir, wf)), fetch=fetch)
+
+        want_packs = {norm(p) for p in (preset.get("node_packs") or [])}
+        got_packs  = set(res["node_packs"])
+        want_models = {m["dest"] for m in (preset.get("models") or [])}
+        got_models  = {m["dest"] for m in res["models"]} | {u["dest"] for u in res["unresolved"]}
+        missed_models = want_models - got_models   # regression: declared but not found
+
+        print(f"\n=== {fn}  (workflow {wf}) ===")
+        print(f"  node packs: want {len(want_packs)}, got {len(got_packs)}, "
+              f"match {len(want_packs & got_packs)}")
+        for p in sorted(want_packs - got_packs):
+            print(f"    - in preset, NOT resolved: {p}")
+        for p in sorted(got_packs - want_packs):
+            print(f"    + resolved, not in preset: {p}  [{res['node_pack_sources'].get(p,'?')}]")
+        print(f"  models: want {len(want_models)}, matched {len(want_models & got_models)}, "
+              f"resolver-extra {len(got_models - want_models)}")
+        for d in sorted(missed_models):
+            print(f"    ! MISSED declared model: {d}")
+        if res["unknown_nodes"]:
+            print(f"  unknown nodes: {', '.join(res['unknown_nodes'])}")
+        if res["ambiguous_nodes"]:
+            print(f"  ambiguous nodes: {', '.join(res['ambiguous_nodes'])}")
+        regressions += len(missed_models)
+
+    print(f"\n{'PASS' if regressions == 0 else 'FAIL'}: {regressions} missed declared model(s).")
+    if regressions:
+        sys.exit(1)
+
+
 # ── Preset layer ──────────────────────────────────────────────────────────────
 
 def load_preset(name):
@@ -388,6 +468,74 @@ def load_preset(name):
         sys.exit(f"ERROR: preset {name!r} not found. Available: {', '.join(avail) or '(none)'}")
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def iter_presets():
+    """(name, preset_dict) for every shipped preset, ordered by optional 'order' then name."""
+    if not os.path.isdir(PRESETS_DIR):
+        return []
+    items = []
+    for f in sorted(os.listdir(PRESETS_DIR)):
+        if not f.endswith(".preset.json"):
+            continue
+        try:
+            with open(os.path.join(PRESETS_DIR, f), encoding="utf-8") as fh:
+                items.append((f[: -len(".preset.json")], json.load(fh)))
+        except (OSError, ValueError):
+            pass
+    items.sort(key=lambda kv: (kv[1].get("order", 99), kv[0]))
+    return items
+
+
+def docs_links(preset):
+    """Normalize a preset's `docs` field to a list of (label, url). Accepts a bare
+    URL string, a list of URL strings, or a list of {label,url} objects."""
+    docs = preset.get("docs")
+    if not docs:
+        return []
+    if isinstance(docs, str):
+        return [("docs", docs)]
+    out = []
+    for d in docs:
+        if isinstance(d, str):
+            out.append(("docs", d))
+        elif isinstance(d, dict) and d.get("url"):
+            out.append((d.get("label", "docs"), d["url"]))
+    return out
+
+
+def print_presets(tag_filter=""):
+    """Plain-language catalog of the shipped presets — what each does, what it
+    takes, the knobs that matter, and a link to the canonical docs. Optional
+    `tag_filter` keeps only presets with a tag containing that text (case-insensitive)."""
+    tf = (tag_filter or "").strip().lower()
+    shown = 0
+    for name, p in iter_presets():
+        tags = [str(t) for t in p.get("tags", [])]
+        if tf and not any(tf in t.lower() for t in tags):
+            continue
+        shown += 1
+        ui = p.get("ui", {})
+        about = p.get("about") or {}
+        print(f"\n● {name}")
+        print(f"    {ui.get('title') or name}")
+        if tags:
+            print(f"    tags : {', '.join(tags)}")
+        if about.get("what"):
+            print(f"    What : {about['what']}")
+        if about.get("inputs"):
+            print(f"    Takes: {about['inputs']}")
+        if about.get("key_knobs"):
+            print(f"    Knobs: {about['key_knobs']}")
+        for label, url in docs_links(p):
+            print(f"    Docs : {url}  ({label})")
+        if not about:                       # un-migrated preset: at least show the dev blurb
+            print(f"    {p.get('description', '')[:200]}")
+    if tf:
+        print(f"\n{shown} preset(s) tagged ~{tag_filter!r}.")
+    else:
+        print(f"\n{shown} preset(s). Run one with --preset <name>; filter this list with "
+              f"--list-presets <tag> (e.g. face, removal, ltx2.3).")
 
 
 def resolve_preset_workflow(preset):
@@ -548,6 +696,9 @@ def main():
     ap.add_argument("--mask", help="(preset) mask file: a static image (.png/.jpg) OR a "
                     "per-frame mask video (.mp4/.mov/...). A video auto-selects the preset's "
                     "mask-video workflow. White = region to inpaint/remove")
+    ap.add_argument("--face", help="(preset) face/identity reference IMAGE for face-swap "
+                    "presets (e.g. ltx_faceswap). The body/motion clip is the positional arg; "
+                    "this is the identity to swap in")
     ap.add_argument("--lora", action="append", default=[], metavar="NAME[:STR]",
                     help="stack a Tier-1 LoRA: a catalog name or a direct .safetensors URL, "
                          "with optional :<strength> (e.g. --lora transition:1.2). Repeatable.")
@@ -574,9 +725,30 @@ def main():
     ap.add_argument("--no-tail", action="store_true", help="don't stream logs after submit")
     ap.add_argument("--download", metavar="DIR",
                     help="after the job finishes, pull its ShareSync outputs into DIR")
+    # output format (high-bit / EXR / ProRes) — splices a parallel saver on the node
+    ap.add_argument("--output", metavar="FORMAT",
+                    help="output format (see --list-outputs): mp4 (default preview), exr32, exr16, "
+                         "png16, tiff16, prores_hq, prores_4444, ... Adds a high-bit deliverable "
+                         "alongside the mp4 preview.")
+    ap.add_argument("--output-fps", type=float, default=24.0,
+                    help="(video --output like prores) frame rate for the encoded file [24]")
+    ap.add_argument("--colorspace", choices=["linear", "as-is"],
+                    help="override colour handling on --output (default: linear for EXR, as-is otherwise)")
+    ap.add_argument("--list-outputs", action="store_true", help="print the output-format registry and exit")
     ap.add_argument("--dry-run", action="store_true", help="patch + print the workflow and planned submit; don't submit")
     # housekeeping
     ap.add_argument("--inspect", metavar="WORKFLOW", help="print node ids/types of a workflow and exit")
+    ap.add_argument("--resolve", metavar="WORKFLOW",
+                    help="derive node packs + models for a workflow (EZ-Comfy) and exit")
+    ap.add_argument("--resolve-out", metavar="FILE",
+                    help="(with --resolve) write a draft .preset.json")
+    ap.add_argument("--no-fetch", action="store_true",
+                    help="(with --resolve) skip the ComfyUI-Manager DB fetch; use embedded + seed map only")
+    ap.add_argument("--resolve-selftest", action="store_true",
+                    help="resolve every shipped preset's workflow and diff vs its hand-written lists")
+    ap.add_argument("--list-presets", nargs="?", const="", metavar="TAG",
+                    help="list shipped presets in plain language (what each does, what it takes, "
+                         "key knobs, docs link). Pass a TAG to filter (e.g. --list-presets face)")
     ap.add_argument("--list-skus", action="store_true")
     ap.add_argument("--list-loras", action="store_true", help="print the LoRA catalog and exit")
     ap.add_argument("--list-jobs", action="store_true")
@@ -585,8 +757,14 @@ def main():
     args = ap.parse_args()
 
     # ── housekeeping sub-commands ─────────────────────────────────────────────
+    if args.list_presets is not None:        # const="" when bare, so `is not None`
+        return print_presets(args.list_presets)
     if args.inspect:
         return inspect(args.inspect)
+    if args.resolve:
+        return resolve_cmd(args.resolve, args.resolve_out, fetch=not args.no_fetch)
+    if args.resolve_selftest:
+        return resolve_selftest(fetch=not args.no_fetch)
     if args.list_skus:
         for s in list_skus():
             print(f"  {s['instanceType']:20s}  {s['gpuCount']}× {s['gpuType']:28s}  {s['gpuMemoryGb']}GB")
@@ -606,6 +784,9 @@ def main():
         pre = load_preset(args.preset) if args.preset else {}
         cat_name = args.catalog or pre.get("lora_catalog") or DEFAULT_CATALOG
         print_catalog(load_catalog(cat_name))
+        return
+    if args.list_outputs:
+        print_outputs(load_outputs())
         return
 
     # ── resolve config from preset (if any) ───────────────────────────────────
@@ -671,16 +852,23 @@ def main():
             input_files.insert(0, args.video)
         if args.mask:
             input_files.append(args.mask)
+        if args.face:
+            input_files.append(args.face)
         # Presets that declare a `mask` param (e.g. VACE inpainting) need one to
         # render — fail early with the static-vs-video hint rather than at execution.
         if "mask" in preset.get("params", {}) and not args.mask and not args.convert_only:
             sys.exit("ERROR: this preset needs a mask: pass --mask mask.png (one static "
                      "region) or --mask mask.mp4 (per-frame mask video). White = inpaint area.")
+        # Face-swap presets declare a `face` param: the identity reference image.
+        if "face" in preset.get("params", {}) and not args.face and not args.convert_only:
+            sys.exit("ERROR: this preset needs a face reference image: pass --face face.png "
+                     "(the identity to swap in). The body/motion clip is the positional arg.")
         flag_values = {
             "prompt": effective_prompt, "negative": args.negative,
             "strength": args.strength, "fps": args.fps, "lora": lora_name,
             "video": os.path.basename(args.video) if args.video else None,
             "mask": os.path.basename(args.mask) if args.mask else None,
+            "face": os.path.basename(args.face) if args.face else None,
         }
         for pname, spec in preset.get("params", {}).items():
             val = flag_values.get(pname)
@@ -772,10 +960,30 @@ def main():
         env_vars["COMFY_HOME"] = preset["comfy_home"]
     if preset.get("comfy_bundle"):
         env_vars["COMFY_BUNDLE"] = preset["comfy_bundle"]
-    if preset.get("node_packs"):
-        env_vars["COMFY_FETCH_NODES"] = json.dumps(preset["node_packs"])
+    node_packs = list(preset.get("node_packs") or [])
     if preset.get("models"):
         env_vars["COMFY_FETCH_MODELS"] = json.dumps(preset["models"])
+
+    # ── output format: splice a high-bit saver onto the frames (default mp4 = no-op) ──
+    out_fmt = args.output
+    if out_fmt and out_fmt != (load_outputs().get("_default") or "mp4"):
+        reg = load_outputs()
+        spec = (reg.get("formats") or {}).get(out_fmt)
+        if not spec:
+            sys.exit(f"ERROR: unknown --output {out_fmt!r}. See --list-outputs.")
+        if spec.get("kind") != "builtin":
+            env_vars["COMFY_OUTPUT_SPEC"] = json.dumps(spec)
+            env_vars["COMFY_OUTPUT_FPS"] = str(args.output_fps)
+            env_vars["COMFY_OUTPUT_PREFIX"] = job_name
+            env_vars["COMFY_OUTPUT_COLORSPACE"] = args.colorspace or spec.get("default_colorspace", "as-is")
+            if preset.get("output_anchor"):           # explicit anchor wins; else auto-detect on node
+                a = preset["output_anchor"]
+                env_vars["COMFY_OUTPUT_ANCHOR"] = json.dumps([str(a["node"]), int(a.get("slot", 0))])
+            if spec.get("node_pack") and spec["node_pack"] not in node_packs:
+                node_packs.append(spec["node_pack"])   # clone the saver's pack on the node
+
+    if node_packs:
+        env_vars["COMFY_FETCH_NODES"] = json.dumps(node_packs)
 
     # ── dry run: show what would happen ───────────────────────────────────────
     print(f"\n[comfy] {'DRY RUN — ' if args.dry_run else ''}submit plan")
@@ -785,6 +993,16 @@ def main():
     print(f"        tags      : {BILLING_TAG}, {GROUP_TAG}{''.join(', ' + t for t in args.tag)}")
     print(f"        inputs    : {[os.path.basename(p) for p in input_files] or '(none)'}")
     print(f"        format    : {'UI graph → converts on Spark' if is_ui else 'API (patched locally)'}")
+    if env_vars.get("COMFY_OUTPUT_SPEC"):
+        _os = json.loads(env_vars["COMFY_OUTPUT_SPEC"])
+        print(f"        output    : {args.output} — {_os.get('label','')} "
+              f"[{env_vars.get('COMFY_OUTPUT_COLORSPACE')}]"
+              f"{', fps ' + env_vars['COMFY_OUTPUT_FPS'] if _os.get('kind')=='video' else ''}"
+              f" + the preset's mp4 preview")
+    elif args.output and args.output != "mp4":
+        print(f"        output    : {args.output}")
+    for _label, _url in docs_links(preset):
+        print(f"        docs      : {_url}  ({_label})")
     if lora_stack:
         anchor = preset["lora_chain"].get("anchor")
         print(f"        lora stack: spliced on node {anchor} (MODEL) —")

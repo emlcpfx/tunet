@@ -1,0 +1,53 @@
+{
+  "description": "Train an IMAGE-ONLY LTX-2.3 style / identity LoRA on Spark Fuse with the official Lightricks ltx-trainer. Feed a folder of stills + a trigger word; you get back a stackable .safetensors LoRA in ShareSync that drops straight into comfy_spark's --lora. This is the easiest, most reliable kind to train first (no motion to learn) — see README 'Training your own LoRA'. Motion / IC-LoRA recipes come later (kind: video / ic-lora).",
+
+  "_TEMPLATE": "Both base weights are FILLED — no placeholders, runs as-is (modulo the first-real-run validation tracked in EZ_COMFY_TODO.md). The 'dev' checkpoint is the single .safetensors the trainer's --model-path wants. The gemma encoder is NOT the single ComfyUI file the generation presets use: the ltx-trainer's --text-encoder-path wants a full gemma transformers MODEL DIRECTORY (verified against the trainer's configuration-reference: 'Path to the Gemma text encoder model directory'). google/gemma-3-12b-it is GATED, so this recipe points at the UNGATED unsloth/gemma-3-12b-it mirror (same weights, no token), snapshot-downloaded on the node. To use the canonical gated Google repo instead, set the gemma entry's hf_repo to google/gemma-3-12b-it and pass --hf-token. Validate cheaply first with --dry-run (prints the dataset.json + resolved YAML + the exact container command sequence, spends nothing).",
+  "_HOWITRUNS": "No-build path mirroring comfy_spark: a public CUDA-13 base image runs lora_train_run.py, which clones Lightricks/LTX-2, 'uv sync's the ltx-trainer env, downloads the base weights onto the node, (optionally) auto-captions any un-captioned image, runs scripts/process_dataset.py to cache latents, writes a YAML from this recipe, runs scripts/train.py, then self-uploads the trained LoRA to the job's ShareSync folder. Heavy cold start (weights + uv env); use --idle-hold to keep a warm node across iterations.",
+
+  "base": "ltx2.3-22b",
+  "kind": "image",
+
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "repo": "https://github.com/Lightricks/LTX-2",
+  "trainer_subdir": "packages/ltx-trainer",
+  "python": "python3.13",
+  "gpu": "rtxpro6000",
+  "mode": "instant",
+
+  "resolution": "960x544",
+
+  "lora":         { "rank": 32, "alpha": 32, "dropout": 0.0 },
+  "optimization": { "learning_rate": 1e-4, "steps": 2000, "batch_size": 1, "gradient_accumulation_steps": 1 },
+  "checkpoints":  { "interval": 250, "keep_last_n": -1 },
+  "validation":   { "interval": 250, "inference_steps": 30,
+                    "prompts": [ "a portrait, soft natural light, shallow depth of field", "a wide landscape at golden hour" ] },
+
+  "low_vram": false,
+  "auto_caption": true,
+
+  "models": [
+    { "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-dev.safetensors",
+      "dest": "models/ltx-2.3-22b-dev.safetensors" },
+    { "hf_repo": "unsloth/gemma-3-12b-it",
+      "dest": "models/gemma-3-12b-it",
+      "note": "Ungated mirror of google/gemma-3-12b-it (no HF license/token needed). The ltx-trainer --text-encoder-path wants this whole MODEL DIRECTORY, so it's snapshot-downloaded on the node. To use the canonical gated Google repo, set hf_repo to google/gemma-3-12b-it and pass --hf-token." }
+  ],
+
+  "ui": {
+    "title": "Train an LTX-2.3 style / identity LoRA (image-only)",
+    "primary_input": {
+      "label": "Dataset folder (images)",
+      "tooltip": "A folder of 20-50 stills for a style/look, or 30-100 for a specific face/object. Optional same-named .txt files become captions; anything without one is auto-captioned on the node. Give it a distinctive --trigger word (e.g. 'rax_style').",
+      "kind": "directory"
+    }
+  },
+
+  "params": {
+    "rank":     { "ui": { "label": "Rank", "widget": "number", "min": 8, "max": 128, "step": 8, "section": "Advanced", "order": 1,
+                          "tooltip": "LoRA capacity. 32 is the LTX-2.3 default and the right starting point. Higher = more capacity but bigger files + more overfitting risk; lower generalizes better. Stay in 16-64 for concept/style work." } },
+    "steps":    { "ui": { "label": "Training steps", "widget": "number", "min": 200, "max": 6000, "step": 50, "section": "Advanced", "order": 2,
+                          "tooltip": "How long to train. Validate previews around 500-750 steps; beyond ~1000 watch for overfitting (LoRA reproduces your data verbatim and ignores prompts). Default 2000." } },
+    "low_vram": { "ui": { "label": "Low-VRAM mode (48GB cards)", "widget": "bool", "section": "Advanced", "order": 3,
+                          "tooltip": "Enables INT8 quantization + 8-bit text encoder so training fits a 48GB (l40s) card. Off = the comfortable 80GB+ path (rtxpro6000)." } }
+  }
+}

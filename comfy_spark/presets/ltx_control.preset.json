@@ -1,7 +1,18 @@
 {
   "description": "LTX-2.3 22B structural control via the 'LTX-2.3-22b-IC-LoRA-Union-Control' IC-LoRA — canny / depth / pose conditioning from a reference video. You give it a control/reference clip; on Spark it extracts canny edges (CannyEdgePreprocessor), depth (VideoDepthAnything), and pose (DWPreprocessor), and the union IC-LoRA steers generation to follow that structure. TIER-2 / IC-LoRA: rides a model patch + a guide-conditioning path, so it's its own preset (not a stackable catalog LoRA). Graph: Lightricks/ComfyUI-LTXVideo example 'LTX-2.3_ICLoRA_Union_Control_Distilled'.",
 
-  "_TEMPLATE": "SKETCH / TEMPLATE. The three SHARED LTX-2.3 base weights (dev checkpoint, gemma text encoder, distilled-lora-384) are REPLACE_ placeholders — fill the real HF URLs (same three as ltx2_generate / ltx_hdr). The Union-Control IC-LoRA URL is REAL/verified. RUN --convert-only FIRST: it skips the weight pull and surfaces any missing node classes, which is how you confirm the preprocessor node_packs below are right.",
+  "docs": [
+    { "label": "Union-Control IC-LoRA model card", "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control" },
+    { "label": "LTX-2 docs", "url": "https://docs.ltx.video" }
+  ],
+  "tags": ["video", "ltx2.3", "video-to-video", "structural-control", "canny", "depth", "pose", "ic-lora", "ready-to-run"],
+  "about": {
+    "what": "Makes a new video that copies the shape and movement of a reference clip — its outlines (canny), its depth, or the people's body poses — so the result moves like the reference but looks like whatever your prompt describes.",
+    "inputs": "A reference video (its motion and shape are traced for you) and a written description of the new look.",
+    "key_knobs": "Prompt — describes the new scene (NOT the structure; that comes from the reference). The three structure guides — outlines, depth, pose — are all on by default; mute the ones you don't want."
+  },
+
+  "_TEMPLATE": "READY-TO-RUN. The TWO shared LTX-2.3 base weights (dev checkpoint, gemma text encoder) are pinned to real URLs — same two as ltx2_generate / ltx_hdr (verified). The distill LoRA is now PINNED to the cond-safe rank-72 variant (not the official rank-384, which dampens the canny/depth/pose conditioning this preset relies on) and the Union-Control IC-LoRA URL is REAL/verified. RUN --convert-only FIRST: it skips the weight pull and surfaces any missing node classes, which is how you confirm the preprocessor node_packs below are right.",
   "_CONTROL": "The graph wires ALL THREE preprocessors (canny 4991, pose 4986 DWPreprocessor, depth 5060/5061 VideoDepthAnything) into the union guide. Which one(s) drive the output depends on the graph's guide wiring; to favor one control type, mute the others or tune the guide via --set after pulling the converted workflow_api.json. Preprocessor MODELS (yolox_l.onnx + dw-ll_ucoco for pose, video_depth_anything_vits.pth for depth) are normally auto-downloaded by their node packs on first run; if a node errors 'model not found', add it to the models list.",
   "_HOWITRUNS": "No-build path: public base image, comfy_run.py clones node_packs (incl. the controlnet-aux + depth-anything preprocessors), downloads weights, converts UI->API, applies patches, optionally splices a Tier-1 --lora stack onto the checkpoint (anchor 3940), and renders. Heaviest cold start of the presets (base weights + preprocessor models).",
 
@@ -27,16 +38,16 @@
     "https://github.com/cubiq/ComfyUI_essentials",
     "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite",
     "https://github.com/Fannovel16/comfyui_controlnet_aux",
-    "https://github.com/kijai/ComfyUI-DepthAnythingV2"
+    "https://github.com/yuvraj108c/ComfyUI-Video-Depth-Anything"
   ],
 
   "models": [
-    { "url": "REPLACE_WITH_DEV_CHECKPOINT_URL/ltx-2.3-22b-dev.safetensors",
+    { "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-dev.safetensors",
       "dest": "models/checkpoints/ltx-2.3-22b-dev.safetensors" },
-    { "url": "REPLACE_WITH_GEMMA_TEXT_ENCODER_URL/comfy_gemma_3_12B_it.safetensors",
+    { "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it.safetensors",
       "dest": "models/text_encoders/comfy_gemma_3_12B_it.safetensors" },
-    { "url": "REPLACE_WITH_DISTILL_LORA_URL/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
-      "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-distilled-lora-384-1.1.safetensors" },
+    { "url": "https://huggingface.co/TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments/resolve/main/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors",
+      "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors" },
     { "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control/resolve/main/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors",
       "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors" }
   ],

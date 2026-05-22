@@ -1,0 +1,94 @@
+{
+  "description": "Wan 2.2 14B image-to-video GENERATION with the lightx2v 4-step Lightning LoRAs. Two-expert (high-noise → low-noise) MoE: a high-noise KSamplerAdvanced runs the first 2 steps, a low-noise one finishes — each with its matching 4-step Lightning LoRA, so a full clip renders in 4 sampler steps. Graph: the official ComfyUI template 'video_wan2_2_14B_i2v', FLATTENED from its subgraph form by wan22.derive.py (comfy_run's UI→API converter is flat-graph only). Additive to wan_vace_inpaint — Wan 2.2 has no VACE-style masked inpainting, so VACE 2.1 stays the cleanplate/removal tool; this is the fast generator.",
+
+  "docs": [
+    { "label": "ComfyUI Wan 2.2 tutorial", "url": "https://docs.comfy.org/tutorials/video/wan/wan2_2" },
+    { "label": "Wan 2.2 weights (Comfy-Org repackaged)", "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged" },
+    { "label": "Wan2.2-Lightning LoRAs", "url": "https://huggingface.co/lightx2v/Wan2.2-Lightning" }
+  ],
+  "tags": ["video", "wan2.2", "image-to-video", "generation", "ready-to-run"],
+  "about": {
+    "what": "Turns a single starting image into a short video. Fast: it uses the 4-step 'Lightning' speed-ups, so a clip renders in seconds-to-a-minute of sampling rather than minutes.",
+    "inputs": "One starting image, plus a written description of how the scene should move.",
+    "key_knobs": "Prompt — describe the motion/action. Frames — clip length (16·n+1, 81 ≈ 5s at 16fps). Width/Height — output size; match your input image's shape."
+  },
+
+  "_HOWITRUNS": "No-build path (same as wan_vace_inpaint): a public ComfyUI base image runs comfy_run.py, which seeds ComfyUI from the bundle, downloads the 2 diffusion experts + 2 Lightning LoRAs + umt5 + vae onto the Spark node, converts this flat UI graph to API via /object_info, applies patches, and renders. All node types are CORE ComfyUI (no node_packs) — but recent ones (WanImageToVideo, CreateVideo, SaveVideo), so the base image must ship a current ComfyUI; the cu130 yanwk tag does. ~45 GB is fetched on a COLD start (use --idle-hold to keep a warm node). --convert-only skips the model download and validates the flattened graph cheaply.",
+  "_TWOEXPERT": "The MoE split lives on the two KSamplerAdvanced nodes: 110 (high-noise) add_noise=enable, start_at_step 0, end_at_step 2, return_with_leftover_noise=enable; 111 (low-noise) add_noise=disable, start_at_step 2, end_at_step 4. Total 4 steps, cfg 1 (Lightning). To run the BASE model without Lightning: set both Lightning strengths to 0 and raise total steps (e.g. high 0→10, low 10→20) with cfg ~3.5 via --set on nodes 110/111.",
+
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "comfy_home": "/root/ComfyUI",
+  "comfy_bundle": "/default-comfyui-bundle/ComfyUI",
+  "python": "python3.13",
+  "gpu": "rtxpro6000",
+  "mode": "instant",
+  "extra_args": "",
+
+  "workflow": "wan22_i2v.workflow.json",
+
+  "node_packs": [],
+
+  "models": [
+    { "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+      "dest": "models/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors" },
+    { "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+      "dest": "models/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors" },
+    { "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
+      "dest": "models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors" },
+    { "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
+      "dest": "models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors" },
+    { "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "dest": "models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" },
+    { "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors",
+      "dest": "models/vae/wan_2.1_vae.safetensors" }
+  ],
+
+  "ui": {
+    "title": "Wan 2.2 — image-to-video (fast, 4-step Lightning)",
+    "primary_input": {
+      "label": "Start image (i2v)",
+      "tooltip": "The first frame. The video animates outward from this image per your prompt. Set Width/Height below to your image's aspect for the cleanest result.",
+      "filetypes": [["Image", "*.png *.jpg *.jpeg *.webp"], ["All files", "*.*"]]
+    },
+    "resolutions": [
+      { "label": "1280x720 (16:9 720p)", "width": 1280, "height": 720 },
+      { "label": "832x480 (16:9 480p)",  "width": 832,  "height": 480 },
+      { "label": "1024x576 (16:9)",      "width": 1024, "height": 576 },
+      { "label": "720x720 (1:1)",        "width": 720,  "height": 720 },
+      { "label": "480x832 (9:16 480p)",  "width": 480,  "height": 832 },
+      { "label": "720x1280 (9:16 720p)", "width": 720,  "height": 1280 }
+    ]
+  },
+
+  "params": {
+    "prompt":   { "node": "107", "path": "inputs.text",
+      "default": "The subject comes alive with natural, fluid motion; the camera holds steady. Cinematic lighting, crisp detail.",
+      "ui": { "label": "Prompt", "widget": "multiline", "section": "Main", "order": 1,
+              "tooltip": "Describe how the scene MOVES (action, camera). Wan 2.2 has strong motion/prompt adherence. Note: the Lightning 4-step LoRAs trade some motion range for speed — for big dynamic motion, lower the Lightning strengths and raise steps (see _TWOEXPERT)." } },
+    "negative": { "node": "125", "path": "inputs.text",
+      "default": "static, still, frozen, blurry, low quality, jpeg artifacts, distorted, deformed, extra limbs, flicker, ghosting, watermark, text",
+      "ui": { "label": "Negative prompt", "widget": "multiline", "section": "Main", "order": 2,
+              "tooltip": "Discourages stillness and common artifacts. (The official template ships a long Chinese quality string here; this is a clean English equivalent — either works.)" } },
+    "image":    { "node": "97", "path": "inputs.image" },
+    "width":    { "node": "128", "path": "inputs.width", "default": 1280,
+      "ui": { "label": "Width", "widget": "number", "min": 256, "max": 1280, "step": 16,
+              "section": "Advanced", "order": 1,
+              "tooltip": "Wan 2.2 14B is a 480p–720p model; 1280x720 is the sweet spot. Divisible by 16. Match your start image's aspect. (src: Wan 2.2 docs)" } },
+    "height":   { "node": "128", "path": "inputs.height", "default": 720,
+      "ui": { "label": "Height", "widget": "number", "min": 256, "max": 1280, "step": 16,
+              "section": "Advanced", "order": 2,
+              "tooltip": "720p sweet spot (max dim ~1280); divisible by 16. Match the start image's aspect. (src: Wan 2.2 docs)" } },
+    "length":   { "node": "128", "path": "inputs.length", "default": 81,
+      "ui": { "label": "Frames (length)", "widget": "number", "min": 17, "max": 161, "step": 16,
+              "section": "Advanced", "order": 3,
+              "tooltip": "Wan frame count = 16·n+1 (81 ≈ 5s, 161 ≈ 10s) at 16 fps. (src: Wan-Video/Wan2.2)" } },
+    "strength_high": { "node": "126", "path": "inputs.strength_model", "default": 1.0,
+      "ui": { "label": "Lightning strength (high-noise)", "widget": "slider", "min": 0.0, "max": 1.5, "step": 0.05,
+              "section": "Advanced", "order": 4,
+              "tooltip": "Strength of the 4-step Lightning LoRA on the high-noise expert. 1.0 = full speed-up. Lower it (toward 0) for more motion range at the cost of more steps. Set 0 to disable Lightning (then raise steps on node 110/111)." } },
+    "strength_low":  { "node": "127", "path": "inputs.strength_model", "default": 1.0,
+      "ui": { "label": "Lightning strength (low-noise)", "widget": "slider", "min": 0.0, "max": 1.5, "step": 0.05,
+              "section": "Advanced", "order": 5,
+              "tooltip": "Strength of the 4-step Lightning LoRA on the low-noise expert. Keep equal to the high-noise strength unless you're tuning." } }
+  }
+}

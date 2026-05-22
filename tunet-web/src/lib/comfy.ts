@@ -33,10 +33,19 @@ export interface ComfyParamSpec {
   ui?:     Record<string, unknown>
 }
 
+/** A canonical-docs link on a preset (or a bare URL string — both accepted). */
+export interface ComfyDocLink { label?: string; url: string }
+
+/** Plain-language, jargon-free blurb shown in the UI (CLI --list-presets / web About card). */
+export interface ComfyAbout { what?: string; inputs?: string; key_knobs?: string }
+
 export interface ComfyPreset {
   key:           string
   order?:        number          // dropdown sort key (lower first); default 100
   description?:   string
+  docs?:         ComfyDocLink[] | string[] | string   // link(s) to canonical docs
+  tags?:         string[]                              // for sifting/filtering
+  about?:        ComfyAbout                            // plain-language description
   base?:         string
   image?:        string
   comfy_home?:   string
@@ -92,6 +101,18 @@ export function loadComfyPreset(key: string): ComfyPreset | null {
   }
 }
 
+/**
+ * The param name a preset's SECONDARY uploaded input maps to, or null. A face-swap
+ * preset declares it via `ui.secondary_input.param` (e.g. "face"); a VACE-style
+ * preset that takes a `mask` param uses that. Two-input presets only.
+ */
+export function comfySecondaryParam(preset: ComfyPreset): string | null {
+  const sec = preset.ui?.secondary_input as { param?: string } | undefined
+  if (sec) return sec.param ?? 'face'   // keep in sync with secondaryOf() in comfy-form.tsx
+  if (preset.params?.mask) return 'mask'
+  return null
+}
+
 /** The workflow JSON a preset points at (UI-format graph for our presets). */
 export function loadComfyWorkflow(preset: ComfyPreset): unknown {
   const file = path.join(comfyDir(), 'presets', preset.workflow)
@@ -118,19 +139,28 @@ export interface ComfyPatch { node: string; path: string; value: unknown }
 
 /**
  * Build the patch list from preset params + the form values, mirroring
- * comfy_launch.py: each declared param maps to a node.path; the `video` param
- * gets the input basename; output_prefix nodes get a sanitized prefix.
+ * comfy_launch.py: each declared param maps to a node.path; input params get
+ * their uploaded file's basename; output_prefix nodes get a sanitized prefix.
+ *
+ * `inputBasename` fills the `video` param (the primary clip). `secondary` fills a
+ * second input param — the face image (`face`) for ltx_faceswap or the mask for
+ * wan_vace_inpaint — mirroring comfy_launch.py's `--face` / `--mask`.
  */
 export function buildComfyPatches(
   preset: ComfyPreset,
   values: Record<string, unknown>,
   inputBasename: string | null,
+  secondary?: { param: string; basename: string } | null,
 ): ComfyPatch[] {
+  const inputNames: Record<string, string> = {}
+  if (inputBasename) inputNames['video'] = inputBasename
+  if (secondary?.basename) inputNames[secondary.param] = secondary.basename
+
   const ops: ComfyPatch[] = []
   for (const [name, spec] of Object.entries(preset.params ?? {})) {
     let val: unknown = values[name]
     if (val === undefined || val === null || val === '') {
-      val = name === 'video' && inputBasename ? inputBasename : spec.default
+      val = inputNames[name] ?? spec.default
     }
     if (val === undefined || val === null) continue
     ops.push({ node: String(spec.node), path: spec.path, value: val })
@@ -211,16 +241,17 @@ export function comfyCommand(preset: ComfyPreset): string[] {
 
 /**
  * Stream a comfy job tarball to disk: workflow.json + patches.json +
- * comfy_run.py + the input clip (by basename). Never holds the clip in RAM —
+ * comfy_run.py + the input media (by basename). Never holds a clip in RAM —
  * everything is written/copied on disk and tar-streamed (the same discipline as
- * spark-packer, so a multi-hundred-MB clip won't OOM the box). Caller deletes
- * the returned tarball after upload.
+ * spark-packer, so a multi-hundred-MB clip won't OOM the box). `inputs` is the
+ * list of uploaded media (the primary clip, plus a secondary face/mask for
+ * two-input presets); each is packed by bare basename, which is how the workflow
+ * references it. Caller deletes the returned tarball after upload.
  */
 export async function packComfyTarball(opts: {
-  workflow:      unknown
-  patches:       ComfyPatch[] | null
-  inputPath:     string | null
-  inputBasename: string | null
+  workflow: unknown
+  patches:  ComfyPatch[] | null
+  inputs:   { path: string; basename: string }[]
 }): Promise<{ tarballPath: string; fileCount: number; compressedSize: number }> {
   const runner = path.join(comfyDir(), 'comfy_run.py')
   if (!fs.existsSync(runner)) throw new Error(`comfy_run.py not found at ${runner}`)
@@ -238,9 +269,9 @@ export async function packComfyTarball(opts: {
     }
     await fs.promises.copyFile(runner, path.join(stage, 'comfy_run.py'))
     fileCount += 1
-    if (opts.inputPath && opts.inputBasename) {
-      // basename only — the workflow references the clip by bare filename
-      await fs.promises.copyFile(opts.inputPath, path.join(stage, path.basename(opts.inputBasename)))
+    for (const inp of opts.inputs) {
+      // basename only — the workflow references each file by bare filename
+      await fs.promises.copyFile(inp.path, path.join(stage, path.basename(inp.basename)))
       fileCount += 1
     }
 

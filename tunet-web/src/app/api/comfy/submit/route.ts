@@ -17,7 +17,7 @@ import {
 } from '@/lib/spark'
 import {
   loadComfyPreset, loadComfyWorkflow, buildComfyPatches, buildComfyEnv,
-  comfyInstanceType, comfyCommand, packComfyTarball,
+  comfyInstanceType, comfyCommand, packComfyTarball, comfySecondaryParam,
   type ComfyLora, type ComfyPatch,
 } from '@/lib/comfy'
 
@@ -30,6 +30,7 @@ interface Body {
   values?:         Record<string, unknown>
   stageId?:        string
   inputName?:      string
+  secondaryName?:  string          // two-input presets: face image / mask (comfy_input2)
   gpu?:            string
   mode?:           'instant' | 'smart'
   idleHoldSeconds?: number
@@ -84,6 +85,22 @@ export async function POST(req: Request) {
     inputName = base
   }
 
+  // Resolve the SECONDARY staged input (face image / mask), if this is a
+  // two-input preset and the form uploaded one (staged under comfy_input2).
+  const secondaryParam = comfySecondaryParam(preset)
+  let secondary: { param: string; path: string; basename: string } | null = null
+  if (body.stageId && body.secondaryName && secondaryParam) {
+    if (!/^[A-Za-z0-9_-]+$/.test(body.stageId)) return jsonError('bad stageId', 400)
+    const base = path.basename(body.secondaryName)
+    const p = path.join(os.tmpdir(), 'tunet-stages', body.stageId, 'comfy_input2', base)
+    if (!fs.existsSync(p)) {
+      return jsonError(`${secondaryParam} file not found (stage may have expired — re-upload): ${base}`, 400)
+    }
+    secondary = { param: secondaryParam, path: p, basename: base }
+  } else if (secondaryParam && !body.secondaryName) {
+    return jsonError(`preset ${preset.key} needs a ${secondaryParam} file (e.g. a face reference image)`, 422)
+  }
+
   const t0       = Date.now()
   const encoder  = new TextEncoder()
   const stageRoot = body.stageId
@@ -106,7 +123,10 @@ export async function POST(req: Request) {
         send({ phase: 'pack', status: 'start' })
         const tPack    = Date.now()
         const workflow = loadComfyWorkflow(preset)
-        const patches  = buildComfyPatches(preset, body.values ?? {}, inputName)
+        const patches  = buildComfyPatches(
+          preset, body.values ?? {}, inputName,
+          secondary ? { param: secondary.param, basename: secondary.basename } : null,
+        )
         // UI-format graphs (our presets) carry a top-level `nodes` array and are
         // converted to API on the node, so patches ride in patches.json. API
         // graphs are patched here.
@@ -114,11 +134,14 @@ export async function POST(req: Request) {
         if (!isUi) {
           for (const op of patches) applyPatch(workflow as Record<string, unknown>, op)
         }
+        const inputs = [
+          inputPath && inputName ? { path: inputPath, basename: inputName } : null,
+          secondary ? { path: secondary.path, basename: secondary.basename } : null,
+        ].filter((x): x is { path: string; basename: string } => x !== null)
         const pack = await packComfyTarball({
           workflow,
-          patches:       isUi ? patches : null,
-          inputPath,
-          inputBasename: inputName,
+          patches: isUi ? patches : null,
+          inputs,
         })
         tarballPath = pack.tarballPath
         send({ phase: 'pack', status: 'done', files: pack.fileCount, kb: Math.round(pack.compressedSize / 1024), ms: Date.now() - tPack })

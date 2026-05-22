@@ -22,14 +22,51 @@ interface ParamUi {
 }
 interface ParamSpec { node: string; path: string; default?: unknown; ui?: ParamUi }
 interface ResolutionTier { label: string; short?: number; long?: number; width?: number; height?: number }
+interface FileInputUi { param?: string; label?: string; tooltip?: string; filetypes?: [string, string][] }
 interface PresetUi {
   title?: string
-  primary_input?: { label?: string; tooltip?: string; filetypes?: [string, string][] }
+  primary_input?: FileInputUi
+  secondary_input?: FileInputUi   // two-input presets (face image / mask)
   resolutions?: ResolutionTier[]
 }
+interface DocLink { label?: string; url: string }
+interface About { what?: string; inputs?: string; key_knobs?: string }
 interface Preset {
   key: string; description?: string; gpu?: string; mode?: string
+  docs?: DocLink[] | string[] | string
+  tags?: string[]
+  about?: About
   ui?: PresetUi; params: Record<string, ParamSpec>
+}
+
+/** Normalize a preset's `docs` field to [{label,url}] (accepts a bare URL string or list). */
+function docLinks(p: Preset | null): DocLink[] {
+  const d = p?.docs
+  if (!d) return []
+  if (typeof d === 'string') return [{ url: d }]
+  return d.map(x => (typeof x === 'string' ? { url: x } : x)).filter(x => x?.url)
+}
+
+/** The secondary uploaded input a preset wants (face image / mask), or null. */
+function secondaryOf(p: Preset | null): Required<Pick<FileInputUi, 'param'>> & FileInputUi | null {
+  if (!p) return null
+  const sec = p.ui?.secondary_input
+  if (sec) return { param: sec.param ?? 'face', label: sec.label, tooltip: sec.tooltip, filetypes: sec.filetypes }
+  if (p.params?.mask) {
+    return {
+      param: 'mask', label: 'Mask image',
+      tooltip: 'White = the region to inpaint/remove (static image).',
+      filetypes: [['Image', '*.png *.jpg *.jpeg *.webp']],
+    }
+  }
+  return null
+}
+
+/** Build an <input accept=…> string from a preset filetypes list. */
+function acceptOf(filetypes: [string, string][] | undefined, fallback: string): string {
+  if (!filetypes) return fallback
+  const exts = filetypes.flatMap(([, pat]) => pat.split(/\s+/)).filter(p => p.startsWith('*.') && p !== '*.*')
+  return exts.map(p => p.slice(1)).join(',') || fallback
 }
 
 const GPU_CHOICES: { key: string; label: string }[] = [
@@ -56,6 +93,7 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
   const [name, setName]       = useState('')
 
   const [file, setFile]       = useState<File | null>(null)
+  const [file2, setFile2]     = useState<File | null>(null)   // secondary input (face/mask)
   const [upPct, setUpPct]     = useState<number | null>(null)
   const [probe, setProbe]     = useState<{ fps: number; frames: number; w: number; h: number } | null>(null)
 
@@ -64,6 +102,7 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
   const [doneJob, setDoneJob] = useState<string | null>(null)
   const [err, setErr]         = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement | null>(null)
+  const file2Ref = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     fetch('/api/comfy/presets')
@@ -82,10 +121,11 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
     setKey(p.key)
     const v: Record<string, unknown> = {}
     for (const [n, spec] of Object.entries(p.params)) {
-      if (n === 'video' || n === 'mask') continue
+      if (n === 'video' || n === 'mask' || n === 'face') continue
       if (spec.default !== undefined) v[n] = spec.default
     }
     setValues(v)
+    setFile2(null)
     setGpu(p.gpu || 'rtxpro6000')
     setMode((p.mode as 'instant' | 'smart') || 'instant')
     setDoneJob(null); setErr(null); setEvents([])
@@ -114,7 +154,7 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
     const out: Record<string, [string, ParamSpec][]> = {}
     if (!preset) return out
     for (const [n, spec] of Object.entries(preset.params)) {
-      if (n === 'video' || n === 'mask' || !spec.ui) continue
+      if (n === 'video' || n === 'mask' || n === 'face' || !spec.ui) continue
       const sec = spec.ui.section || 'Main'
       ;(out[sec] ??= []).push([n, spec])
     }
@@ -129,23 +169,31 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
     return null
   }, [preset])
 
-  const acceptStr = useMemo(() => {
-    const fts = preset?.ui?.primary_input?.filetypes
-    if (!fts) return 'video/*'
-    const exts = fts.flatMap(([, pat]) => pat.split(/\s+/)).filter(p => p.startsWith('*.') && p !== '*.*')
-    return exts.map(p => p.slice(1)).join(',') || 'video/*'
-  }, [preset])
+  const acceptStr = useMemo(() => acceptOf(preset?.ui?.primary_input?.filetypes, 'video/*'), [preset])
+  const secondary = useMemo(() => secondaryOf(preset), [preset])
+  const accept2   = useMemo(() => acceptOf(secondary?.filetypes, 'image/*'), [secondary])
 
   async function onSubmit() {
     if (!preset) return
+    if (secondary && !file2) { setErr(`Pick a ${secondary.label?.toLowerCase() || 'reference file'} first.`); return }
     setBusy(true); setErr(null); setDoneJob(null); setEvents([])
     try {
       let stageId: string | undefined
       let inputName: string | undefined
+      let secondaryName: string | undefined
       if (file) {
         setUpPct(0)
         const r = await uploadComfyInput(file, (sent, total) => setUpPct(Math.round((sent / total) * 100)))
         stageId = r.stageId; inputName = r.filename
+        setUpPct(null)
+      }
+      if (secondary && file2) {
+        // drop the secondary file into the SAME stage (a second role dir) so the
+        // submit route resolves both from one stageId
+        setUpPct(0)
+        const r2 = await uploadComfyInput(file2, (sent, total) => setUpPct(Math.round((sent / total) * 100)),
+          { role: 'comfy_input2', stageId })
+        stageId = r2.stageId; secondaryName = r2.filename
         setUpPct(null)
       }
       const res = await fetch('/api/comfy/submit', {
@@ -154,7 +202,7 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
         body:    JSON.stringify({
           presetKey: preset.key,
           values:    { ...values, __name: name || undefined },
-          stageId, inputName, gpu, mode,
+          stageId, inputName, secondaryName, gpu, mode,
         }),
       })
       if (!res.body) throw new Error(`HTTP ${res.status}`)
@@ -208,6 +256,52 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
             {preset.description && <p className="mt-2 text-xs text-[#6b7280]">{preset.description}</p>}
           </Card>
 
+          {/* About this workflow — plain-language summary + canonical docs link */}
+          {(preset.about || preset.tags?.length || docLinks(preset).length > 0) && (
+            <Card>
+              <h2 className="text-sm font-semibold text-[#111827] mb-2.5">About this workflow</h2>
+              <dl className="space-y-2 text-xs leading-relaxed">
+                {preset.about?.what && (
+                  <div>
+                    <dt className="font-semibold text-[#374151]">What it does</dt>
+                    <dd className="text-[#6b7280]">{preset.about.what}</dd>
+                  </div>
+                )}
+                {preset.about?.inputs && (
+                  <div>
+                    <dt className="font-semibold text-[#374151]">Inputs</dt>
+                    <dd className="text-[#6b7280]">{preset.about.inputs}</dd>
+                  </div>
+                )}
+                {preset.about?.key_knobs && (
+                  <div>
+                    <dt className="font-semibold text-[#374151]">Key settings</dt>
+                    <dd className="text-[#6b7280]">{preset.about.key_knobs}</dd>
+                  </div>
+                )}
+              </dl>
+              {preset.tags && preset.tags.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {preset.tags.map(t => (
+                    <span key={t} className="text-[11px] font-medium text-[#6b7280] bg-[#f3f4f6] border border-[#e5e7eb] rounded-full px-2 py-0.5">
+                      {t}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {docLinks(preset).length > 0 && (
+                <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1">
+                  {docLinks(preset).map(d => (
+                    <a key={d.url} href={d.url} target="_blank" rel="noopener noreferrer"
+                      className="text-xs font-semibold text-[#7E3AF2] hover:underline">
+                      {d.label || 'Documentation'} ↗
+                    </a>
+                  ))}
+                </div>
+              )}
+            </Card>
+          )}
+
           {/* Input clip */}
           <Card>
             <Label tip={preset.ui?.primary_input?.tooltip}>{preset.ui?.primary_input?.label || 'Input clip'}</Label>
@@ -236,6 +330,24 @@ export function ComfyForm({ jobsBase = '/jobs' }: { jobsBase?: string }) {
               </div>
             )}
           </Card>
+
+          {/* Secondary input (face image / mask) — two-input presets */}
+          {secondary && (
+            <Card>
+              <Label tip={secondary.tooltip}>{secondary.label || 'Reference image'}</Label>
+              <div className="flex items-center gap-3">
+                <input ref={file2Ref} type="file" accept={accept2} className="hidden"
+                  onChange={e => setFile2(e.target.files?.[0] ?? null)} />
+                <button type="button" onClick={() => file2Ref.current?.click()}
+                  className="px-3 py-1.5 text-xs font-semibold border border-[#7E3AF2] text-[#7E3AF2] rounded hover:bg-[#faf5ff]">
+                  {file2 ? 'Replace' : 'Browse…'}
+                </button>
+                <span className="text-xs text-[#6b7280] truncate">
+                  {file2 ? `${file2.name} (${(file2.size / 1048576).toFixed(1)} MB)` : 'Required'}
+                </span>
+              </div>
+            </Card>
+          )}
 
           {/* Param sections */}
           {Object.entries(sections).map(([sec, rows]) => (
