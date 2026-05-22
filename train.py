@@ -52,13 +52,6 @@ from training.validation import run_validation
 from training.checkpoint import prune_checkpoints
 from training.dataloader_utils import cycle, collate_skip_none, auto_detect_num_workers
 
-# How often (in optimizer steps) a running job polls tunet-web's on-demand
-# export request. Step-based on purpose: every rank shares global_step, so the
-# broadcast/barrier that coordinate the inline export stay matched — a
-# wall-clock throttle would fire on different steps per rank and deadlock the
-# collectives. ~20 steps keeps it responsive (seconds) without chatty polling.
-EXPORT_POLL_STEPS = 20
-
 # --- Data Loading and Augmentation ---
 
 # --- Augmentation Creation Function ---
@@ -1688,63 +1681,6 @@ def train(config):
                 if _pending_ckpt_thread is not None and _pending_ckpt_thread.is_alive():
                     _pending_ckpt_thread.join()
                 dist.barrier()  # All ranks wait for rank 0 to finish writing checkpoint
-
-            # --- On-demand export (live control channel) ---
-            # tunet-web can request an export from THIS running job (the model is
-            # already on the GPU). Poll on a step cadence (EXPORT_POLL_STEPS) AND
-            # at each epoch end, so a request is honored within ~seconds rather
-            # than at the next epoch boundary. The cadence is step-based, not
-            # wall-clock, so every rank agrees on when to poll — the broadcast +
-            # barriers below must be hit by all ranks in lockstep. Only rank 0
-            # talks to ShareSync and exports; the exporters deep-copy the model to
-            # CPU, so the live training model's device/mode is never touched.
-            # No-op for local training (control env unset → poll returns None).
-            if epoch_end_now or (global_step > 0 and global_step % EXPORT_POLL_STEPS == 0):
-                _exp_req = None
-                if is_main_process():
-                    try:
-                        from exporters.export_control import poll_export_request
-                        _exp_req = poll_export_request()
-                    except Exception as e:
-                        logging.warning(f"[export-control] poll failed: {e}")
-                if world_size > 1:
-                    _exp_sig = torch.tensor([1 if _exp_req else 0], device=device)
-                    dist.broadcast(_exp_sig, src=0)
-                    _do_export = bool(_exp_sig.item())
-                else:
-                    _do_export = _exp_req is not None
-                if _do_export:
-                    if world_size > 1: dist.barrier()   # pause all ranks together
-                    if is_main_process() and _exp_req is not None:
-                        try:
-                            from exporters.export_control import run_export
-                            _exp_res = current_training_res if config.training.progressive_resolution else config.data.resolution
-                            run_export(model, config, ckpt_prefix, _exp_res, global_step // iter_epoch,
-                                       _exp_req['flame'], _exp_req['nuke'])
-                        except Exception as e:
-                            logging.warning(f"[export-control] inline export failed: {e}")
-                    if world_size > 1: dist.barrier()   # rejoin before next step
-
-                # Live max_steps change from the control channel — lets tunet-web
-                # set/adjust a running job's stop point. Same step-cadence poll
-                # (deterministic across ranks); broadcast the new value so every
-                # rank's top-of-loop `global_step >= max_steps` check agrees.
-                _new_max = -1
-                if is_main_process():
-                    try:
-                        from exporters.export_control import poll_max_steps
-                        _new_max = poll_max_steps()
-                    except Exception as e:
-                        logging.warning(f"[stop-control] poll failed: {e}")
-                if world_size > 1:
-                    _ms_t = torch.tensor([_new_max], device=device, dtype=torch.long)
-                    dist.broadcast(_ms_t, src=0)
-                    _new_max = int(_ms_t.item())
-                if _new_max >= 0:
-                    max_steps = _new_max
-                    if is_main_process():
-                        logging.info(f"[stop-control] max_steps set to {max_steps} @ step {global_step} "
-                                     f"({'stops at next check' if max_steps and global_step >= max_steps else 'unlimited' if max_steps == 0 else 'will stop at ' + str(max_steps)})")
 
             # --- Auto Export ---
             if is_main_process() and epoch_end_now and config.auto_export.interval > 0:
