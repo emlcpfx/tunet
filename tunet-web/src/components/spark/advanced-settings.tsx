@@ -226,6 +226,32 @@ export function AdvancedSettings({
               label="Quarter → half → full"
             />
           </FormRow>
+          {/* Early stopping — folded into Schedule (it's part of when a run ends). */}
+          <FormRow label="Plateau detection" tip={TIPS.es_enabled}>
+            <Toggle
+              checked={value.es_enabled ?? false}
+              onChange={(c) => set('es_enabled', c)}
+              label="Watch for validation plateau"
+            />
+          </FormRow>
+          {value.es_enabled && (
+            <>
+              <FormRow label="Patience (epochs)" tip={TIPS.es_patience}>
+                <Input
+                  type="number" min={5} max={200}
+                  value={value.es_patience ?? 30}
+                  onChange={(e) => set('es_patience', parseInt(e.target.value || '30', 10))}
+                />
+              </FormRow>
+              <FormRow label="Stop on plateau" tip={TIPS.es_stop}>
+                <Toggle
+                  checked={value.es_stop ?? false}
+                  onChange={(c) => set('es_stop', c)}
+                  label="Auto-stop training (else just notify)"
+                />
+              </FormRow>
+            </>
+          )}
         </Grid2>
       </Section>
 
@@ -364,36 +390,6 @@ export function AdvancedSettings({
               onChange={(e) => set('keep_last_checkpoints', parseInt(e.target.value || '4', 10))}
             />
           </FormRow>
-        </Grid2>
-      </Section>
-
-      <Section title="Early stopping">
-        <Grid2>
-          <FormRow label="Plateau detection" tip={TIPS.es_enabled}>
-            <Toggle
-              checked={value.es_enabled ?? false}
-              onChange={(c) => set('es_enabled', c)}
-              label="Watch for validation plateau"
-            />
-          </FormRow>
-          {value.es_enabled && (
-            <>
-              <FormRow label="Patience (epochs)" tip={TIPS.es_patience}>
-                <Input
-                  type="number" min={5} max={200}
-                  value={value.es_patience ?? 30}
-                  onChange={(e) => set('es_patience', parseInt(e.target.value || '30', 10))}
-                />
-              </FormRow>
-              <FormRow label="Stop on plateau" tip={TIPS.es_stop}>
-                <Toggle
-                  checked={value.es_stop ?? false}
-                  onChange={(c) => set('es_stop', c)}
-                  label="Auto-stop training (else just notify)"
-                />
-              </FormRow>
-            </>
-          )}
         </Grid2>
       </Section>
 

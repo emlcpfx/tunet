@@ -27,6 +27,7 @@ import urllib.request
 import urllib.parse
 
 _last_nonce: int = 0
+_last_stop_nonce: int = 0
 _output_dav: str | None = None       # cached job output WebDAV base (from meta.json)
 _meta_tried: bool = False
 
@@ -116,6 +117,33 @@ def poll_export_request() -> dict | None:
     if not (want_flame or want_nuke):
         return None
     return {'flame': want_flame, 'nuke': want_nuke}
+
+
+def poll_max_steps() -> int:
+    """Check stop_request.json once. Returns a NEW max_steps (>= 0) for a fresh
+    request, else -1. Lets tunet-web change a running job's stop point live: a
+    positive value caps the run at that global_step (stopping gracefully when
+    reached, or near-immediately if it's already past); 0 means unlimited.
+    Defensive: returns -1 on any error / no request / no control channel."""
+    global _last_stop_nonce
+    base  = os.environ.get('TUNET_FILES_BASE', '').rstrip('/')
+    token = _bearer()
+    key   = os.environ.get('TUNET_CONTROL_KEY', '')
+    if not (base and token and key):
+        return -1
+    ctrl = f"{base}/_tunet_control/{urllib.parse.quote(key)}"
+    try:
+        reqd  = json.loads(_req(f"{ctrl}/stop_request.json", token, timeout=5))
+        nonce = int(reqd.get('nonce', 0))
+    except Exception:
+        return -1
+    if nonce <= _last_stop_nonce:
+        return -1
+    _last_stop_nonce = nonce
+    try:
+        return max(0, int(reqd.get('maxSteps')))
+    except (TypeError, ValueError):
+        return -1
 
 
 def run_export(model, config, ckpt_prefix, export_res, completed_ep,

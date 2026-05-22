@@ -18,6 +18,7 @@ import {
 import { LiveStatusBadge } from '@/components/spark/live-status-badge'
 import { JobLiveView } from '@/components/spark/job-live-view'
 import { CancelJobButton } from '@/components/spark/cancel-job-button'
+import { SetMaxStepsButton } from '@/components/spark/set-max-steps-button'
 import { TrainingChart } from '@/components/spark/training-chart'
 import { TrainingStats } from '@/components/spark/training-stats'
 import { PreviewImages } from '@/components/spark/preview-images'
@@ -106,6 +107,7 @@ export default async function JobDetailPage({
               Clone
             </Link>
           )}
+          {isLive && !isComfy && <SetMaxStepsButton jobId={job.id} />}
           {isLive && <CancelJobButton jobId={job.id} />}
         </div>
       </div>

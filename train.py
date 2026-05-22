@@ -1725,6 +1725,27 @@ def train(config):
                             logging.warning(f"[export-control] inline export failed: {e}")
                     if world_size > 1: dist.barrier()   # rejoin before next step
 
+                # Live max_steps change from the control channel — lets tunet-web
+                # set/adjust a running job's stop point. Same step-cadence poll
+                # (deterministic across ranks); broadcast the new value so every
+                # rank's top-of-loop `global_step >= max_steps` check agrees.
+                _new_max = -1
+                if is_main_process():
+                    try:
+                        from exporters.export_control import poll_max_steps
+                        _new_max = poll_max_steps()
+                    except Exception as e:
+                        logging.warning(f"[stop-control] poll failed: {e}")
+                if world_size > 1:
+                    _ms_t = torch.tensor([_new_max], device=device, dtype=torch.long)
+                    dist.broadcast(_ms_t, src=0)
+                    _new_max = int(_ms_t.item())
+                if _new_max >= 0:
+                    max_steps = _new_max
+                    if is_main_process():
+                        logging.info(f"[stop-control] max_steps set to {max_steps} @ step {global_step} "
+                                     f"({'stops at next check' if max_steps and global_step >= max_steps else 'unlimited' if max_steps == 0 else 'will stop at ' + str(max_steps)})")
+
             # --- Auto Export ---
             if is_main_process() and epoch_end_now and config.auto_export.interval > 0:
                 # Ensure async checkpoint is written before we copy it for export
