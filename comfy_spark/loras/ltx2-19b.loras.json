@@ -1,0 +1,79 @@
+{
+  "_schema": "comfy_spark LoRA catalog v1 for the LTX-2 19b base (separate from ltx2.loras.json, which is ltx2.3-22b). Maps a friendly name -> spec for a Tier-1 'drop-in' LoRA that only patches the MODEL (LoraLoaderModelOnly) and can be STACKED. comfy_launch.py reads this for --lora <name>[:<strength>] / --list-loras on a 19b preset (e.g. ltx19_generate). Camera-control LoRAs are the headline here: they steer the camera move. base MUST match the preset's base (ltx2-19b) or you get a loud warning.",
+
+  "_fields": {
+    "url": "direct .safetensors download URL",
+    "file": "filename to save as under models/loras (unique per stack)",
+    "base": "compatible base model — must match the preset's model (ltx2-19b)",
+    "kind": "effect | style | camera | motion | edit  (all drop-in/stackable)",
+    "task": "t2v | i2v | v2v | any",
+    "trigger": "phrase auto-appended unless --no-triggers (empty = none; camera LoRAs have NO trigger word)",
+    "strength": "recommended default strength_model",
+    "source": "HF repo for provenance",
+    "note": "human-readable usage hint",
+    "prompt_example": "ready-to-use starting prompt (do NOT include a trigger)"
+  },
+
+  "base": "ltx2-19b",
+
+  "_CAMERA_NOTE": "Per the Lightricks camera-control model cards there is NO trigger word. To get the best move, DESCRIBE THE DESTINATION of the movement in the prompt (where the camera ends up / what it reveals), not just 'dolly in'. They stack on the 19b base and can be combined (keep combined strength sane). Strength 1.0 is the loaded default; lower toward 0.7 if the move overpowers the scene.",
+
+  "loras": {
+    "dolly-in": {
+      "url": "https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-In/resolve/main/ltx-2-19b-lora-camera-control-dolly-in.safetensors",
+      "file": "ltx-2-19b-camera-dolly-in.safetensors",
+      "base": "ltx2-19b", "kind": "camera", "task": "any", "trigger": "", "strength": 1.0,
+      "source": "Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-In",
+      "note": "Camera pushes IN toward the subject. Describe what the move reveals as it closes in.",
+      "prompt_example": "the camera pushes in slowly past the foreground foliage to settle on the lone figure waiting at the end of the pier, golden hour, shallow depth of field"
+    },
+    "dolly-out": {
+      "url": "https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Out/resolve/main/ltx-2-19b-lora-camera-control-dolly-out.safetensors",
+      "file": "ltx-2-19b-camera-dolly-out.safetensors",
+      "base": "ltx2-19b", "kind": "camera", "task": "any", "trigger": "", "strength": 1.0,
+      "source": "Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Out",
+      "note": "Camera pulls OUT/back, revealing the wider scene. Describe the wider environment it pulls back to show.",
+      "prompt_example": "the camera pulls back from the candle flame to reveal the whole abandoned cathedral around it, dust in the air, soft volumetric light"
+    },
+    "dolly-left": {
+      "url": "https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Left/resolve/main/ltx-2-19b-lora-camera-control-dolly-left.safetensors",
+      "file": "ltx-2-19b-camera-dolly-left.safetensors",
+      "base": "ltx2-19b", "kind": "camera", "task": "any", "trigger": "", "strength": 1.0,
+      "source": "Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Left",
+      "note": "Camera tracks LEFT (lateral truck). Describe what comes into frame on the left.",
+      "prompt_example": "the camera tracks left along the market stalls, revealing a fire-eater performing for a gathering crowd, warm lantern light"
+    },
+    "dolly-right": {
+      "url": "https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Right/resolve/main/ltx-2-19b-lora-camera-control-dolly-right.safetensors",
+      "file": "ltx-2-19b-camera-dolly-right.safetensors",
+      "base": "ltx2-19b", "kind": "camera", "task": "any", "trigger": "", "strength": 1.0,
+      "source": "Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Right",
+      "note": "Camera tracks RIGHT (lateral truck). Describe what comes into frame on the right.",
+      "prompt_example": "the camera tracks right across the rooftop to reveal the neon skyline stretching into the rain, reflections on wet tiles"
+    },
+    "jib-up": {
+      "url": "https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Jib-Up/resolve/main/ltx-2-19b-lora-camera-control-jib-up.safetensors",
+      "file": "ltx-2-19b-camera-jib-up.safetensors",
+      "base": "ltx2-19b", "kind": "camera", "task": "any", "trigger": "", "strength": 1.0,
+      "source": "Lightricks/LTX-2-19b-LoRA-Camera-Control-Jib-Up",
+      "note": "Camera cranes UP (jib up), rising above the subject. Describe the high vantage it rises to.",
+      "prompt_example": "the camera cranes up from the street musician to reveal the full plaza and the mountains beyond, sweeping cinematic vista"
+    },
+    "jib-down": {
+      "url": "https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Jib-Down/resolve/main/ltx-2-19b-lora-camera-control-jib-down.safetensors",
+      "file": "ltx-2-19b-camera-jib-down.safetensors",
+      "base": "ltx2-19b", "kind": "camera", "task": "any", "trigger": "", "strength": 1.0,
+      "source": "Lightricks/LTX-2-19b-LoRA-Camera-Control-Jib-Down",
+      "note": "Camera cranes DOWN (jib down), descending toward the subject. Describe what it descends to meet.",
+      "prompt_example": "the camera cranes down from the treetops to settle on the deer drinking at the misty stream, dawn light filtering through leaves"
+    },
+    "static": {
+      "url": "https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Static/resolve/main/ltx-2-19b-lora-camera-control-static.safetensors",
+      "file": "ltx-2-19b-camera-static.safetensors",
+      "base": "ltx2-19b", "kind": "camera", "task": "any", "trigger": "", "strength": 1.0,
+      "source": "Lightricks/LTX-2-19b-LoRA-Camera-Control-Static",
+      "note": "Locks the camera STILL (no camera move) so only the subject moves — a true locked-off tripod shot. Useful when the base model adds unwanted drift.",
+      "prompt_example": "a locked-off shot of a barista pulling an espresso shot, steam rising, the camera perfectly still, soft window light"
+    }
+  }
+}

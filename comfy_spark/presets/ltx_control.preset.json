@@ -3,9 +3,15 @@
 
   "docs": [
     { "label": "Union-Control IC-LoRA model card", "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control" },
-    { "label": "LTX-2 docs", "url": "https://docs.ltx.video" }
+    { "label": "LTX-2 docs", "url": "https://docs.ltx.video" },
+    { "label": "Official LTX-2 IC-LoRA tutorial (video)", "url": "https://www.youtube.com/watch?v=NPjTpDmTdaw" },
+    { "label": "How to use IC-LoRA in LTX-2 (blog)", "url": "https://ltx.io/model/model-blog/how-to-use-ic-lora-in-ltx-2" }
   ],
   "tags": ["video", "ltx2.3", "video-to-video", "structural-control", "canny", "depth", "pose", "ic-lora", "ready-to-run"],
+  "prompt_guide": {
+    "url": "https://github.com/Lightricks/LTX-2#%EF%B8%8F-prompting-for-ltx-2",
+    "tips": "IC-LoRA prompts are DIFFERENT from normal generation: describe only the LOOK — subject/appearance, background, textures, lighting, mood — in one flowing paragraph. Do NOT describe motion or camera moves; the reference clip supplies all of that, and motion words fight the LoRA. Literal and specific; under ~200 words. (See comfy_spark/IC_LORA_GUIDE.md)"
+  },
   "about": {
     "what": "Makes a new video that copies the shape and movement of a reference clip — its outlines (canny), its depth, or the people's body poses — so the result moves like the reference but looks like whatever your prompt describes.",
     "inputs": "A reference video (its motion and shape are traced for you) and a written description of the new look.",
@@ -74,9 +80,9 @@
 
   "params": {
     "prompt":   { "node": "2483", "path": "inputs.text",
-      "default": "A knight in ornate plate armor walks through a misty forest at dawn, shafts of warm light cutting through the trees. Slow tracking shot, shallow depth of field, the soft crunch of footsteps on leaves.",
+      "default": "A knight in ornate weathered plate armor in a misty forest at dawn, shafts of warm light cutting through the tall trees, worn steel and leather, moss on the bark, shallow depth of field, cinematic color.",
       "ui": { "label": "Prompt", "widget": "multiline", "section": "Main", "order": 1,
-              "tooltip": "Describe the OUTPUT scene you want — the structure (edges/depth/pose) is taken from the reference clip, NOT the prompt. Same LTX-2.3 single-paragraph style as generation (shot, lighting, action, camera, audio). (src: Union-Control example workflow + LTX-2.3 prompt guide)" } },
+              "tooltip": "Describe the LOOK only — subject/appearance, background, textures, lighting, mood. Do NOT describe MOTION or CAMERA moves ('pans left', 'walks forward', 'zoom in'): the LoRA reads all motion + structure from the reference clip, and motion words in the prompt fight it and muddy the result. (src: official LTX IC-LoRA tutorial + blog — see comfy_spark/IC_LORA_GUIDE.md)" } },
     "negative": { "node": "2612", "path": "inputs.text",
       "default": "pc game, console game, video game, cartoon, childish, ugly",
       "ui": { "label": "Negative prompt", "widget": "multiline", "section": "Main", "order": 2,
@@ -93,6 +99,10 @@
     "length":   { "node": "3059", "path": "inputs.length", "default": 121,
       "ui": { "label": "Frames (length)", "widget": "number", "min": 9, "max": 497, "step": 8,
               "section": "Advanced", "order": 3,
-              "tooltip": "Frame count; LTX REQUIRES 8*n+1 (..., 121, 161). Should match the reference clip's frame count for clean control. LTX-2.3 max ~10s @50fps or ~20s @25fps. (src: LTX-2.3 docs)" } }
+              "tooltip": "Frame count; LTX REQUIRES 8*n+1 (..., 121, 161). Should be the next 8n+1 >= the reference clip's frame count (and the output can't exceed the reference's length). LTX-2.3 max ~10s @50fps or ~20s @25fps. (src: LTX-2.3 docs)" } },
+    "strength": { "node": "5012", "path": "inputs.strength", "default": 1.0,
+      "ui": { "label": "Control strength", "widget": "slider", "min": 0.0, "max": 1.0, "step": 0.05,
+              "section": "Advanced", "order": 4,
+              "tooltip": "How hard the output locks to the reference's structure/motion. 1.0 = strictest (Lightricks default; cleanest full restyle). BELOW 1.0 lets the reference 'bleed through' (its real pixels leak in) — but practitioners often land on 0.6-0.7 for a more natural, less rigidly-glued look. Start at 1.0; lower toward 0.6 only if it feels over-locked. (src: LTX IC-LoRA tutorial + Next Diffusion + community A/B). See comfy_spark/IC_LORA_GUIDE.md." } }
   }
 }

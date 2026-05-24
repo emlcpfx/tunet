@@ -87,3 +87,10 @@ comfy_spark/_dl
 # and extracted custom-node source dumps. Regenerated on demand; not source.
 /draft.preset.json
 /_outnodes/
+
+# comfy_spark scratch (downloaded workflows + inspect/trace helpers) and
+# test-render outputs (downloaded swap/restore mp4s) — regenerated, not source.
+_ingest_work/
+_void_work/
+comfy_spark/vividface_examples_out/
+comfy_spark/vividface_custom_out/

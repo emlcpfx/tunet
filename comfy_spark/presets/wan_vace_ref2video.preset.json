@@ -1,0 +1,105 @@
+{
+  "description": "Wan2.1 VACE 14B REFERENCE-TO-VIDEO / all-in-one editing. Same VACE graph as wan_vace_inpaint, but the reference_image input (node 162 -> WanVaceToVideo 49) is RE-CONNECTED: instead of cleaning the masked region away (removal), the masked region is regenerated to contain the SUBJECT from a reference image (object / character replacement, guided by the surrounding video + prompt). You give it a clip, a mask (where to insert), and a reference image (what to insert). Graph: ComfyUI core 'video_wan_vace_inpainting' with reference_image kept, derived for Spark by presets/wan_vace_ref2video.derive.py. Accelerated with the CausVid LoRA (4 steps, cfg 1).",
+
+  "docs": [
+    { "label": "Wan2.1 VACE 14B model card", "url": "https://huggingface.co/Wan-AI/Wan2.1-VACE-14B" },
+    { "label": "ComfyUI Wan VACE guide", "url": "https://docs.comfy.org/tutorials/video/wan/vace" }
+  ],
+  "tags": ["video", "wan2.1", "video-to-video", "reference-to-video", "inpainting", "mask-required", "two-inputs", "ready-to-run"],
+  "about": {
+    "what": "Replaces a marked area of a video with the subject from a reference photo — VACE regenerates the masked region to contain your reference's object/character, blended into the scene's motion and lighting. (The removal-only sibling is wan_vace_inpaint.)",
+    "inputs": "A video clip, a mask (white = the area to replace), and a reference image (the subject to put there).",
+    "key_knobs": "Reference image — the subject to insert. Mask — where to insert it. Prompt — describe the combined result. CausVid strength — leave ~0.3-0.7 for fast 4-step renders."
+  },
+
+  "_HOWITRUNS": "No-build path (identical to wan_vace_inpaint): public yanwk image, comfy_run.py seeds ComfyUI, downloads the 4 weights + CausVid LoRA, converts the UI graph -> API via /object_info, applies patches (incl. placing the reference image onto node 162), and renders. All node types are CORE ComfyUI. ~42 GB cold start (use --idle-hold). --convert-only skips the model download.",
+  "_THREEINPUTS": "This preset takes THREE files: the source clip (positional), the mask (--mask, white = area to replace, node 215), and the reference image (--face, the subject to insert, node 162). The launcher supports --mask and --face together. Example: `--preset wan_vace_ref2video shot.mp4 --mask area.png --face new_object.png --prompt '...'`.",
+  "_REFNOTE": "VACE uses the reference as a SUBJECT/identity cue for the masked region, not a pixel-exact paste — it re-renders the area to match the clip's lighting/motion/perspective. A clean, well-lit reference of just the subject (plain background) works best. Mask resolution should match the source clip.",
+  "_PARAMS": "Node ids come from the UI graph and survive conversion; patches target API format post-conversion. KSampler is preset for CausVid (4 steps, cfg 1); for the base model set --strength 0 --set 3.inputs.steps=20 --set 3.inputs.cfg=6.",
+
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "comfy_home": "/root/ComfyUI",
+  "comfy_bundle": "/default-comfyui-bundle/ComfyUI",
+  "python": "python3.13",
+  "gpu": "rtxpro6000",
+  "mode": "instant",
+  "extra_args": "",
+
+  "workflow": "wan_vace_ref2video.workflow.json",
+
+  "node_packs": [],
+
+  "models": [
+    { "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_vace_14B_fp16.safetensors",
+      "dest": "models/diffusion_models/wan2.1_vace_14B_fp16.safetensors" },
+    { "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "dest": "models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" },
+    { "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors",
+      "dest": "models/vae/wan_2.1_vae.safetensors" }
+  ],
+
+  "lora_default": "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Wan21_CausVid_14B_T2V_lora_rank32.safetensors",
+  "lora_name": "Wan21_CausVid_14B_T2V_lora_rank32.safetensors",
+
+  "ui": {
+    "title": "Wan2.1 VACE — reference-to-video (insert a reference subject into a masked area)",
+    "primary_input": {
+      "label": "Input video",
+      "tooltip": "The source clip. The masked region (white in the mask) is regenerated to contain the reference image's subject, blended into the clip.",
+      "filetypes": [["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]
+    },
+    "secondary_input": {
+      "param": "face",
+      "label": "Reference image (subject to insert)",
+      "tooltip": "The subject/object to place into the masked region. A clean, well-lit reference on a plain background works best — VACE uses it as an identity cue and re-renders it to match the scene, not a pixel paste.",
+      "filetypes": [["Image", "*.png *.jpg *.jpeg *.webp"], ["All files", "*.*"]]
+    },
+    "resolutions": [
+      { "label": "832x480 (16:9 480p)",  "width": 832,  "height": 480 },
+      { "label": "1280x720 (16:9 720p)", "width": 1280, "height": 720 },
+      { "label": "1024x576 (16:9)",      "width": 1024, "height": 576 },
+      { "label": "720x720 (1:1)",        "width": 720,  "height": 720 },
+      { "label": "480x832 (9:16 480p)",  "width": 480,  "height": 832 },
+      { "label": "720x1280 (9:16 720p)", "width": 720,  "height": 1280 }
+    ]
+  },
+
+  "params": {
+    "prompt":   { "node": "6",   "path": "inputs.text",
+      "default": "the reference subject naturally integrated into the scene, consistent lighting and perspective, seamless blending",
+      "ui": { "label": "Prompt", "widget": "multiline", "section": "Main", "order": 1,
+              "tooltip": "Describe the COMBINED result — the reference subject sitting in the scene, matching its lighting/perspective. Naming the surrounding context helps VACE blend it. (src: Wan VACE community guidance / ComfyUI docs)" } },
+    "negative": { "node": "7",   "path": "inputs.text",
+      "default": "blur, ghosting, warping, flicker, seams, artifacts, mismatched lighting, floating object",
+      "ui": { "label": "Negative prompt", "widget": "multiline", "section": "Main", "order": 2,
+              "tooltip": "Discourage common compositing artifacts (seams, floating/mismatched subject)." } },
+    "video":    { "node": "209", "path": "inputs.file" },
+    "mask":     { "node": "215", "path": "inputs.image" },
+    "face":     { "node": "162", "path": "inputs.image" },
+    "lora":     { "node": "154", "path": "inputs.lora_name" },
+    "strength": { "node": "154", "path": "inputs.strength_model", "default": 0.3,
+      "ui": { "label": "CausVid strength", "widget": "slider", "min": 0.0, "max": 1.0, "step": 0.05,
+              "section": "Advanced", "order": 1,
+              "tooltip": "CausVid acceleration LoRA strength. Keep it on (try 0.3-0.7) with Steps=4 / CFG=1 for fast renders. For the BASE model set this to 0, Steps ~20, CFG ~6." } },
+    "steps":    { "node": "3", "path": "inputs.steps", "default": 4,
+      "ui": { "label": "Steps", "widget": "number", "min": 1, "max": 40, "step": 1,
+              "section": "Advanced", "order": 5,
+              "tooltip": "Sampler steps. CausVid on -> 4 is enough. Base model (strength 0) -> ~20." } },
+    "cfg":      { "node": "3", "path": "inputs.cfg", "default": 1.0,
+      "ui": { "label": "CFG", "widget": "slider", "min": 1.0, "max": 10.0, "step": 0.5,
+              "section": "Advanced", "order": 6,
+              "tooltip": "Guidance. CausVid needs CFG=1. Base model ~6." } },
+    "width":    { "node": "49", "path": "inputs.width", "default": 720,
+      "ui": { "label": "Width", "widget": "number", "min": 256, "max": 1280, "step": 16,
+              "section": "Advanced", "order": 2,
+              "tooltip": "Wan2.1 VACE 14B is a 480p-720p model; best at 1280x720 (or portrait). Divisible by 16. Match the source aspect; the mask must match these dims. (src: Wan2.1-VACE-14B docs)" } },
+    "height":   { "node": "49", "path": "inputs.height", "default": 720,
+      "ui": { "label": "Height", "widget": "number", "min": 256, "max": 1280, "step": 16,
+              "section": "Advanced", "order": 3,
+              "tooltip": "720p sweet spot (max ~1280); divisible by 16. (src: Wan2.1-VACE-14B docs)" } },
+    "length":   { "node": "49", "path": "inputs.length", "default": 81,
+      "ui": { "label": "Frames (length)", "widget": "number", "min": 17, "max": 161, "step": 16,
+              "section": "Advanced", "order": 4,
+              "tooltip": "Wan frame count = 16*n+1 (81 ~= 5s at 16 fps). A mask must match the clip's frame count/res. (src: Wan-Video/Wan2.1)" } }
+  }
+}

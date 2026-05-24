@@ -1,0 +1,87 @@
+{
+  "description": "LTX-2.3 22B task-aware VIDEO RESTORATION & EDITING — joyfox's 'ICEdit-Insight'. One model, four jobs via task IC-LoRA adapters on the standard LTX-2.3 dev checkpoint: (1) general restoration / artifact + noise cleanup, (2) HD super-resolution / detail recovery, (3) watermark removal, (4) hard-subtitle removal. It's generative (latent-space), so it reconstructs content behind logos/text using spatial + temporal context while preserving motion, identity and timing. Graph: Valiant-Cat/LTX2-ICEdit-Insight 'comfyui model version' (official-model variant, flat). Pick the task with the `task` knob (default = HD super-resolution).",
+
+  "docs": [
+    { "label": "ICEdit-Insight model card (joyfox)", "url": "https://huggingface.co/joyfox/LTX2.3-ICEdit-Insight" },
+    { "label": "ICEdit-Insight workflows + pipeline (GitHub)", "url": "https://github.com/Valiant-Cat/LTX2-ICEdit-Insight" },
+    { "label": "LTX-2 docs", "url": "https://docs.ltx.video" }
+  ],
+  "tags": ["video", "ltx2.3", "video-to-video", "restoration", "upscale", "object-removal", "ic-lora", "ready-to-run"],
+  "about": {
+    "what": "Cleans up and rebuilds a video four ways (pick one): repair old/degraded footage, boost it to HD/super-resolution, remove a watermark/logo, or erase burned-in subtitles — reconstructing what's behind them while keeping the people, motion and timing.",
+    "inputs": "One video clip, and the task you want (restore / HD / watermark removal / subtitle removal).",
+    "key_knobs": "Task — which of the four jobs. Prompt — a short line describing the clean result you want (the defaults are tuned per task)."
+  },
+
+  "_TEMPLATE": "READY-TO-RUN. All weights ungated, pinned. Runs the 4 task adapters on the STANDARD LTX-2.3 22B fp8 checkpoint (Lightricks/LTX-2.3-fp8) + the rank-384 distilled LoRA + the single-file gemma fp8 encoder. The 4 task adapters are joyfox's '-general' files, downloaded UNDER the filenames the graph's IC-LoRA loaders expect (no graph edit): the active loader is node 5011. Run --convert-only FIRST (it clones the 9 node packs and surfaces any missing class).",
+  "_TASKS": "The `task` knob sets node 5011's adapter. Four values (all downloaded):\n  - ltx2.3-train/ltx2.3-video-upscale-v2.safetensors      (HD super-resolution — DEFAULT)\n  - ltx2.3-train/ltx2.3-video-restoration.safetensors     (general restoration / de-artifact)\n  - ltx2.3-train/ltx2.3-ic-watermarkeRM-v2.safetensors    (watermark / logo removal)\n  - ltx2.3-train/ltx2.3-ic-subtitles-remove.safetensors   (hard-subtitle removal)\nCLI: --set 5011.inputs.lora_name=ltx2.3-train/ltx2.3-video-restoration.safetensors (etc). Tune the prompt to match the task.",
+  "_PROMPT": "The graph routes its prompt through a Comfyroll 'CR Prompt Text' node (5132, a Chinese super-res prompt) into the positive CLIPTextEncode (2483). This preset's `prompt` param sets 2483.inputs.text DIRECTLY (a literal overrides the incoming link), so your English prompt is used and the CR Prompt Text node is pruned. Describe the CLEAN result you want.",
+  "_HOWITRUNS": "No-build path: public yanwk image, comfy_run.py clones the 9 node packs, downloads the weights, converts UI->API, patches the task adapter + prompt + input video, and renders. Heavy cold start (22B fp8 ~24GB + gemma ~12GB + adapters). The graph is flat (no subgraph). rtxpro6000 recommended.",
+  "_NODEPACKS": "9 packs; most are utility/preprocessing (image scale, prompt text, seed, image size). The ambiguous class 'LayerUtility: ImageScaleByAspectRatio V2' is taken from ComfyUI_LayerStyle (chflame163). If --convert-only flags a missing class, add/adjust the pack.",
+
+  "base": "ltx2.3-22b",
+  "requires_input": true,
+
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "comfy_home": "/root/ComfyUI",
+  "comfy_bundle": "/default-comfyui-bundle/ComfyUI",
+  "python": "python3.13",
+  "gpu": "rtxpro6000",
+  "mode": "instant",
+  "extra_args": "",
+
+  "workflow": "ltx_restore.workflow.json",
+
+  "node_packs": [
+    "https://github.com/Lightricks/ComfyUI-LTXVideo",
+    "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite",
+    "https://github.com/kijai/ComfyUI-KJNodes",
+    "https://github.com/cubiq/ComfyUI_essentials",
+    "https://github.com/rgthree/rgthree-comfy",
+    "https://github.com/chflame163/ComfyUI_LayerStyle",
+    "https://github.com/Suzie1/ComfyUI_Comfyroll_CustomNodes",
+    "https://github.com/yolain/ComfyUI-Easy-Use",
+    "https://github.com/BadCafeCode/masquerade-nodes-comfyui"
+  ],
+
+  "models": [
+    { "url": "https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors",
+      "dest": "models/checkpoints/ltx-2.3-22b-dev-fp8.safetensors" },
+    { "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors",
+      "dest": "models/text_encoders/gemma_3_12B_it_fp8_e4m3fn.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-lora-384.safetensors",
+      "dest": "models/loras/ltx-2.3-22b-distilled-lora-384.safetensors" },
+    { "url": "https://huggingface.co/joyfox/LTX2.3-ICEdit-Insight/resolve/main/ltx2.3-ic-video-upscale-general.safetensors",
+      "dest": "models/loras/ltx2.3-train/ltx2.3-video-upscale-v2.safetensors" },
+    { "url": "https://huggingface.co/joyfox/LTX2.3-ICEdit-Insight/resolve/main/ltx2.3-ic-watermark-remove-general.safetensors",
+      "dest": "models/loras/ltx2.3-train/ltx2.3-ic-watermarkeRM-v2.safetensors" },
+    { "url": "https://huggingface.co/joyfox/LTX2.3-ICEdit-Insight/resolve/main/ltx2.3-video-restoration-general.safetensors",
+      "dest": "models/loras/ltx2.3-train/ltx2.3-video-restoration.safetensors" },
+    { "url": "https://huggingface.co/joyfox/LTX2.3-ICEdit-Insight/resolve/main/ltx2.3-ic-subtitles-remove-general.safetensors",
+      "dest": "models/loras/ltx2.3-train/ltx2.3-ic-subtitles-remove.safetensors" }
+  ],
+
+  "ui": {
+    "title": "LTX-2.3 Restore — task-aware video restoration / HD / watermark + subtitle removal",
+    "primary_input": {
+      "label": "Video to restore",
+      "tooltip": "The clip to repair / upscale / clean. The chosen task adapter reconstructs the result while keeping motion, identity and timing. Default frame_load_cap is 121 (~5s at 24fps).",
+      "filetypes": [["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]
+    }
+  },
+
+  "params": {
+    "task": { "node": "5011", "path": "inputs.lora_name", "default": "ltx2.3-train/ltx2.3-video-upscale-v2.safetensors",
+      "ui": { "label": "Task adapter", "widget": "text", "section": "Main", "order": 1,
+              "tooltip": "Which restoration job. One of: ltx2.3-train/ltx2.3-video-upscale-v2.safetensors (HD super-res, default); .../ltx2.3-video-restoration.safetensors (general restore); .../ltx2.3-ic-watermarkeRM-v2.safetensors (watermark removal); .../ltx2.3-ic-subtitles-remove.safetensors (subtitle removal). All four are downloaded; pick one." } },
+    "prompt": { "node": "2483", "path": "inputs.text",
+      "default": "Restore and enhance this video: remove compression artifacts and noise, reconstruct sharp high-frequency detail and clean natural texture, preserve the people, scene, motion, camera movement and timing exactly.",
+      "ui": { "label": "Prompt (clean result)", "widget": "multiline", "section": "Main", "order": 2,
+              "tooltip": "Describe the CLEAN result you want for the chosen task. For watermark/subtitle removal, describe the clean underlying scene. (Overrides the graph's built-in CR Prompt Text.)" } },
+    "negative": { "node": "2612", "path": "inputs.text",
+      "default": "pc game, console game, video game, ugly, 3d render, photo, still, static, slow",
+      "ui": { "label": "Negative prompt", "widget": "multiline", "section": "Main", "order": 3,
+              "tooltip": "The graph's shipped negative (discourages stillness/artifacts)." } },
+    "video": { "node": "5099", "path": "inputs.video" }
+  }
+}

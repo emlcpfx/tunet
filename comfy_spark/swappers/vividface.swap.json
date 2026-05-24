@@ -1,0 +1,76 @@
+{
+  "description": "VividFace (NeurIPS 2025) diffusion video FACE SWAP on Spark — the R&D 'quality yardstick' from the face-swap plan. Give it a target/body video + a face reference image; it detects the face per frame, runs the VividFace SD1.5+AnimateDiff hybrid (Deep3DFaceRecon 3D conditioning + an identity encoder), and writes the swapped video to ShareSync. The non-Comfy sibling of comfy_launch.py (wrap-and-run, like lora_train.py): nothing custom is built, we just clone deepcs233/VividFace and run its own infer.py.",
+
+  "_RD_ONLY": "THIS ENGINE IS NOT LICENSE-CLEAN FOR BILLED CLIENT SHOTS. VividFace weights are 'academic use'; the identity encoder (IResNet100) is trained on WebFace42M (research-only); the base is Stable-Diffusion-1.5 (OpenRAIL behavioural restrictions); the repo's default face detector is InsightFace (non-commercial). Use it to EVALUATE quality and set a bar — the clean delivery path is the LTX/BFS preset (ltx_faceswap) or training your own on rights-cleared data. The launcher prints a NOT-FOR-DELIVERY banner because of the rd_only flag.",
+  "rd_only": true,
+
+  "_HOWITRUNS": "No-build-on-your-machine path mirroring comfy_spark: a CUDA-12.1 PyTorch -devel base image runs faceswap_run.py, which clones VividFace, apt-installs the GL/build deps, pip-installs requirements.txt, builds nvdiffrast from source (cd Deep3DFaceRecon/nvdiffrast && pip install .), snapshot-downloads the ~12GB weights onto the node, generates the per-frame face annotations VividFace needs (4 bbox + 10 keypoints) with a CLEAN detector (OpenCV YuNet, not InsightFace) for any custom video, then runs infer.py and self-uploads outputs/ to the job's ShareSync folder. Heavy COLD start (env build + nvdiffrast compile + 12GB weights); use --idle-hold to keep a warm node. Validate the plan for free with --dry-run; prove the container first with --examples (runs VividFace's own bundled samples, which already ship annotations — no detector needed).",
+  "_CONTAINER": "Base is pytorch/pytorch:2.4.1-cuda12.1-cudnn9-devel — it already carries torch==2.4.1 + CUDA 12.1 + nvcc + cuDNN, which is the bulk of VividFace's stack and what nvdiffrast needs to compile. We still apt-install the GL/EGL headers (nvdiffrast) + cmake/build-essential (dlib) + libgl/glib (opencv runtime). VividFace pins python 3.8, but torch 2.4.1 runs on the base's 3.10/3.11 too; if a 3.8-only dep breaks, set env_python and the runner builds a conda 3.8 env. Override the whole image with --image.",
+  "_WEIGHTS": "deepcs233/VividFace (~12GB: checkpoints/, face3dvae/, sd_13channel_stage1_pretrain/, BFM/, dinov2-base/, IResNet100_WebFace42M.pth, fuser_down.pth) snapshots into weights/. The repo tree also shows a stable-diffusion-v1-5/ subdir; if the snapshot doesn't populate it, the second model entry pulls SD1.5 from the community re-host into weights/stable-diffusion-v1-5/ (the runner skips it when already present).",
+
+  "engine": "vividface",
+  "kind": "video",
+
+  "image": "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-devel",
+  "repo": "https://github.com/deepcs233/VividFace",
+  "repo_dir": "/opt/vividface",
+  "env_python": null,
+  "python": "python",
+  "gpu": "l40s",
+  "_GPU": "MUST be an Ada/Ampere/Hopper card, NOT Blackwell. VividFace pins torch==2.4.1 (CUDA 12.1), whose kernels top out at sm_90 — an RTX PRO 6000 Blackwell (sm_120) fails with 'CUDA capability sm_120 is not compatible with the current PyTorch installation'. L40S (Ada, sm_89, 48GB) runs it natively and is plenty for the 512px SD1.5 model. To run on Blackwell you'd need a newer-torch build (cu128+/sm_120) and to confirm VividFace's diffusers-0.27.2-era code still runs on it — a separate exercise; L40S is the working path today.",
+  "mode": "instant",
+
+  "apt": [
+    "build-essential", "cmake", "ninja-build", "git", "wget",
+    "libgl1-mesa-dev", "libegl1-mesa-dev", "libglib2.0-0", "libsm6", "libxext6", "libxrender1", "ffmpeg"
+  ],
+  "pip_extra": [],
+  "build_cmds": [
+    "cd Deep3DFaceRecon/nvdiffrast && pip install ."
+  ],
+
+  "detector": "yunet",
+  "_DETECTOR": "How the per-frame face annotations (4 bbox + 10 keypoints = the 14 values infer.py wants) are produced for a CUSTOM video. 'yunet' = OpenCV FaceDetectorYN — Apache/BSD, ships 5 facial keypoints, license-clean (the default). 'insightface' = the repo's recommended detector, but non-commercial; only for pure research comparison. --examples skips this entirely (bundled samples carry their own .txt).",
+
+  "weights_subdir": "weights",
+  "infer_script": "infer.py",
+  "examples_arg": "examples",
+
+  "relocate": [
+    { "from": "weights/BFM", "to": "Deep3DFaceRecon/BFM",
+      "note": "Deep3DFaceRecon loads the Basel Face Model AND its network checkpoint (BFM/checkpoints/base/epoch_20.pth) from its OWN BFM/ dir; those ship inside the VividFace weight repo's BFM/ subtree, so recursively symlink them across." },
+    { "symlink": "weights/face3dvae2", "target": "weights/face3dvae",
+      "note": "infer.py reads the face-3D VAE from weights/face3dvae2, but the repo ships it as face3dvae/ — alias it." }
+  ],
+
+  "models": [
+    { "hf_repo": "deepcs233/VividFace", "dest": "weights",
+      "note": "Whole VividFace weight repo (~12GB). 'academic use' weights — see _RD_ONLY." },
+    { "hf_repo": "stable-diffusion-v1-5/stable-diffusion-v1-5", "dest": "weights/stable-diffusion-v1-5",
+      "present_marker": "model_index.json",
+      "note": "SD1.5 base (community re-host of the pulled runwayml repo). OpenRAIL-M. The VividFace snapshot ships an INCOMPLETE stable-diffusion-v1-5/ (no model_index.json), so download the full pipeline here and merge; the marker keeps a complete dir from re-downloading on a warm node." }
+  ],
+
+  "ui": {
+    "title": "VividFace — diffusion video face swap (R&D / quality benchmark, not for delivery)",
+    "primary_input": {
+      "label": "Target / body video",
+      "tooltip": "The clip whose motion + scene are kept; the face is replaced with the reference image's identity. R&D ENGINE — outputs are not license-clean for billed client shots (see the preset notes).",
+      "filetypes": [["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]
+    },
+    "secondary_input": {
+      "param": "face",
+      "label": "Face reference image",
+      "tooltip": "The identity to swap IN. A clear, well-lit, frontal face works best. VividFace takes identity from this image and follows the target video's pose/expression.",
+      "filetypes": [["Image", "*.png *.jpg *.jpeg *.webp"], ["All files", "*.*"]]
+    }
+  },
+
+  "params": {
+    "detector": { "ui": { "label": "Face detector (preprocessing)", "widget": "choice",
+        "choices": ["yunet", "insightface"], "section": "Advanced", "order": 1,
+        "tooltip": "How per-frame face boxes/landmarks are found for a custom video. 'yunet' (default) is license-clean; 'insightface' matches the paper but is non-commercial — research comparison only." } },
+    "frame_cap": { "ui": { "label": "Max frames", "widget": "number", "min": 0, "max": 2000, "step": 1, "section": "Advanced", "order": 2,
+        "tooltip": "Cap the number of target-video frames processed (0 = all). Keep small for a first quality check; SD1.5+AnimateDiff is per-window so long clips are slow." } }
+  }
+}

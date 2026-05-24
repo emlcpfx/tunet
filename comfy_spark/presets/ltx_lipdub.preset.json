@@ -1,0 +1,78 @@
+{
+  "description": "LTX-2.3 22B LIP-DUB / lip re-sync via the 'LTX-2.3-22b-IC-LoRA-LipDub' IC-LoRA. You give it a talking-head video; LTX regenerates the mouth so it matches the speech on that clip's own audio track, in a two-stage HQ pass (base render + 2x spatial upscale), while preserving the speaker's identity and the scene. Use it to clean up / re-sync lip motion, or as the base for rephrasing (see _AUDIO for swapping in new speech). TIER-2 / IC-LoRA: rides a model patch + an audio-conditioned guide path, so it's its own preset (not a stackable catalog LoRA). Graph: Lightricks/ComfyUI-LTXVideo example 'LTX-2.3_ICLoRA_Lipdub_Two_Stage_Distilled'.",
+
+  "docs": [
+    { "label": "LipDub IC-LoRA model card", "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-LipDub" },
+    { "label": "LTX-2 docs", "url": "https://docs.ltx.video" }
+  ],
+  "tags": ["video", "ltx2.3", "video-to-video", "lip-sync", "audio", "ic-lora", "two-stage", "ready-to-run"],
+  "about": {
+    "what": "Re-syncs a talking person's mouth to the speech on their video, keeping their face, identity and the scene — then sharpens the result with a 2x high-detail pass.",
+    "inputs": "One talking-head video WITH an audio track (the speech that the new mouth motion should match).",
+    "key_knobs": "Prompt — describe the speaker and scene (helps identity/quality). Frames — clip length. The audio comes from the input video itself (see notes to dub new speech)."
+  },
+
+  "_TEMPLATE": "READY-TO-RUN. All five weights are pinned to real, ungated HF URLs (dev checkpoint + gemma encoder + official rank-384 distilled LoRA + LTX-2.3 spatial upscaler x2 + the LipDub IC-LoRA). Run --convert-only FIRST: it skips the weight pull and confirms the converted graph (incl. the audio-VAE / AV-latent path) builds.",
+  "_AUDIO": "LTX-2.3 is audio-aware. This graph reads the INPUT VIDEO's own audio (LoadVideo 5002 -> GetVideoComponents 5010 -> LTXVAudioVAEEncode 5005 -> audio ref tokens), and re-generates the mouth to match it. So a clip MUST have an audio track (a silent clip gets a silent guard track added, which gives nothing to sync to). To DUB to NEW speech (true 'rephrasing'), the audio source node would need to be swapped to a separate LoadAudio -- not wired in this single-input preset yet; tracked as a follow-up.",
+  "_HOWITRUNS": "No-build path: public base image, comfy_run.py clones node_packs, downloads the weights, converts UI->API (the s1/s2 ResizeImageMaskNode DynamicCombo nodes are handled by the converter), applies patches, and renders. Two-stage + audio path makes this a heavier cold start; rtxpro6000 recommended.",
+  "_TWOSTAGE": "Stage 1 renders at the EmptyLTXVLatentVideo size (3059, 960x544); the spatial upscaler x2 (4974/4975) doubles the latent and the second sampler (4971) refines it, so the saved clip is ~1920x1088. The input frames are resized to the stage sizes by the coupled ResizeImageMaskNode pair (s1 5009 = 960x544, s2 5003 = 1920x1088) -- if you change the stage-1 width/height (3059) you must edit those two resize nodes to match, so resolution is left at the graph default here.",
+  "_DISTILL": "Uses Lightricks' official rank-384 distilled LoRA at the graph's tuned 0.5. If lip detail looks dampened by the distill LoRA on top of the IC-LoRA conditioning, swap to the cond-safe rank-72 variant (TenStrip ...ceil72_condsafe) by editing LoraLoaderModelOnly (5018) lora_name and this models entry. See README 'Cond-safe distill LoRA'.",
+
+  "base": "ltx2.3-22b",
+  "lora_catalog": "ltx2.loras.json",
+  "lora_chain": { "anchor": "5017", "slot": 0 },
+  "requires_input": true,
+
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "comfy_home": "/root/ComfyUI",
+  "comfy_bundle": "/default-comfyui-bundle/ComfyUI",
+  "python": "python3.13",
+  "gpu": "rtxpro6000",
+  "mode": "instant",
+  "extra_args": "",
+
+  "workflow": "ltx_lipdub.workflow.json",
+
+  "node_packs": [
+    "https://github.com/Lightricks/ComfyUI-LTXVideo",
+    "https://github.com/kijai/ComfyUI-KJNodes"
+  ],
+
+  "models": [
+    { "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-dev.safetensors",
+      "dest": "models/checkpoints/ltx-2.3-22b-dev.safetensors" },
+    { "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it.safetensors",
+      "dest": "models/text_encoders/comfy_gemma_3_12B_it.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+      "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-distilled-lora-384-1.1.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+      "dest": "models/latent_upscale_models/ltx-2.3-spatial-upscaler-x2-1.1.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-LipDub/resolve/main/ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors",
+      "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors" }
+  ],
+
+  "ui": {
+    "title": "LTX-2.3 Lip-Dub — re-sync a talking head to its own audio (IC-LoRA)",
+    "primary_input": {
+      "label": "Talking-head video (with audio)",
+      "tooltip": "A clip of a person speaking, WITH an audio track. The mouth is regenerated to match that audio; the face/identity and scene are preserved. Frontal, well-lit faces work best. Output is upscaled 2x.",
+      "filetypes": [["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]
+    }
+  },
+
+  "params": {
+    "prompt":   { "node": "2483", "path": "inputs.text",
+      "default": "A person speaks directly to the camera in a softly lit room, natural skin texture and clear facial detail, calm and articulate delivery, shallow depth of field.",
+      "ui": { "label": "Prompt", "widget": "multiline", "section": "Main", "order": 1,
+              "tooltip": "Describe the SPEAKER and scene (helps the model hold identity and quality) -- not the words being said (those come from the audio). Same LTX-2.3 single-paragraph style. (src: LipDub example workflow + LTX-2.3 prompt guide)" } },
+    "negative": { "node": "2612", "path": "inputs.text",
+      "default": "pc game, console game, video game, cartoon, childish, ugly",
+      "ui": { "label": "Negative prompt", "widget": "multiline", "section": "Main", "order": 2,
+              "tooltip": "Lightricks' shipped LTX-2 negative." } },
+    "video":    { "node": "5002", "path": "inputs.file" },
+    "length":   { "node": "3059", "path": "inputs.length", "default": 121,
+      "ui": { "label": "Frames (length)", "widget": "number", "min": 9, "max": 497, "step": 8,
+              "section": "Advanced", "order": 1,
+              "tooltip": "Frame count; LTX REQUIRES 8*n+1 (..., 121, 161). Should be >= the talking clip's frame count so the speech fits. 121 ~= 4s. (src: LTX-2.3 docs)" } }
+  }
+}

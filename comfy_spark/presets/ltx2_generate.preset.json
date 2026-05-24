@@ -6,6 +6,10 @@
     { "label": "Official ComfyUI example workflows", "url": "https://github.com/Lightricks/ComfyUI-LTXVideo/tree/master/example_workflows/2.3" }
   ],
   "tags": ["video", "ltx2.3", "text-to-video", "image-to-video", "generation", "lora-stacking", "ready-to-run"],
+  "prompt_guide": {
+    "url": "https://github.com/Lightricks/LTX-2#%EF%B8%8F-prompting-for-ltx-2",
+    "tips": "Write ONE flowing paragraph like a cinematographer's shot list, in order: open with the action; then movement & gestures; appearance; the setting; camera angle/move; lighting & mood; any changes or sudden events. Be literal and specific (not abstract). Keep it under ~200 words; longer prompts fill longer clips."
+  },
   "about": {
     "what": "Creates a brand-new video — either starting from one image you provide, or from a written description alone. This is the main place to add 'look' extras (style, camera moves, effects) from the LoRA list.",
     "inputs": "A starting image (for image-to-video) and/or a written description of the scene and action. Optional style/effect add-ons.",

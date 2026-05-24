@@ -28,6 +28,16 @@ workflow.json
 (missing pack, wiring, version drift) for pennies. Only run a full render once the
 gate is green. This single discipline is what made an agentic fix-loop affordable.
 
+**Naming rule — always pass `--name`.** When launching a job (`comfy_launch.py`,
+`faceswap.py`, `lora_train.py`), give it a meaningful `--name` so the Spark / tunet-web
+job list shows something legible instead of a random job-id hash. Bake in *what* and
+*on what*, e.g. `--name ltx_faceswap-PF0013-convtest` or `--name vividface-PF0013-fc40`.
+The sibling launchers auto-derive a name when you omit it (`swap-<recipe>-<inputstem>`,
+`train-<recipe>-<trigger>`), but ad-hoc / agentic `comfy_launch.py` runs that skip it
+land as unidentifiable hashes — the exact "which job was which?" problem when you've
+fired a dozen iterations. One name per intent (preset + input + purpose) makes the
+fix-loop history readable after the fact.
+
 ## Self-heal mechanisms (each: symptom → fix → where)
 
 ### A. Missing node pack — resolve from the graph

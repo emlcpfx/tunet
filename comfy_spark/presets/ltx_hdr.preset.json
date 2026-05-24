@@ -5,7 +5,7 @@
     { "label": "HDR IC-LoRA model card", "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-HDR" },
     { "label": "LTX-2 docs", "url": "https://docs.ltx.video" }
   ],
-  "tags": ["video", "ltx2.3", "video-to-video", "hdr", "color-grade", "ic-lora", "ready-to-run"],
+  "tags": ["video", "ltx2.3", "video-to-video", "hdr", "color-grade", "ic-lora", "batch", "ready-to-run"],
   "about": {
     "what": "Takes an ordinary (SDR) video and re-grades it into an HDR look — brighter highlights and a wider range of light — while keeping the original motion and content.",
     "inputs": "One video clip.",
@@ -20,6 +20,17 @@
   "lora_catalog": "ltx2.loras.json",
   "lora_chain": { "anchor": "3940", "slot": 0 },
   "requires_input": true,
+
+  "_BATCH": "Batch-ready: pass multiple SDR clips (and/or EXR/PNG/TIFF frame folders) with --batch / the web Batch picker to re-grade them all in one job (the model loads once). input_anchor (GetVideoComponents 5105) lets a frame-sequence input swap in; output_prefix names the mp4 preview AND gives each item its own HDR EXR folder (output/<stem>_hdr_exr) so a batch never overwrites itself.",
+  "input_anchor": { "node": "5105" },
+  "output_prefix": {
+    "path": "inputs.filename_prefix",
+    "template": "{stem}_ltx_hdr",
+    "nodes": [
+      "5109",
+      { "node": "5114", "path": "inputs.output_dir", "template": "output/{stem}_hdr_exr" }
+    ]
+  },
 
   "image": "yanwk/comfyui-boot:cu130-slim-v2",
   "comfy_home": "/root/ComfyUI",

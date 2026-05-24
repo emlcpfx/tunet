@@ -1,0 +1,82 @@
+{
+  "description": "ByteDance LatentSync — audio-driven LIP-SYNC. Give it a talking-head video and an audio track; LatentSync re-renders the mouth so it matches the speech (latent-diffusion lip sync, Whisper audio features + SyncNet supervision). A SEPARATE ecosystem from LTX (its own ComfyUI wrapper, weights and base). Graph: ShmuelRonen/ComfyUI-LatentSyncWrapper 'latentsync1.5_comfyui_basic'. NOTE: the wrapper pip-installs native deps (mediapipe / decord / face-alignment) on first load and manages an auxiliary model cache — see _RISK; --convert-only is the cheap test that those deps install on the image.",
+
+  "docs": [
+    { "label": "ComfyUI-LatentSyncWrapper", "url": "https://github.com/ShmuelRonen/ComfyUI-LatentSyncWrapper" },
+    { "label": "LatentSync (ByteDance) paper/model", "url": "https://github.com/bytedance/LatentSync" },
+    { "label": "Weights mirror (chunyu-li)", "url": "https://huggingface.co/chunyu-li/LatentSync" }
+  ],
+  "tags": ["video", "latentsync", "video-to-video", "lip-sync", "audio", "two-inputs", "template"],
+  "about": {
+    "what": "Re-syncs a talking person's mouth to a separate audio track — true dubbing: keep the video, swap the speech, and the lips follow the new audio.",
+    "inputs": "A talking-head video (25fps, frontal face works best) and an audio file with the speech to sync to.",
+    "key_knobs": "Video + audio (both required). Lip expressiveness and inference steps are advanced knobs on the node."
+  },
+
+  "_RISK": "UNVERIFIED on Spark. Two risks the gate/render must clear: (1) NATIVE DEPS — the wrapper's requirements (mediapipe, decord, face-alignment, DeepCache) must pip-install on the yanwk cu130 image; if a wheel fails, this needs a custom image with them baked. --convert-only tests this (it clones + installs the pack). (2) RUNTIME AUTODOWNLOAD — the wrapper fetches auxiliary models (s3fd, etc) to ~/.latentsync16_models at node-execute time; the Spark node has network, so this should work at render. The private LatentSync weights are provided here from the chunyu-li mirror, placed in the wrapper's own checkpoints/ dir.",
+  "_WEIGHTS": "Placed in the wrapper's OWN dir (custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints/), NOT models/, because the node hardcodes that path. `stable_syncnet.pt` is the chunyu-li `latentsync_syncnet.pt` saved under the name the wrapper expects. The SD VAE is the standard sd-vae-ft-mse. If the wrapper wants a different layout/version (1.6 vs 1.5), adjust dests after the first render.",
+  "_INPUTS": "TWO inputs: the video (positional / --input) and the audio (--face, reused as the generic secondary-input slot — it just stages the file and patches LoadAudio node 37). e.g. `--preset latentsync clip.mp4 --face speech.wav`.",
+
+  "base": "latentsync",
+  "requires_input": true,
+
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "comfy_home": "/root/ComfyUI",
+  "comfy_bundle": "/default-comfyui-bundle/ComfyUI",
+  "python": "python3.13",
+  "gpu": "l40s",
+  "mode": "instant",
+  "extra_args": "",
+
+  "workflow": "latentsync.workflow.json",
+
+  "node_packs": [
+    "https://github.com/ShmuelRonen/ComfyUI-LatentSyncWrapper",
+    "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite"
+  ],
+
+  "models": [
+    { "url": "https://huggingface.co/chunyu-li/LatentSync/resolve/main/latentsync_unet.pt",
+      "dest": "custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints/latentsync_unet.pt" },
+    { "url": "https://huggingface.co/chunyu-li/LatentSync/resolve/main/latentsync_syncnet.pt",
+      "dest": "custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints/stable_syncnet.pt" },
+    { "url": "https://huggingface.co/chunyu-li/LatentSync/resolve/main/whisper/tiny.pt",
+      "dest": "custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints/whisper/tiny.pt" },
+    { "url": "https://huggingface.co/stabilityai/sd-vae-ft-mse/resolve/main/diffusion_pytorch_model.safetensors",
+      "dest": "custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints/vae/diffusion_pytorch_model.safetensors" },
+    { "url": "https://huggingface.co/stabilityai/sd-vae-ft-mse/resolve/main/config.json",
+      "dest": "custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints/vae/config.json" }
+  ],
+
+  "ui": {
+    "title": "LatentSync — audio-driven lip-sync (dub a talking head to new speech)",
+    "primary_input": {
+      "label": "Talking-head video (25fps, frontal)",
+      "tooltip": "The clip whose mouth gets re-synced. 25fps and a clear frontal face work best.",
+      "filetypes": [["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]
+    },
+    "secondary_input": {
+      "param": "face",
+      "label": "Audio track (the speech to sync to)",
+      "tooltip": "The audio whose speech the mouth should follow. (Mapped through the generic secondary-input slot.)",
+      "filetypes": [["Audio", "*.wav *.mp3 *.m4a *.flac *.aac *.ogg"], ["All files", "*.*"]]
+    }
+  },
+
+  "params": {
+    "video": { "node": "40", "path": "inputs.video" },
+    "face":  { "node": "37", "path": "inputs.audio" },
+    "seed":  { "node": "54", "path": "inputs.seed", "default": 1331,
+      "ui": { "label": "Seed", "widget": "number", "min": 0, "max": 4294967295, "step": 1,
+              "section": "Advanced", "order": 1,
+              "tooltip": "Random seed for the lip-sync diffusion. Change to reroll, fix to reproduce." } },
+    "steps": { "node": "54", "path": "inputs.inference_steps", "default": 20,
+      "ui": { "label": "Inference steps", "widget": "number", "min": 1, "max": 50, "step": 1,
+              "section": "Advanced", "order": 2,
+              "tooltip": "Lip-sync diffusion steps (20 default). The graph predates this input so the preset supplies it; the installed LatentSyncNode requires it." } },
+    "lips_expression": { "node": "54", "path": "inputs.lips_expression", "default": 1.5,
+      "ui": { "label": "Lip expressiveness", "widget": "slider", "min": 0.0, "max": 3.0, "step": 0.1,
+              "section": "Advanced", "order": 3,
+              "tooltip": "How pronounced the mouth movement is (1.5 default). Higher = more expressive lips. Also supplied by the preset (graph predates this required input)." } }
+  }
+}

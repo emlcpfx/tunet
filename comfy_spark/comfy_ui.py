@@ -260,6 +260,8 @@ class App:
         self.param_getters = {}
         self.param_vars = {}        # param name -> tk var (for the resolution dropdown to drive)
         self.lora_rows = []
+        self.batch_items = []       # paths (video files / sequence folders) for --batch
+        self.batch_list = None      # the Listbox widget (None when preset isn't batchable)
         self.detect_note = None     # label under the input row; filled by the clip probe
         preset = self.presets[self.preset_var.get()]
         ui = preset.get("ui", {})
@@ -307,6 +309,10 @@ class App:
                                        [["Image", "*.png *.jpg *.jpeg *.webp"], ["All files", "*.*"]]),
                                sec.get("tooltip", "The identity to swap in (a clear, well-lit "
                                        "frontal face works best)."))
+
+        # batch section (presets that name outputs per-input) — many inputs, one job
+        if self._can_batch(preset):
+            self._batch_section(ui)
 
         # declared knobs, grouped by section
         params = preset.get("params", {})
@@ -398,6 +404,20 @@ class App:
                 link.pack(side="left", padx=(0, 12))
                 link.bind("<Button-1>", lambda _e, u=url: webbrowser.open(u))
 
+        # model-specific prompting help (preset.prompt_guide) — clickable link + [?] tips
+        pg = preset.get("prompt_guide") or {}
+        if pg.get("url"):
+            row = ttk.Frame(frame)
+            row.pack(fill="x", anchor="w", pady=(3, 1))
+            ttk.Label(row, text="Prompting", width=13, anchor="nw",
+                      font=("Segoe UI", 9, "bold")).pack(side="left")
+            link = tk.Label(row, text="prompting guide ↗", fg="#2a6fdb", cursor="hand2",
+                            font=("Segoe UI", 9, "underline"))
+            link.pack(side="left", padx=(0, 6))
+            link.bind("<Button-1>", lambda _e, u=pg["url"]: webbrowser.open(u))
+            if pg.get("tips"):
+                _help(row, pg["tips"]).pack(side="left")
+
     def _file_row(self, parent, label, var, filetypes, tip, on_change=None):
         row = ttk.Frame(parent)
         row.pack(fill="x", pady=3)
@@ -417,6 +437,64 @@ class App:
         if on_change:                    # also probe a hand-typed / pasted path
             entry.bind("<FocusOut>", lambda _e: on_change())
             entry.bind("<Return>", lambda _e: on_change())
+
+    # ── batch (many inputs, one warm node) ──────────────────────────────────────
+
+    @staticmethod
+    def _can_batch(preset):
+        """Batchable = a single primary clip input, outputs named per-input, no
+        second file (mirrors comfy-form.tsx canBatch + the CLI's --batch contract)."""
+        params = preset.get("params", {})
+        return (("video" in params or "image" in params)
+                and bool(preset.get("output_prefix"))
+                and "mask" not in params and "face" not in params)
+
+    def _batch_section(self, ui):
+        bi = ui.get("batch_input") or {}
+        frame = ttk.LabelFrame(self.form_host, text="Batch  (many inputs in ONE job)", padding=8)
+        frame.pack(fill="x", pady=6)
+        row = ttk.Frame(frame)
+        row.pack(fill="x")
+        ttk.Label(row, text="Inputs", width=18, anchor="nw").pack(side="left")
+        _help(row, bi.get("tooltip",
+              "Add any number of video files and/or folders of frames (EXR / PNG / JPG / TIFF). "
+              "They all render in one job on a single warm GPU (the model loads once) — far cheaper "
+              "than one job each — and each output is named after its input. Overrides the single "
+              "input above.")).pack(side="left", padx=(0, 6), anchor="n")
+        self.batch_list = tk.Listbox(row, height=4, activestyle="none")
+        self.batch_list.pack(side="left", fill="x", expand=True)
+        btns = ttk.Frame(row)
+        btns.pack(side="left", fill="y", padx=(6, 0))
+        ttk.Button(btns, text="+ Files…", command=self._batch_add_files).pack(fill="x", pady=1)
+        ttk.Button(btns, text="+ Folder…", command=self._batch_add_folder).pack(fill="x", pady=1)
+        ttk.Button(btns, text="Remove", command=self._batch_remove).pack(fill="x", pady=1)
+        ttk.Button(btns, text="Clear", command=self._batch_clear).pack(fill="x", pady=1)
+
+    def _batch_add(self, paths):
+        for p in paths:
+            if p and p not in self.batch_items:
+                self.batch_items.append(p)
+                kind = "folder" if os.path.isdir(p) else "clip"
+                self.batch_list.insert("end", f"[{kind}]  {p}")
+
+    def _batch_add_files(self):
+        self._batch_add(filedialog.askopenfilenames(
+            filetypes=[["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]) or [])
+
+    def _batch_add_folder(self):
+        d = filedialog.askdirectory(title="Pick an image-sequence folder")
+        if d:
+            self._batch_add([d])
+
+    def _batch_remove(self):
+        for i in reversed(self.batch_list.curselection()):
+            del self.batch_items[i]
+            self.batch_list.delete(i)
+
+    def _batch_clear(self):
+        self.batch_items = []
+        if self.batch_list:
+            self.batch_list.delete(0, "end")
 
     # ── input-clip probe → auto-fill Frames + fps ───────────────────────────────
 
@@ -677,9 +755,15 @@ class App:
         preset = self.presets[preset_name]
         argv = [sys.executable, "-u", LAUNCH, "--preset", preset_name]
 
-        primary = self.primary_var.get().strip()
-        if primary:
-            argv.append(primary)
+        # Batch overrides the single positional input: pass each picked file/folder
+        # as --batch (the launcher classifies clip vs sequence folder).
+        if self.batch_items:
+            for p in self.batch_items:
+                argv += ["--batch", p]
+        else:
+            primary = self.primary_var.get().strip()
+            if primary:
+                argv.append(primary)
 
         mask = self.mask_var.get().strip()
         if mask:

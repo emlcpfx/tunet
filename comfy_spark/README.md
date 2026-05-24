@@ -25,6 +25,10 @@ It has two layers:
     "BFS" V3](https://huggingface.co/Alissonerdx/BFS-Best-Face-Swap-Video)
     head-swap LoRA). A body/motion clip **+ a face reference image** (`--face`).
     All weights pinned — runs as-is. See below.
+  - **`seedvr2`** — [SeedVR2](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)
+    diffusion **video upscaler** (one-step super-resolution that restores real
+    detail). Ready-to-run (3B weights pinned). Built for **batch** — feed many
+    clips and/or image-sequence folders in one job (`--batch`). See below.
 - **LoRA stacking** — a curated [`loras/`](loras/) catalog of drop-in LTX-2 LoRAs
   plus `--lora name[:strength]` (repeatable, or pass a raw `.safetensors` URL).
   Triggers are auto-added to the prompt. See *Stacking LoRAs* below.
@@ -554,6 +558,73 @@ To run the **base model without Lightning** (more motion, slower): set both
 strengths to 0 and raise the step split on the two `KSamplerAdvanced` nodes
 (110 high, 111 low) via `--set`, with cfg ~3.5.
 
+## The `seedvr2` preset (video upscaler, batch-ready)
+
+[SeedVR2](https://github.com/IceClear/SeedVR2) is a one-step **diffusion video
+upscaler** (model by ByteDance-Seed / IceClear; ComfyUI node by
+[numz](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)) — it upscales to a
+higher resolution and *rebuilds* genuine detail (faces, textures, edges) instead
+of just enlarging and softening, while keeping motion temporally stable. It runs
+as-is: the 3B DiT + VAE (~7.3 GB) are pinned/public.
+
+The graph is the upstream `SeedVR2_HD_video_upscale` example, cleaned by
+[`presets/seedvr2.derive.py`](presets/seedvr2.derive.py) into a flat
+`LoadVideo → GetVideoComponents → SeedVR2VideoUpscaler → CreateVideo → SaveVideo`
+(the bypassed RGBA-join + torch-compile convenience nodes are stripped, since
+comfy_run's converter has no bypass-passthrough — the same reason `ltx_faceswap`
+ships a derive). Re-run it if the upstream example moves.
+
+```bash
+# validate the converted graph cheaply (skips the ~7 GB pull)
+python comfy_spark/comfy_launch.py --preset seedvr2 --convert-only
+
+# upscale one clip (resolution = target SHORT edge; batch_size must be 4n+1)
+python comfy_spark/comfy_launch.py --preset seedvr2 shot.mp4 \
+    --set 10.inputs.resolution=1440 --idle-hold 300 --download ./renders
+```
+
+| flag/knob | node | field | note |
+|-----------|------|-------|------|
+| (positional) | 21 | `inputs.file` | source clip (core `LoadVideo`) |
+| `resolution` | 10 | `inputs.resolution` | target **short** edge (1080 = upscale to 1080p tall) |
+| `model`      | 14 | `inputs.model` | `seedvr2_ema_3b_fp16` (default, pinned) or `…7b…` (downloads on first use) |
+| `batch_size` | 10 | `inputs.batch_size` | frames per pass; **4n+1** (1,5,9,…); higher = steadier + more VRAM |
+| `color_correction` | 10 | `inputs.color_correction` | `lab` (default) re-matches colours to the source |
+
+GPU: 3B fits `l40s` (default) comfortably; the 7B model wants `rtxpro6000`. The
+real win is **batch** (below) — many clips/sequences on one warm node.
+
+## Batch: many inputs in one job (`--batch`)
+
+For upscaling/re-grading a whole shot list, `--batch` renders **many inputs
+through one warm node** — the (heavy) model loads **once** and every input is
+named after itself, instead of paying a cold start per clip. Each `--batch` entry
+is a **video file** or an **image-sequence folder** (EXR / PNG / JPG / TIFF), and
+they can be mixed:
+
+```bash
+python comfy_spark/comfy_launch.py --preset seedvr2 \
+    --batch shotA.mp4 --batch shotB.mov \
+    --batch ./plateC_exr --batch ./frames_png \
+    --idle-hold 300 --download ./renders
+```
+
+Each clip is packed by basename; each folder packs to `/input/seq/<name>/`. On the
+node, [`comfy_run.run_batch`](comfy_run.py) deep-copies the converted graph per
+item, re-points the input (a video filename, or a sequence loader swapped in at the
+preset's `input_anchor`), writes a per-item output prefix (`<input>_<preset>`), and
+queues + waits — so outputs never overwrite each other. `--batch` is **preset-
+driven**: any preset with a `video`/`image` primary input and an `output_prefix`
+works (`seedvr2`, `ltx_hdr`, `ltx_Obscura_Remova`). On the website the same lives
+behind the EZ-Comfy form's **Batch** toggle (multi-file + folder picker), and the
+job page groups the outputs per input.
+
+Adding batch to a preset: declare `output_prefix` (which saver field(s) carry the
+per-item name; a `nodes` entry can be `{node, path, template}` so a *second* saver
+— e.g. an HDR EXR `output_dir` — gets its own per-item folder) and, for graphs
+whose frames enter via a VIDEO loader (`LoadVideo → GetVideoComponents`), an
+`input_anchor` pointing at the IMAGE source so a sequence loader can swap in.
+
 ## Input: EXR frame sequences (plates in)
 
 For v2v presets (cleanplate, control, HDR) you can feed a **folder of EXR frames**
@@ -617,6 +688,17 @@ an entry (save-node chain + node pack), no code change.
 > Sequence outputs (EXR/PNG/TIFF) write `prefix.####.ext` into the job's ShareSync
 > folder — `--download` pulls the whole sequence. The model still emits audio on
 > the mp4 preview; the EXR/ProRes branch is video-only frames.
+
+### Always-previewable: auto mp4 for sequences + ProRes
+
+A browser can't play an EXR/PNG sequence or a ProRes `.mov`. So after every render
+`comfy_run.py` (`generate_previews`) **auto-encodes a small h264 `*.preview.mp4`**
+for any image-sequence output and any non-mp4 video container (ProRes `.mov`, `.mkv`,
+`.avi`) — scene-linear EXR is tonemapped to sRGB for the preview. The high-bit
+deliverable is kept untouched alongside; the website just plays the `.preview.mp4`
+inline, exactly like a normal mp4 output. Best-effort + idempotent (skips work on a
+warm re-run), never fatal. So a `--output exr32` or `prores_hq` job — and any
+sequence-only graph — is still reviewable in the browser, not download-only.
 
 ## Roadmap: VOID video inpainting
 

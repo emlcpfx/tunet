@@ -136,8 +136,91 @@ def detect_sequence(folder):
         "kind": SEQ_EXTS[ext],
         "pattern": f"/input/seq/{prefix}{'#' * pad}{ext}",
         "start": nums[0], "end": nums[-1], "step": 1,
+        # raw components so a batch can re-home the sequence under /input/seq/<tag>/
+        "prefix": prefix, "pad": pad, "ext": ext,
         "files": [os.path.join(folder, fn) for _, fn in frames],
     }
+
+
+def prefix_targets(preset):
+    """Normalize preset.output_prefix into [{node, path, template}]. Each `nodes`
+    entry is either a bare node id (uses the top-level path/template) or a
+    {node, path?, template?} object — the object form lets a second saver (e.g. an
+    HDR EXR output_dir) get its own field + per-item template so a batch doesn't
+    overwrite itself."""
+    op = preset.get("output_prefix") or {}
+    dpath = op.get("path", "inputs.filename_prefix")
+    dtmpl = op.get("template", "{stem}_{preset}")
+    out = []
+    for e in op.get("nodes", []):
+        if isinstance(e, dict):
+            out.append({"node": str(e["node"]), "path": e.get("path", dpath),
+                        "template": e.get("template", dtmpl)})
+        else:
+            out.append({"node": str(e), "path": dpath, "template": dtmpl})
+    return out
+
+
+def build_batch_manifest(batch_paths, preset, preset_name, colorspace):
+    """Turn `--batch` PATHs (video files and/or image-sequence folders) into a
+    COMFY_BATCH manifest the on-node runner loops over, plus the media to pack.
+
+    The manifest is preset-agnostic — it carries the wiring the runner needs:
+    where a video item's filename goes (the preset's primary input param), which
+    node a sequence item swaps (the preset's `input_anchor`, e.g. a
+    GetVideoComponents bridge), and where each item's output prefix is written
+    (the preset's `output_prefix`). Returns
+    (manifest, video_files, seq_groups, extra_node_packs)."""
+    params = preset.get("params", {})
+    prim = params.get("video") or params.get("image")
+    if not prim:
+        sys.exit("ERROR: --batch needs a preset whose primary input is a 'video' or 'image' "
+                 "param (a video-to-video / upscale preset). This preset declares neither.")
+    manifest = {
+        "preset": preset_name or "comfy",
+        "input_node": str(prim["node"]), "input_path": prim["path"],
+        "input_anchor": str(preset["input_anchor"]["node"]) if preset.get("input_anchor") else None,
+        "prefix_targets": prefix_targets(preset),
+        "items": [],
+    }
+    video_files, seq_groups, extra_packs = [], [], []
+    used = set()
+
+    def uniq(stem):
+        base = "".join(c if (c.isalnum() or c in "._-") else "_" for c in stem)[:60] or "item"
+        s, i = base, 2
+        while s in used:
+            s, i = f"{base}_{i}", i + 1
+        used.add(s)
+        return s
+
+    for p in batch_paths:
+        if os.path.isfile(p):
+            name = os.path.basename(p)
+            manifest["items"].append({"kind": "video", "stem": uniq(os.path.splitext(name)[0]), "name": name})
+            video_files.append(p)
+        elif os.path.isdir(p):
+            seq = detect_sequence(p)
+            if seq["kind"] not in ("exr", "img"):
+                sys.exit(f"ERROR: --batch folder {p!r} holds a {seq['kind']!r} sequence; only EXR and "
+                         f"PNG/JPG/TIFF folders are supported today (DPX is the next add — see EZ_COMFY_TODO).")
+            tag = uniq(os.path.basename(os.path.normpath(p)))
+            cs = colorspace or ("linear" if seq["kind"] == "exr" else "as-is")
+            if seq["kind"] == "exr":
+                sd = {"kind": "exr",
+                      "pattern": f"/input/seq/{tag}/{seq['prefix']}{'#' * seq['pad']}{seq['ext']}",
+                      "start": seq["start"], "end": seq["end"], "step": seq["step"], "colorspace": cs}
+                pack = "https://github.com/Conor-Collins/ComfyUI-CoCoTools_IO"
+            else:
+                sd = {"kind": "img", "dir": f"/input/seq/{tag}", "colorspace": cs}
+                pack = "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite"
+            manifest["items"].append({"kind": seq["kind"], "stem": tag, "seq": sd})
+            seq_groups.append((tag, seq["files"]))
+            if pack not in extra_packs:
+                extra_packs.append(pack)
+        else:
+            sys.exit(f"ERROR: --batch entry not found: {p}")
+    return manifest, video_files, seq_groups, extra_packs
 
 
 # ── Auth (self-contained; same shape as spark_launch.py) ──────────────────────
@@ -468,7 +551,29 @@ def resolve_selftest(fetch=False):
         got_packs  = set(res["node_packs"])
         want_models = {m["dest"] for m in (preset.get("models") or [])}
         got_models  = {m["dest"] for m in res["models"]} | {u["dest"] for u in res["unresolved"]}
-        missed_models = want_models - got_models   # regression: declared but not found
+        # A "missed" model = declared by the preset but not derived from the graph.
+        # Excuse the legit multi-file MODEL-DIRECTORY case: some loaders (e.g. the
+        # 19B LTXVGemmaCLIPModelLoader) read a whole HF folder, but the graph only
+        # names ONE shard, so the resolver can only ever see that one file (and it
+        # may even classify its dir differently). Support files (config/tokenizer/
+        # index .json, *.model) and extra shards ("-of-") are therefore STRUCTURALLY
+        # un-derivable — never count them as drift. The regression guard still fires
+        # for an over-declared SINGLE weight file (the common drift case).
+        # Also excuse an ALTERNATE weight that lives in the SAME dir as a
+        # resolver-derived model — e.g. a task-adapter set (ltx_restore ships 4 IC-LoRA
+        # adapters in loras/ltx2.3-train/ but the graph names only the 1-2 active ones;
+        # the others are switched in via a `task` param). Keyed on the FULL dir, not the
+        # category, so a stray weight in a top-level shared dir still flags.
+        _WEIGHT_EXT = (".safetensors", ".ckpt", ".pth", ".pt", ".bin", ".onnx", ".gguf")
+        _got_dirs = {os.path.dirname(d) for d in got_models}
+        def _model_dir_aux(dest):
+            base = os.path.basename(dest).lower()
+            if dest.replace("\\", "/").startswith("custom_nodes/"):
+                return True                               # pack-internal weight (path hardcoded by the node pack, e.g. ComfyUI-LatentSyncWrapper/checkpoints/) — never in the graph
+            if (not base.endswith(_WEIGHT_EXT)) or ("-of-" in base):
+                return True                               # support file or sharded weight
+            return os.path.dirname(dest) in _got_dirs     # alternate weight beside a resolved one
+        missed_models = {d for d in (want_models - got_models) if not _model_dir_aux(d)}
 
         print(f"\n=== {fn}  (workflow {wf}) ===")
         print(f"  node packs: want {len(want_packs)}, got {len(got_packs)}, "
@@ -563,6 +668,9 @@ def print_presets(tag_filter=""):
             print(f"    Knobs: {about['key_knobs']}")
         for label, url in docs_links(p):
             print(f"    Docs : {url}  ({label})")
+        pg = p.get("prompt_guide") or {}
+        if pg.get("url"):
+            print(f"    Prompt: {pg['url']}  (prompting guide)")
         if not about:                       # un-migrated preset: at least show the dev blurb
             print(f"    {p.get('description', '')[:200]}")
     if tf:
@@ -687,9 +795,11 @@ def print_catalog(catalog):
 
 # ── Tarball builder ───────────────────────────────────────────────────────────
 
-def build_tar(workflow_obj, input_files, patches=None, seq_files=None):
-    """Pack /input/workflow.json + /input/comfy_run.py (+ patches.json) + media
-    (+ a /input/seq/ frame sequence for --input-sequence)."""
+def build_tar(workflow_obj, input_files, patches=None, seq_files=None, seq_groups=None):
+    """Pack /input/workflow.json + /input/comfy_run.py (+ patches.json) + media.
+    `seq_files` is a flat single-sequence (--input-sequence) → /input/seq/.
+    `seq_groups` is a list of (subdir, files) for a BATCH of sequence folders →
+    /input/seq/<subdir>/ each, so multiple sequences don't collide by basename."""
     tmp = tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False)
     tmp.close()
     with tarfile.open(tmp.name, "w:gz") as tf:
@@ -717,6 +827,15 @@ def build_tar(workflow_obj, input_files, patches=None, seq_files=None):
             tf.add(p, arcname=f"seq/{os.path.basename(p)}")
         if seq_files:
             print(f"[pack] {len(seq_files)} sequence frame(s) ({seq_mb:.1f} MB) → /input/seq/")
+        # batch sequence folders -> /input/seq/<subdir>/ (one subdir per folder)
+        for subdir, files in (seq_groups or []):
+            grp_mb = 0.0
+            for p in files:
+                if not os.path.isfile(p):
+                    sys.exit(f"ERROR: sequence frame not found: {p}")
+                grp_mb += os.path.getsize(p) / 1024 / 1024
+                tf.add(p, arcname=f"seq/{subdir}/{os.path.basename(p)}")
+            print(f"[pack] {len(files)} frame(s) ({grp_mb:.1f} MB) → /input/seq/{subdir}/")
     print(f"[pack] → {os.path.getsize(tmp.name) / 1024 / 1024:.1f} MB")
     return tmp.name
 
@@ -730,6 +849,11 @@ def main():
                     help="(v2v presets) feed a folder of frames (EXR sequence) as the input plate "
                          "instead of a clip: swaps the input loader for LoadExrSequence and converts "
                          "scene-linear EXR -> sRGB for the model. Replaces the positional input.")
+    ap.add_argument("--batch", action="append", default=[], metavar="PATH",
+                    help="BATCH: a video file OR an image-sequence folder (EXR / PNG / JPG / TIFF). "
+                         "Repeatable — render many inputs in ONE job, paying the model load ONCE "
+                         "(the node stays warm across renders). Each input's output is named after it. "
+                         "Use instead of the positional input. Preset-driven (v2v / upscale presets).")
     ap.add_argument("--preset", help="named preset under presets/ (e.g. ltx_Obscura_Remova)")
     ap.add_argument("--workflow", help="(generic) path to an API-format workflow JSON")
     ap.add_argument("--input", action="append", default=[],
@@ -854,6 +978,18 @@ def main():
     mode = args.mode or preset.get("mode", "instant")
     instance_type = args.instance_type or GPU_TYPES[gpu]
 
+    # ── batch: many inputs (video files + image-sequence folders) in one job ──
+    # Renders every input through one warm node (the model loads once), each
+    # output named after its input. Preset-driven; replaces the positional input.
+    batch_manifest = batch_video_files = batch_seq_groups = batch_packs = None
+    if args.batch:
+        if not args.preset:
+            sys.exit("ERROR: --batch is preset-driven; pass --preset <name> (a v2v / upscale preset).")
+        if args.video or args.input_sequence:
+            sys.exit("ERROR: --batch replaces the positional input and --input-sequence; pass one or the other.")
+        batch_manifest, batch_video_files, batch_seq_groups, batch_packs = \
+            build_batch_manifest(args.batch, preset, args.preset, args.colorspace)
+
     # ── load + patch the workflow ─────────────────────────────────────────────
     input_files = list(args.input)
     if args.preset:
@@ -892,9 +1028,13 @@ def main():
     patch_ops = []
     if args.preset:
         if preset.get("requires_input", True) and not args.video \
-                and not args.input_sequence and not args.convert_only:
+                and not args.input_sequence and not args.batch and not args.convert_only:
             sys.exit("ERROR: preset mode needs a primary input file, e.g. "
-                     "`... --preset ltx_Obscura_Remova clip.mp4` (or --input-sequence DIR, or --convert-only)")
+                     "`... --preset ltx_Obscura_Remova clip.mp4` (or --input-sequence DIR, --batch PATH, or --convert-only)")
+        # Batch inputs are packed below and re-pointed per item on the node — the
+        # per-input `video`/output-prefix patches are skipped (args.video is None).
+        if batch_video_files:
+            input_files.extend(batch_video_files)
         if args.video:
             input_files.insert(0, args.video)
         if args.mask:
@@ -939,19 +1079,19 @@ def main():
 
         # Output filename: name renders <inputstem>_<preset> so ComfyUI's own
         # counter yields e.g. myclip_ltx_Obscura_Remova_00001.mp4 instead of the
-        # graph's baked "LTX2.3" prefix. Overridable per-run via --set (applied
-        # after this, so it wins). Skipped on convert-only (no input to name from).
-        op = preset.get("output_prefix")
-        if op and args.video:
-            stem = os.path.splitext(os.path.basename(args.video))[0]
+        # graph's baked "LTX2.3" prefix. A second saver target (e.g. an HDR EXR
+        # output_dir) gets its own template. Only the {stem} is sanitized, so
+        # slashes in a template (an output_dir) are kept. Overridable via --set
+        # (applied after, so it wins). Skipped on convert-only (no input to name).
+        if preset.get("output_prefix") and args.video:
+            stem = "".join(c if (c.isalnum() or c in "._-") else "_"
+                           for c in os.path.splitext(os.path.basename(args.video))[0])[:120] or "output"
             model_tag = str(preset.get("base", "")).split("-")[0]
-            raw = op.get("template", "{stem}_{preset}").format(
-                stem=stem, preset=args.preset or "comfy", model=model_tag)
-            prefix = "".join(c if (c.isalnum() or c in "._-") else "_" for c in raw)[:120] or "output"
-            for nid in op.get("nodes", []):
-                patch_ops.append({"node": str(nid), "path": op.get("path", "inputs.filename_prefix"),
-                                  "value": prefix})
-            print(f"[comfy] output filename prefix: {prefix!r} → ComfyUI adds its #####.ext counter")
+            for t in prefix_targets(preset):
+                val = (t["template"].replace("{stem}", stem)
+                       .replace("{preset}", args.preset or "comfy").replace("{model}", model_tag))
+                patch_ops.append({"node": t["node"], "path": t["path"], "value": val})
+                print(f"[comfy] output name → {t['node']}.{t['path']} = {val!r}")
 
     for s in args.set:  # generic overrides, applied last so they win
         if "=" not in s:
@@ -1028,6 +1168,13 @@ def main():
     if preset.get("models"):
         env_vars["COMFY_FETCH_MODELS"] = json.dumps(preset["models"])
 
+    # ── batch manifest: many inputs, one warm node (run_batch on the node) ──
+    if batch_manifest:
+        env_vars["COMFY_BATCH"] = json.dumps(batch_manifest)
+        for pk in (batch_packs or []):                 # CoCoTools (EXR) / VHS (PNG folders)
+            if pk not in node_packs:
+                node_packs.append(pk)
+
     # ── input image-sequence: pack frames + swap the loader on the node ──
     seq = None
     if args.input_sequence:
@@ -1065,6 +1212,11 @@ def main():
 
     if node_packs:
         env_vars["COMFY_FETCH_NODES"] = json.dumps(node_packs)
+    # Optional per-preset pip pins/extras, installed AFTER node requirements.txt so
+    # they win — for nodes whose deps resolve to a broken combo on the base image
+    # (e.g. seedvr2's diffusers/transformers flash_attn import break).
+    if preset.get("pip_extra"):
+        env_vars["COMFY_PIP_EXTRA"] = json.dumps(preset["pip_extra"])
 
     # ── dry run: show what would happen ───────────────────────────────────────
     print(f"\n[comfy] {'DRY RUN — ' if args.dry_run else ''}submit plan")
@@ -1076,6 +1228,16 @@ def main():
     if seq:
         print(f"        in-seq    : {len(seq['files'])} {seq['kind']} frame(s) {seq['start']}-{seq['end']} "
               f"→ {seq['pattern']} [{json.loads(env_vars['COMFY_INPUT_SEQ'])['colorspace']}]")
+    if batch_manifest:
+        items = batch_manifest["items"]
+        print(f"        batch     : {len(items)} input(s) in ONE job (model loads once) —")
+        for it in items:
+            if it["kind"] == "video":
+                print(f"          • {it['name']}  → output prefix {it['stem']}_{args.preset}")
+            else:
+                seqd = it["seq"]
+                loc = seqd.get("pattern") or seqd.get("dir")
+                print(f"          • {it['stem']}/  [{it['kind']} seq → {loc}]  → output prefix {it['stem']}_{args.preset}")
     print(f"        format    : {'UI graph → converts on Spark' if is_ui else 'API (patched locally)'}")
     if env_vars.get("COMFY_OUTPUT_SPEC"):
         _os = json.loads(env_vars["COMFY_OUTPUT_SPEC"])
@@ -1120,7 +1282,8 @@ def main():
     python_bin = preset.get("python", "python3")
     command = ["bash", "-c", f"{python_bin} /input/comfy_run.py"]
     tar_path = build_tar(workflow, input_files, patches_to_pack,
-                         seq_files=seq["files"] if seq else None)
+                         seq_files=seq["files"] if seq else None,
+                         seq_groups=batch_seq_groups)
     try:
         resp = submit_job(job_name, instance_type, image, command, env_vars,
                           mode, args.idle_hold, args.max_retries, args.tag)

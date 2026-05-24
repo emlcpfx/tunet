@@ -1,0 +1,97 @@
+{
+  "description": "SeedVR2 diffusion VIDEO UPSCALER (numz/ComfyUI-SeedVR2_VideoUpscaler, model by ByteDance-Seed / IceClear). One-step diffusion super-resolution that restores real detail (not just a bigger blur) while keeping motion temporally stable. Graph: the upstream 'SeedVR2_HD_video_upscale' example, cleaned by seedvr2.derive.py into a flat LoadVideo -> GetVideoComponents -> SeedVR2VideoUpscaler -> CreateVideo -> SaveVideo (the bypassed RGBA-join + torch-compile convenience nodes are stripped; comfy_run's converter has no bypass-passthrough). Ready-to-run: the 7B weights (~15 GB) + VAE are pinned/public. Built for BATCH — feed many clips and/or image-sequence folders in one job with --batch.",
+
+  "docs": [
+    { "label": "SeedVR2 ComfyUI node (numz)", "url": "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler" },
+    { "label": "SeedVR2 model / paper (IceClear)", "url": "https://github.com/IceClear/SeedVR2" },
+    { "label": "SeedVR2 weights (numz mirror)", "url": "https://huggingface.co/numz/SeedVR2_comfyUI" }
+  ],
+  "tags": ["video", "seedvr2", "upscale", "video-to-video", "restoration", "batch", "ready-to-run"],
+  "about": {
+    "what": "Upscales video to a higher resolution and rebuilds genuine detail — faces, textures, edges — with a one-step diffusion model, instead of just enlarging (and softening) the frames. Keeps motion steady frame-to-frame.",
+    "inputs": "One or more video clips and/or folders of image frames (EXR / PNG / JPG / TIFF). With --batch you can mix many of both in a single job — they all upscale on one warm GPU, each output named after its input.",
+    "key_knobs": "Resolution — target size of the SHORT edge (1080 = upscale to 1080p tall). Model — 7B (sharpest, default) or the lighter 3B / 7B-fp8. Batch size — frames processed together (must be 1, 5, 9, 13… = 4n+1); higher = steadier motion + more VRAM."
+  },
+
+  "_HOWITRUNS": "No-build path (same as the other presets): the public yanwk image runs comfy_run.py, which clones the SeedVR2 node pack (+ VideoHelperSuite when PNG/JPG/TIFF sequences are batched, CoCoTools for EXR), downloads the 7B DiT + VAE (~15.8 GB) into models/SEEDVR2 on the node, converts this flat UI graph to API via /object_info, applies patches, and renders. --convert-only skips the weight pull and validates the graph cheaply. BATCH: with --batch the runner loops every input through this one warm graph — the model loads ONCE — re-pointing the loader per item (a video filename, or an EXR/PNG sequence loader swapped in at GetVideoComponents) and naming each output after its input.",
+  "_BATCH": "EXR folders are read scene-linear→sRGB; PNG/JPG/TIFF folders load as-is (display). A folder is auto-detected as a numbered frame sequence. DPX is not supported yet. Picking a non-default model (3B or 7B-fp8) in the form/CLI downloads it on first use (only 7B-fp16 is pre-pinned). For tighter VRAM, use the 7B-fp8 or 3B model, a smaller GPU, or set blocks_to_swap on the DiT loader.",
+
+  "order": 3,
+  "requires_input": true,
+
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "comfy_home": "/root/ComfyUI",
+  "comfy_bundle": "/default-comfyui-bundle/ComfyUI",
+  "python": "python3.13",
+  "gpu": "rtxpro6000",
+  "mode": "instant",
+  "extra_args": "",
+
+  "workflow": "seedvr2.workflow.json",
+
+  "node_packs": [
+    "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler"
+  ],
+
+  "_PIPNOTE": "The node's requirements (diffusers>=0.33.1, unpinned transformers) resolve to a combo on the cu130 image where 'diffusers.loaders.single_file_model' import dies with KeyError: 'flash_attn' (a transformers/diffusers flash-attn API mismatch; node import fails, SeedVR2VideoUpscaler never registers, convert gate fails). pip_extra pins a known-good pair AFTER the node reqs. If it still fails, try installing flash-attn or bumping these pins.",
+  "pip_extra": ["diffusers==0.35.0", "transformers==4.55.4"],
+
+  "models": [
+    { "url": "https://huggingface.co/numz/SeedVR2_comfyUI/resolve/main/seedvr2_ema_7b_fp16.safetensors",
+      "dest": "models/SEEDVR2/seedvr2_ema_7b_fp16.safetensors" },
+    { "url": "https://huggingface.co/numz/SeedVR2_comfyUI/resolve/main/ema_vae_fp16.safetensors",
+      "dest": "models/SEEDVR2/ema_vae_fp16.safetensors" }
+  ],
+
+  "input_anchor": { "node": "22" },
+  "output_prefix": { "nodes": ["23"], "path": "inputs.filename_prefix", "template": "{stem}_seedvr2" },
+
+  "ui": {
+    "title": "SeedVR2 — AI video upscaler (batch-ready)",
+    "primary_input": {
+      "label": "Input video (or use Batch for many)",
+      "tooltip": "The clip to upscale. Output resolution follows the 'Resolution' knob (target short edge); the aspect ratio of the input is preserved. For a whole shot folder of frames, or many clips at once, use Batch mode.",
+      "filetypes": [["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]
+    },
+    "batch_input": {
+      "label": "Batch inputs (videos and/or image-sequence folders)",
+      "tooltip": "Add any number of video files and/or folders of frames (EXR / PNG / JPG / TIFF). They all upscale in ONE job on a single warm GPU — far cheaper than one job each — and each output is named after its input."
+    }
+  },
+
+  "params": {
+    "video":      { "node": "21", "path": "inputs.file" },
+
+    "resolution": { "node": "10", "path": "inputs.resolution", "default": 1080,
+      "ui": { "label": "Resolution (short edge)", "widget": "number", "min": 16, "max": 4320, "step": 2,
+              "section": "Main", "order": 1,
+              "tooltip": "Target size of the SHORTER edge, in pixels; the aspect ratio is kept (1080 on a 16:9 clip → 1920×1080). This is the upscale target — set it higher than your source's short edge. (src: SeedVR2 Video Upscaler 'resolution')" } },
+    "model":      { "node": "14", "path": "inputs.model", "default": "seedvr2_ema_7b_fp16.safetensors",
+      "ui": { "label": "Model", "widget": "combo", "section": "Main", "order": 2,
+              "choices": ["seedvr2_ema_7b_fp16.safetensors", "seedvr2_ema_7b_fp8_e4m3fn.safetensors", "seedvr2_ema_3b_fp16.safetensors"],
+              "tooltip": "7B-fp16 = best detail (the default, pre-loaded ~15 GB, RTX PRO 6000). 7B-fp8 ≈ half the VRAM, near-7B quality. 3B-fp16 = fastest / fits smaller GPUs. Non-default picks download on first use. (src: SeedVR2 model registry)" } },
+    "batch_size": { "node": "10", "path": "inputs.batch_size", "default": 5,
+      "ui": { "label": "Batch size (frames per pass)", "widget": "number", "min": 1, "max": 1025, "step": 4,
+              "section": "Main", "order": 3,
+              "tooltip": "Frames processed together. MUST be 1, 5, 9, 13, 17… (4n+1). Higher = steadier motion across the clip and faster, but more VRAM; lower = less VRAM. Ideally near your shot length. (src: SeedVR2 'batch_size')" } },
+    "color_correction": { "node": "10", "path": "inputs.color_correction", "default": "lab",
+      "ui": { "label": "Color correction", "widget": "combo", "section": "Main", "order": 4,
+              "choices": ["lab", "wavelet", "wavelet_adaptive", "hsv", "adain", "none"],
+              "tooltip": "Re-matches the upscaled colours to the source (upscaling can shift them). 'lab' is the recommended default; 'none' disables it. (src: SeedVR2 'color_correction')" } },
+
+    "uniform_batch_size": { "node": "10", "path": "inputs.uniform_batch_size", "default": true },
+
+    "seed":       { "node": "10", "path": "inputs.seed", "default": 42,
+      "ui": { "label": "Seed", "widget": "number", "min": 0, "max": 4294967295, "step": 1,
+              "section": "Advanced", "order": 1,
+              "tooltip": "Random seed — same seed + same inputs = identical output. (src: SeedVR2 'seed')" } },
+    "max_resolution": { "node": "10", "path": "inputs.max_resolution", "default": 0,
+      "ui": { "label": "Max resolution (0 = no cap)", "widget": "number", "min": 0, "max": 8192, "step": 2,
+              "section": "Advanced", "order": 2,
+              "tooltip": "Caps the LONG edge so extreme aspect ratios don't blow up VRAM. 0 = no limit; if any edge would exceed this, both are scaled down together. (src: SeedVR2 'max_resolution')" } },
+    "temporal_overlap": { "node": "10", "path": "inputs.temporal_overlap", "default": 0,
+      "ui": { "label": "Temporal overlap", "widget": "number", "min": 0, "max": 16, "step": 1,
+              "section": "Advanced", "order": 3,
+              "tooltip": "Frames shared between consecutive batches, blended to smooth the seam at batch boundaries. 1–4 helps on long clips; 0 = off. (src: SeedVR2 'temporal_overlap')" } }
+  }
+}

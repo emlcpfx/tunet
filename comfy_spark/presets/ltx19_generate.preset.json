@@ -1,0 +1,85 @@
+{
+  "description": "LTX-2 19B text-to-video GENERATION with the CAMERA-CONTROL LoRAs as the headline. The 19B base is a SEPARATE model family from LTX-2.3 22B (so it has its own LoRA catalog, ltx2-19b.loras.json). This graph ships two camera-LoRA slots and a built-in two-stage path (base render + 2x latent upscale) plus an optional Gemma prompt-enhancer. Stack a camera move (dolly in/out/left/right, jib up/down, static) from the catalog with --lora. Graph: Lightricks/ComfyUI-LTXVideo example 'LTX-2_T2V_Distilled_wLora' (example_workflows/2.0).",
+
+  "docs": [
+    { "label": "LTX-2 docs", "url": "https://docs.ltx.video" },
+    { "label": "Camera-control LoRA (Dolly-In) model card", "url": "https://huggingface.co/Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-In" },
+    { "label": "LTX-2 19b base model", "url": "https://huggingface.co/Lightricks/LTX-2" },
+    { "label": "Official 2.0 example workflows", "url": "https://github.com/Lightricks/ComfyUI-LTXVideo/tree/master/example_workflows/2.0" }
+  ],
+  "tags": ["video", "ltx2-19b", "text-to-video", "generation", "two-stage", "upscale", "lora-stacking", "camera-control", "ready-to-run"],
+  "prompt_guide": {
+    "url": "https://github.com/Lightricks/LTX-2#%EF%B8%8F-prompting-for-ltx-2",
+    "tips": "Write ONE flowing paragraph like a cinematographer's shot list, in order: open with the action; then movement & gestures; appearance; the setting; camera angle/move; lighting & mood; any changes or sudden events. Be literal and specific (not abstract). Keep it under ~200 words; longer prompts fill longer clips."
+  },
+  "about": {
+    "what": "Creates a brand-new video from a written description on the LTX-2 19B model, with controllable CAMERA MOVES you add from the LoRA list (dolly in/out, track left/right, crane up/down, or locked-off static). Includes a built-in 2x high-detail pass.",
+    "inputs": "A written description of the scene and action. Add one (or more) camera-move LoRAs with the LoRA picker.",
+    "key_knobs": "Prompt — describe the scene AND the DESTINATION of the camera move (where it ends up / what it reveals). Camera LoRA — which move. Frames — clip length (8*n+1)."
+  },
+
+  "_TEMPLATE": "READY-TO-RUN. All weights are pinned to real, ungated HF URLs: the 19B distilled checkpoint + the LTX-2 spatial upscaler x2 (Lightricks/LTX-2) and the Gemma-3-12B text encoder FOLDER (Lightricks/gemma-3-12b-it-qat-q4_0-unquantized — 16 files, listed below because the 19B graph's LTXVGemmaCLIPModelLoader reads a HF model directory, not a single file). Run --convert-only FIRST.",
+  "_CAMERA": "The camera moves live in the SEPARATE 19B catalog (loras/ltx2-19b.loras.json) because they are 19B-only (a different base than the 2.3-22B presets). Use them with --lora: e.g. `--lora dolly-in` or `--lora jib-up:0.8`. They have NO trigger word — instead DESCRIBE THE DESTINATION of the move in the prompt. `--list-loras --catalog ltx2-19b` shows the menu. They stack onto the checkpoint (lora_chain anchor 5228), which feeds every model path into the sampler subgraph (the graph's own two bypassed camera slots are left bypassed; the stack supersedes them).",
+  "_SUBGRAPH": "The 2.0 'wLora' graph is SUBGRAPHED (one subgraph holds the two-stage sampler + upscaler). comfy_run.py's converter flattens subgraphs at convert time (see WORKFLOW_INGEST.md G), so it converts without a hand-written derive. Because the width/height (EmptyLTXVLatentVideo) live INSIDE the subgraph and get renumbered on flatten, resolution is left at the graph default and not exposed as a knob here; prompt + length + camera are top-level and stable.",
+  "_PROMPT_ENHANCE": "The graph includes an LTXVGemmaEnhancePrompt node (the official prompt enhancer) feeding the text encode. It runs on the loaded Gemma encoder, no API key.",
+  "_HOWITRUNS": "No-build path: public yanwk image, comfy_run.py clones node_packs, downloads the weights (HEAVY 19B cold start: ~38GB checkpoint + ~24GB Gemma folder + upscaler), flattens + converts the subgraph UI graph to API, splices the --lora camera stack onto anchor 5228, and renders the two-stage result. rtxpro6000 recommended; use --idle-hold to keep a warm node.",
+
+  "base": "ltx2-19b",
+  "lora_catalog": "ltx2-19b.loras.json",
+  "lora_chain": { "anchor": "5228", "slot": 0 },
+  "requires_input": false,
+
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "comfy_home": "/root/ComfyUI",
+  "comfy_bundle": "/default-comfyui-bundle/ComfyUI",
+  "python": "python3.13",
+  "gpu": "rtxpro6000",
+  "mode": "instant",
+  "extra_args": "",
+
+  "workflow": "ltx19_generate.workflow.json",
+
+  "node_packs": [
+    "https://github.com/Lightricks/ComfyUI-LTXVideo",
+    "https://github.com/evanspearman/ComfyMath"
+  ],
+
+  "models": [
+    { "url": "https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-19b-distilled.safetensors",
+      "dest": "models/checkpoints/ltx-2-19b-distilled.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-spatial-upscaler-x2-1.0.safetensors",
+      "dest": "models/latent_upscale_models/ltx-2-spatial-upscaler-x2-1.0.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/config.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/config.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/added_tokens.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/added_tokens.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/chat_template.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/chat_template.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/generation_config.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/generation_config.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/model-00001-of-00005.safetensors", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/model-00001-of-00005.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/model-00002-of-00005.safetensors", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/model-00002-of-00005.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/model-00003-of-00005.safetensors", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/model-00003-of-00005.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/model-00004-of-00005.safetensors", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/model-00004-of-00005.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/model-00005-of-00005.safetensors", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/model-00005-of-00005.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/model.safetensors.index.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/model.safetensors.index.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/preprocessor_config.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/preprocessor_config.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/processor_config.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/processor_config.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/special_tokens_map.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/special_tokens_map.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/tokenizer.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/tokenizer.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/tokenizer.model", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/tokenizer.model" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/tokenizer_config.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/tokenizer_config.json" }
+  ],
+
+  "ui": {
+    "title": "LTX-2 19B Generate — text-to-video with camera-control LoRAs",
+    "resolutions": []
+  },
+
+  "params": {
+    "prompt": { "node": "5222", "path": "inputs.value",
+      "default": "A lone astronaut stands at the rim of a vast canyon on a red planet, two moons low on the horizon, dust drifting in a thin wind. Cinematic, epic scale, golden rim light.",
+      "ui": { "label": "Prompt", "widget": "multiline", "section": "Main", "order": 1,
+              "tooltip": "Describe the scene AND, when using a camera-move LoRA, the DESTINATION of the move (where the camera ends up / what it reveals) — that's how Lightricks' camera LoRAs are steered (no trigger word). One flowing present-tense paragraph. (src: LTX-2 camera-control model cards + LTX prompt guide)" } },
+    "length": { "node": "5218", "path": "inputs.value", "default": 121,
+      "ui": { "label": "Frames (length)", "widget": "number", "min": 9, "max": 497, "step": 8,
+              "section": "Advanced", "order": 1,
+              "tooltip": "Frame count; LTX REQUIRES 8*n+1 (..., 121, 161). 121 ~= 4s. (src: LTX-2 docs)" } }
+  }
+}

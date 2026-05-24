@@ -55,6 +55,7 @@ Environment (set by comfy_launch.py):
 import base64
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -406,11 +407,17 @@ def _inline_subgraph_instance(graph, inst, sub):
     out_ids = {n["id"] for n in out_nodes}
     new_links = [l for l in links if inst["id"] not in (l[1], l[3])]
 
+    # Map each linked instance input by BOTH its slot index and its name. Litegraph
+    # suffixes instance input names (e.g. "upscale_model_1") so they need not match
+    # the subgraph DEFINITION's input names — slot is the reliable key; name is a
+    # fallback. (Name-only matching silently dropped the boundary wire, leaving the
+    # inner node's required input unconnected → "Required input is missing".)
     inst_in_src = {}
-    for ii in inst.get("inputs", []):
+    for idx, ii in enumerate(inst.get("inputs", [])):
         if ii.get("link") is not None:
             src = next((l for l in links if l[0] == ii["link"]), None)
             if src:
+                inst_in_src[idx] = (src[1], src[2])
                 inst_in_src[ii["name"]] = (src[1], src[2])
     inst_out_dst = []
     for oi in inst.get("outputs", []):
@@ -454,11 +461,15 @@ def _inline_subgraph_instance(graph, inst, sub):
             continue
         if oid == -10:                                  # boundary INPUT
             bi = sub_inputs[oslot] if oslot < len(sub_inputs) else {}
-            if bi.get("type") in _SUBGRAPH_DATA:        # real data wire → rewire
-                src = inst_in_src.get(bi.get("name"))
-                if src:
-                    add(src[0], src[1], nid_map[tid], tslot, bi.get("type"))
-            # else: promoted widget — value already on the inner node, drop the link
+            # Rewire any boundary input that has an actual SOURCE LINK on the instance
+            # (a real data connection), regardless of its type name — the old
+            # type-allowlist (_SUBGRAPH_DATA) missed connection types like
+            # LATENT_UPSCALE_MODEL, silently dropping the wire and leaving the inner
+            # node's required input unconnected. A promoted WIDGET has NO incoming link
+            # (its value sits on the inner node), so it falls through and is dropped.
+            src = inst_in_src.get(oslot) or inst_in_src.get(bi.get("name"))
+            if src:
+                add(src[0], src[1], nid_map[tid], tslot, bi.get("type"))
             continue
         if oid not in nid_map:                          # origin dropped (note)
             continue
@@ -656,24 +667,34 @@ def ui_to_api(graph, object_info):
     # Prune to nodes reachable from output nodes — graphToPrompt drops dead-ends
     # (loggers, previews, anything not feeding a save/output node). Including them
     # only invites validation errors on nodes that wouldn't even execute.
-    output_ids = [nid for nid, n in api.items()
-                  if (object_info.get(n["class_type"]) or {}).get("output_node")]
-    if output_ids:
-        keep, stack = set(), list(output_ids)
-        while stack:
-            nid = stack.pop()
-            if nid in keep or nid not in api:
-                continue
-            keep.add(nid)
-            for v in api[nid]["inputs"].values():
-                if isinstance(v, list) and len(v) == 2 and isinstance(v[0], str):
-                    stack.append(v[0])
-        dropped = [nid for nid in api if nid not in keep]
-        if dropped:
-            log(f"Pruned {len(dropped)} node(s) not feeding an output: {dropped}")
-        api = {nid: n for nid, n in api.items() if nid in keep}
+    api = prune_to_outputs(api, object_info)
     log(f"Converted UI graph → API format ({len(api)} nodes).")
     return api
+
+
+def prune_to_outputs(workflow, object_info):
+    """Drop nodes not reachable (via inputs[].link edges) from any output node —
+    the same dead-end prune graphToPrompt does. Reused after a batch sequence
+    swap, where replacing a VIDEO loader with a frame-sequence loader can orphan
+    the old loader (it would otherwise fail validation on a missing input file).
+    No-op when object_info can't identify any output node."""
+    output_ids = [nid for nid, n in workflow.items()
+                  if (object_info.get(n["class_type"]) or {}).get("output_node")]
+    if not output_ids:
+        return workflow
+    keep, stack = set(), list(output_ids)
+    while stack:
+        nid = stack.pop()
+        if nid in keep or nid not in workflow:
+            continue
+        keep.add(nid)
+        for v in workflow[nid]["inputs"].values():
+            if isinstance(v, list) and len(v) == 2 and isinstance(v[0], str):
+                stack.append(v[0])
+    dropped = [nid for nid in workflow if nid not in keep]
+    if dropped:
+        log(f"Pruned {len(dropped)} node(s) not feeding an output: {dropped}")
+    return {nid: n for nid, n in workflow.items() if nid in keep}
 
 
 def is_ui_graph(obj):
@@ -804,14 +825,23 @@ IMAGE_BATCH_LOADERS = ["VHS_LoadVideo", "VHS_LoadImagesPath", "VHS_LoadImages", 
 
 
 def build_seq_loader(seq):
-    """The replacement loader node for a packed frame sequence. EXR only for now
-    (CoCoTools LoadExrSequence, IMAGE on slot 0). Returns None for kinds we don't
-    have a loader for yet (png/dpx folders) so the caller leaves the input alone."""
-    if seq.get("kind") == "exr":
+    """The replacement loader node for a packed frame sequence, IMAGE on slot 0:
+      • EXR  → CoCoTools `LoadExrSequence` (scene-linear; numbered #### pattern).
+      • PNG/JPG/TIFF folder → VideoHelperSuite `VHS_LoadImagesPath` (display sRGB;
+        reads the whole packed folder in name order).
+    Returns None for kinds with no loader yet (DPX) so the caller leaves the input."""
+    kind = seq.get("kind")
+    if kind == "exr":
         return {"class_type": "LoadExrSequence",
                 "inputs": {"sequence_path": seq["pattern"],
                            "start_frame": int(seq["start"]), "end_frame": int(seq["end"]),
                            "frame_step": int(seq.get("step", 1)), "normalize": False}}
+    if kind == "img":
+        # A folder of 8/16-bit stills (already display-referred — no colour xform).
+        # `directory` is the packed sequence folder; VHS loads them in name order.
+        return {"class_type": "VHS_LoadImagesPath",
+                "inputs": {"directory": seq["dir"], "image_load_cap": 0,
+                           "skip_first_images": 0, "select_every_nth": 1}}
     return None
 
 
@@ -1064,6 +1094,92 @@ def _report_outputs(outputs):
     log(f"{n} output file(s) in {env('COMFY_OUTPUT_DIR', '/output')}")
 
 
+# ── web-previewable mp4 for sequence / non-mp4 outputs ───────────────────────
+
+# Output deliverables a browser CAN'T play inline: image-sequence frames and
+# non-mp4 video containers (ProRes .mov, .mkv, .avi). For each we generate a
+# small h264 `*.preview.mp4` so the website shows the result the same way it
+# shows a normal mp4 — the high-bit deliverable is still kept alongside.
+PREVIEW_SEQ_EXTS = {".exr", ".dpx", ".png", ".tif", ".tiff", ".jpg", ".jpeg"}
+PREVIEW_VIDEO_EXTS = {".mov", ".mkv", ".avi"}     # non-mp4 containers (ProRes etc.)
+PREVIEW_VF = "scale='min(1920,iw)':'min(1920,ih)':force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2"
+
+
+def _run_ffmpeg(args, label):
+    try:
+        r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *args],
+                           capture_output=True, text=True, timeout=1800)
+        if r.returncode == 0:
+            return True
+        log(f"preview: ffmpeg failed for {label}: {r.stderr.strip()[:200]}")
+    except Exception as e:  # noqa: BLE001 — best-effort, never fatal
+        log(f"preview: ffmpeg error for {label}: {e}")
+    return False
+
+
+def _seq_to_mp4(pattern, start, ext, target, fps=24):
+    """Encode a numbered frame sequence to an h264 mp4 preview. EXR is
+    scene-linear, so apply a linear→sRGB transfer for a viewable preview
+    (best-effort; falls back to a plain gamma if the build lacks the filter)."""
+    enc = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23",
+           "-preset", "veryfast", "-movflags", "+faststart", target]
+    inp = ["-framerate", str(fps), "-start_number", str(start), "-i", pattern]
+    if ext == ".exr":
+        if _run_ffmpeg(["-apply_trc", "iec61966_2_1", *inp, "-vf", PREVIEW_VF, *enc], pattern):
+            return True
+        return _run_ffmpeg([*inp, "-vf", "eq=gamma=2.2," + PREVIEW_VF, *enc], pattern)  # fallback
+    return _run_ffmpeg([*inp, "-vf", PREVIEW_VF, *enc], pattern)
+
+
+def _video_to_mp4(src, target):
+    return _run_ffmpeg(["-i", src, "-vf", PREVIEW_VF, "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-crf", "23", "-preset", "veryfast", "-movflags", "+faststart",
+                        "-c:a", "aac", "-b:a", "128k", target], os.path.basename(src))
+
+
+def generate_previews(output_dir):
+    """Ensure every visual deliverable has a browser-playable mp4 preview: encode
+    one for each image sequence (EXR/PNG/TIFF/DPX) and each non-mp4 video (ProRes
+    .mov etc.). Best-effort and idempotent (skips when the preview already exists,
+    so warm re-runs don't redo work); never fatal. ffmpeg is on the ComfyUI image."""
+    if not shutil.which("ffmpeg") or not os.path.isdir(output_dir):
+        return
+    made = 0
+    for root, _, files in os.walk(output_dir):
+        # image sequences -> one preview per numbered group
+        groups = {}
+        for fn in files:
+            stem, ext = os.path.splitext(fn)
+            if ext.lower() not in PREVIEW_SEQ_EXTS:
+                continue
+            m = re.search(r"(\d+)$", stem)
+            if not m:
+                continue
+            groups.setdefault((stem[:m.start()], ext.lower(), len(m.group(1))), []).append(int(m.group(1)))
+        for (prefix, ext, pad), nums in groups.items():
+            if len(nums) < 2:                       # a lone numbered still isn't a sequence
+                continue
+            target = os.path.join(root, f"{prefix or 'sequence'}preview.mp4")
+            if os.path.isfile(target):
+                continue
+            if _seq_to_mp4(os.path.join(root, f"{prefix}%0{pad}d{ext}"), min(nums), ext, target):
+                made += 1
+                log(f"  preview: {os.path.relpath(target, output_dir)} ({len(nums)} {ext} frames)")
+        # non-mp4 videos -> a playable preview alongside
+        for fn in files:
+            ext = os.path.splitext(fn)[1].lower()
+            if ext not in PREVIEW_VIDEO_EXTS:
+                continue
+            target = os.path.join(root, os.path.splitext(fn)[0] + ".preview.mp4")
+            if os.path.isfile(target):
+                continue
+            if _video_to_mp4(os.path.join(root, fn), target):
+                made += 1
+                log(f"  preview: {os.path.relpath(target, output_dir)} (from {fn})")
+    if made:
+        log(f"generated {made} mp4 preview(s) for the web player")
+
+
 # ── self-upload outputs to ShareSync (the Spark agent doesn't sync /output) ───
 
 def _api_get(url, token):
@@ -1175,6 +1291,86 @@ def upload_outputs(output_dir):
     log(f"self-uploaded {n} output file(s) to ShareSync")
 
 
+# ── batch: many inputs, one warm node ────────────────────────────────────────
+
+def _safe_prefix(s):
+    return "".join(c if (c.isalnum() or c in "._-") else "_" for c in str(s))[:120] or "output"
+
+
+def run_batch(port, base_workflow, object_info, batch, out_spec, out_fps, out_cs):
+    """Render a LIST of inputs through one already-loaded graph — the whole point
+    of batching: ComfyUI keeps the (heavy) models warm in its cache across
+    /prompt calls, so N clips/sequences pay the model load ONCE. For each item we
+    deep-copy the base graph, point the input at this item (patch the loader's
+    file field for a video, or swap in a frame-sequence loader for a folder),
+    give it its own output filename prefix (so renders don't overwrite each
+    other), splice the chosen high-bit output, then queue + wait. Returns True iff
+    every item succeeded.
+
+    `batch` (from COMFY_BATCH) carries the wiring the launcher resolved from the
+    preset, so this stays preset-agnostic:
+      input_node / input_path  the loader field a VIDEO item's filename is set on
+      input_anchor             the node a SEQUENCE item swaps for a seq loader
+      prefix_targets[]         {node, path, template} saver fields each item's
+                               output name is written to ({stem}/{preset} are
+                               substituted; lets a second saver — e.g. an HDR EXR
+                               output_dir — get its own per-item folder so a batch
+                               doesn't overwrite itself)
+      preset                   tag substituted for {preset} in templates
+      items[]                  {kind: video|exr|img, stem, name?|seq?}
+    """
+    items = batch.get("items") or []
+    input_node = batch.get("input_node")
+    input_path = batch.get("input_path")
+    input_anchor = batch.get("input_anchor")
+    prefix_targets = batch.get("prefix_targets") or []
+    preset_tag = batch.get("preset", "comfy")
+    out_anchor = json.loads(env("COMFY_OUTPUT_ANCHOR", "null"))
+
+    log(f"BATCH: {len(items)} input(s) through one warm node "
+        f"({sum(1 for i in items if i.get('kind') == 'video')} video, "
+        f"{sum(1 for i in items if i.get('kind') in ('exr', 'img'))} sequence).")
+    ok_all = True
+    for i, item in enumerate(items):
+        wf = json.loads(json.dumps(base_workflow))      # isolate per-item edits
+        kind = item.get("kind")
+        stem = _safe_prefix(item.get("stem") or f"item{i:03d}")
+        out_prefix = _safe_prefix(f"{stem}_{preset_tag}")   # for the --output high-bit saver
+        if kind == "video":
+            if input_node and input_path:
+                apply_patch(wf, input_node, input_path, item["name"])
+            else:
+                log(f"  WARN item {i}: no input_node/path mapped — input not set")
+        elif kind in ("exr", "img"):
+            wf = rewrite_input(wf, item["seq"], input_anchor)
+            wf = prune_to_outputs(wf, object_info)       # drop the orphaned video loader
+        else:
+            log(f"  WARN item {i}: unknown kind {kind!r} — skipping")
+            ok_all = False
+            continue
+        # Per-item output names: {stem} is sanitized (slashes in a template — e.g.
+        # an EXR output_dir 'output/{stem}_exr' — are kept). So each item writes a
+        # distinct file/folder and the batch never overwrites itself.
+        for t in prefix_targets:
+            val = (t.get("template") or "{stem}").replace("{stem}", stem).replace("{preset}", preset_tag)
+            apply_patch(wf, t["node"], t.get("path", "inputs.filename_prefix"), val)
+        if out_spec:
+            wf = rewrite_output(wf, out_spec, out_anchor, out_prefix, out_fps, out_cs)
+        log(f"━━━ batch item {i + 1}/{len(items)}: {stem} ({kind}) → {out_prefix!r} ━━━")
+        client_id = f"spark-{int(time.time())}-{i}"
+        prompt_id = queue_prompt(port, wf, client_id)
+        if not prompt_id:
+            log(f"  item {i + 1} rejected at /prompt — continuing with the rest")
+            ok_all = False
+            continue
+        threading.Thread(target=ws_progress, args=(port, client_id, wf), daemon=True).start()
+        if not wait_for_completion(port, prompt_id):
+            log(f"  item {i + 1} failed to render — continuing with the rest")
+            ok_all = False
+    log(f"BATCH done: {'all items OK' if ok_all else 'one or more items failed'}.")
+    return ok_all
+
+
 def main():
     comfy_home = env("COMFY_HOME", "/ComfyUI")
     workflow_path = env("COMFY_WORKFLOW", "/input/workflow.json")
@@ -1199,6 +1395,13 @@ def main():
     try:
         ensure_comfyui(comfy_home, env("COMFY_BUNDLE"))
         fetch_nodes(comfy_home, json.loads(env("COMFY_FETCH_NODES", "[]")))
+        # Per-preset pip pins/extras AFTER node reqs (so they override a broken dep
+        # combo a node's requirements.txt resolves to). Runs on convert-only too, since
+        # the node must IMPORT for its classes to appear in /object_info.
+        _pip_extra = json.loads(env("COMFY_PIP_EXTRA", "[]"))
+        if _pip_extra:
+            log(f"pip install (preset pip_extra): {' '.join(_pip_extra)}")
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", *_pip_extra])
         if not convert_only:
             _models = json.loads(env("COMFY_FETCH_MODELS", "[]"))
             precheck_model_access(comfy_home, _models)   # fail fast on gated 401/403
@@ -1253,6 +1456,7 @@ def main():
             return 1
 
         # 4. Convert UI → API if needed ---------------------------------------
+        object_info = {}
         if is_ui_graph(workflow):
             log("Workflow is UI/graph format — converting via /object_info.")
             object_info = http_json(f"http://{HOST}:{port}/object_info", timeout=120)
@@ -1269,12 +1473,19 @@ def main():
                 apply_patch(workflow, op["node"], op["path"], op["value"])
             log(f"Applied {len(patches)} patch(es).")
 
+        # A batch job (COMFY_BATCH) renders many inputs through this one warm
+        # graph (run_batch, below); the per-item input swap + output naming + the
+        # output-format splice all happen per item there. So the single-input
+        # input-sequence (5a2) and output-format (5c) rewrites are single-only.
+        batch = json.loads(env("COMFY_BATCH", "null"))
+
         # 5a2. Input image-sequence ingestion (swap the loader for a frame seq) --
         in_seq = json.loads(env("COMFY_INPUT_SEQ", "null"))
-        if in_seq:
+        if in_seq and not batch:
             workflow = rewrite_input(workflow, in_seq, json.loads(env("COMFY_INPUT_SEQ_ANCHOR", "null")))
 
         # 5b. Splice the stackable Tier-1 LoRA chain onto the model path -------
+        # (input-independent, so it rides the base graph for batch jobs too)
         lora_stack = json.loads(env("COMFY_LORAS", "[]"))
         lora_chain = json.loads(env("COMFY_LORA_CHAIN", "null"))
         if lora_stack and lora_chain:
@@ -1285,7 +1496,7 @@ def main():
 
         # 5c. Output-format rewrite (high-bit EXR / ProRes; default mp4 = no-op) -
         out_spec = json.loads(env("COMFY_OUTPUT_SPEC", "null"))
-        if out_spec:
+        if out_spec and not batch:
             workflow = rewrite_output(
                 workflow, out_spec, json.loads(env("COMFY_OUTPUT_ANCHOR", "null")),
                 env("COMFY_OUTPUT_PREFIX", "render"), env("COMFY_OUTPUT_FPS", "24"),
@@ -1310,6 +1521,19 @@ def main():
             # gate on the job status (model/input-absence errors are filtered out).
             return 1 if real else 0
 
+        # 6b. Batch render: many inputs through this one warm graph ------------
+        if batch:
+            if not object_info:                       # API-format batch (rare): still need it
+                object_info = http_json(f"http://{HOST}:{port}/object_info", timeout=120)
+            ok = run_batch(port, workflow, object_info, batch, out_spec,
+                           env("COMFY_OUTPUT_FPS", "24"), env("COMFY_OUTPUT_COLORSPACE"))
+            exit_code = 0 if ok else 1
+            log("Done." if ok else "Failed (one or more batch items).")
+            generate_previews(output_dir)             # web-playable mp4 for seq / ProRes outputs
+            upload_outputs(output_dir)
+            hold_for_sync()
+            return exit_code
+
         # 6. Queue + wait ------------------------------------------------------
         client_id = f"spark-{int(time.time())}"
         log(f"Queuing workflow (client_id={client_id})")
@@ -1322,6 +1546,7 @@ def main():
         ok = wait_for_completion(port, prompt_id)
         exit_code = 0 if ok else 1
         log("Done." if ok else "Failed.")
+        generate_previews(output_dir)                 # web-playable mp4 for seq / ProRes outputs
         upload_outputs(output_dir)
         hold_for_sync()
     finally:

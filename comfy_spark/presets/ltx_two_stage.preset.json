@@ -1,0 +1,91 @@
+{
+  "description": "LTX-2.3 22B TWO-STAGE generation — the production-quality path Lightricks recommends. A first sampler pass renders the clip at base resolution, then the LTX-2.3 spatial upscaler (x2) upsamples the LATENT and a second sampler pass refines it, so you get sharper detail and steadier motion than the single-stage 'ltx2_generate' preset at the cost of a second pass. Text-to-video by default (image-to-video available, see _I2V). Graph: Lightricks/ComfyUI-LTXVideo example 'LTX-2.3_T2V_I2V_Two_Stage_Distilled' (the cloud GemmaAPITextEncode nodes are bypassed; the local CLIPTextEncode + LTXAVTextEncoderLoader path is active, so no external API key is needed).",
+
+  "docs": [
+    { "label": "LTX-2 docs", "url": "https://docs.ltx.video" },
+    { "label": "Official ComfyUI example workflows", "url": "https://github.com/Lightricks/ComfyUI-LTXVideo/tree/master/example_workflows/2.3" },
+    { "label": "LTX-2.3 model card (incl. spatial upscaler)", "url": "https://huggingface.co/Lightricks/LTX-2.3" }
+  ],
+  "tags": ["video", "ltx2.3", "text-to-video", "image-to-video", "generation", "two-stage", "upscale", "lora-stacking", "ready-to-run"],
+  "about": {
+    "what": "Creates a brand-new video from a written description (or a starting image), then runs it through a second high-detail pass that doubles the resolution and cleans up motion — the higher-quality sibling of the basic Generate preset.",
+    "inputs": "A written description of the scene and action. Optionally a starting image for image-to-video (see notes).",
+    "key_knobs": "Prompt — one flowing paragraph (scene, action, camera move, lighting). Resolution — the FIRST-pass size; the final clip is 2x bigger. Frames — clip length (must be 8*n+1)."
+  },
+
+  "_TEMPLATE": "READY-TO-RUN. All four weights are pinned to real, ungated HF URLs (same dev checkpoint + gemma encoder as ltx2_generate, the official rank-384 distilled LoRA, and the LTX-2.3 spatial upscaler x2). Run --convert-only ONCE to validate the converted graph before a paid render.",
+  "_HOWITRUNS": "No-build path: the public yanwk image runs comfy_run.py, which clones node_packs, downloads the weights, converts the UI graph to API via /object_info (the two ResizeImageMaskNode DynamicCombo nodes are handled by the converter), applies patches, optionally splices a Tier-1 --lora stack onto the checkpoint (anchor 3940 -> both passes), and renders. The second (upscale) pass makes this heavier than single-stage generation; budget extra time/VRAM. rtxpro6000 recommended.",
+  "_TWOSTAGE": "Stage 1 samples at the EmptyLTXVLatentVideo size (node 3059, default 960x544). LatentUpscaleModelLoader (4974) loads the spatial upscaler x2 and LTXVLatentUpsampler (4975) doubles the latent; the second SamplerCustomAdvanced (4971) refines it. So the SAVED clip is ~2x the width/height you set here (default -> ~1920x1088). To trade quality for speed, mute the second pass / upsampler and save stage-1 directly (edit the converted workflow_api.json).",
+  "_I2V": "Ships as TEXT-TO-VIDEO: the i2v init-image path is bypassed by default (PrimitiveBoolean 'bypass_i2v' node 4987 = true). For IMAGE-TO-VIDEO, provide a start frame and turn the bypass off: `--input start.png --set 2004.inputs.image=start.png --set 4987.inputs.value=false`. The init image conditions the first frame; everything else follows the prompt.",
+  "_DISTILL": "Uses Lightricks' official rank-384 distilled LoRA (ltx-2.3-22b-distilled-lora-384-1.1) at the graph's tuned 0.5, matching the upstream example. If you stack reference-driven / i2v conditioning and detail looks dampened, swap to the cond-safe rank-72 variant the IC-LoRA presets use (TenStrip ...ceil72_condsafe) by editing the LoraLoaderModelOnly (4922) lora_name and this models entry. See README 'Cond-safe distill LoRA'.",
+
+  "base": "ltx2.3-22b",
+  "lora_catalog": "ltx2.loras.json",
+  "lora_chain": { "anchor": "3940", "slot": 0 },
+  "requires_input": false,
+
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "comfy_home": "/root/ComfyUI",
+  "comfy_bundle": "/default-comfyui-bundle/ComfyUI",
+  "python": "python3.13",
+  "gpu": "rtxpro6000",
+  "mode": "instant",
+  "extra_args": "",
+
+  "workflow": "ltx_two_stage.workflow.json",
+  "static_inputs": ["ic_placeholder.png"],
+
+  "node_packs": [
+    "https://github.com/Lightricks/ComfyUI-LTXVideo"
+  ],
+
+  "models": [
+    { "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-dev.safetensors",
+      "dest": "models/checkpoints/ltx-2.3-22b-dev.safetensors" },
+    { "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it.safetensors",
+      "dest": "models/text_encoders/comfy_gemma_3_12B_it.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+      "dest": "models/loras/ltxv/ltx2/ltx-2.3-22b-distilled-lora-384-1.1.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+      "dest": "models/latent_upscale_models/ltx-2.3-spatial-upscaler-x2-1.1.safetensors" }
+  ],
+
+  "ui": {
+    "title": "LTX-2.3 Two-Stage — HQ generate (base pass + 2x latent upscale)",
+    "primary_input": {
+      "label": "Init image (optional, i2v)",
+      "tooltip": "Optional starting frame. Ships as text-to-video (this is ignored unless you turn the i2v bypass off — see the preset's _I2V note). Add catalog effect LoRAs with the LoRA picker.",
+      "filetypes": [["Image", "*.png *.jpg *.jpeg *.webp"], ["All files", "*.*"]]
+    },
+    "resolutions": [
+      { "label": "960x544 (16:9) -> ~1920x1088",   "width": 960,  "height": 544 },
+      { "label": "1280x720 (16:9 HD) -> ~2560x1440", "width": 1280, "height": 720 },
+      { "label": "704x1280 (9:16) -> ~1408x2560",   "width": 704,  "height": 1280 },
+      { "label": "768x768 (1:1) -> ~1536x1536",      "width": 768,  "height": 768 }
+    ]
+  },
+
+  "params": {
+    "prompt":   { "node": "2483", "path": "inputs.text",
+      "default": "A lone lighthouse keeper climbs a spiral staircase at dawn, lantern in hand, warm light spilling across weathered stone walls. The camera follows in a slow upward dolly, shallow depth of field, the distant sound of waves and a creaking door.",
+      "ui": { "label": "Prompt", "widget": "multiline", "section": "Main", "order": 1,
+              "tooltip": "LTX-2.3 works best as ONE flowing present-tense paragraph covering: shot type, scene + lighting, action over time, character details, camera move, and audio. LoRA trigger words are auto-appended. (src: LTX-2.3 prompt guide, ltx.io)" } },
+    "negative": { "node": "2612", "path": "inputs.text",
+      "default": "pc game, console game, video game, cartoon, childish, ugly",
+      "ui": { "label": "Negative prompt", "widget": "multiline", "section": "Main", "order": 2,
+              "tooltip": "Lightricks' shipped LTX-2 negative (from their official example workflow)." } },
+    "width":    { "node": "3059", "path": "inputs.width", "default": 960,
+      "ui": { "label": "Width (stage-1; output is 2x)", "widget": "number", "min": 256, "max": 1920, "step": 32,
+              "section": "Advanced", "order": 1,
+              "tooltip": "FIRST-pass width; the spatial upscaler doubles it, so the saved clip is ~2x this. Keep stage-1 modest (the upscaler adds the resolution) -- 960 -> ~1920 is the sweet spot. Divisible by 32. (src: LTX-2.3 two-stage example workflow)" } },
+    "height":   { "node": "3059", "path": "inputs.height", "default": 544,
+      "ui": { "label": "Height (stage-1; output is 2x)", "widget": "number", "min": 256, "max": 1920, "step": 32,
+              "section": "Advanced", "order": 2,
+              "tooltip": "FIRST-pass height; doubled by the upscaler (544 -> ~1088). Divisible by 32. (src: LTX-2.3 two-stage example workflow)" } },
+    "length":   { "node": "3059", "path": "inputs.length", "default": 121,
+      "ui": { "label": "Frames (length)", "widget": "number", "min": 9, "max": 497, "step": 8,
+              "section": "Advanced", "order": 3,
+              "tooltip": "Frame count; LTX REQUIRES 8*n+1 (..., 121, 161). 121 frames is ~4s at the ~30fps container. (src: LTX-2.3 docs)" } },
+    "video":    { "node": "2004", "path": "inputs.image", "default": "ic_placeholder.png" }
+  }
+}

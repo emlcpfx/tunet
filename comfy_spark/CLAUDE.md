@@ -44,9 +44,9 @@ not internal notes. Keep ComfyUI / AI / ML jargon out — say "outlines" not
    |-------|------|
    | output | `video` (add `image` / `audio` if/when we ship those) |
    | model | `ltx2.3`, `wan2.1`, `wan2.2`, … (match the preset's `base` family token) |
-   | task | `text-to-video`, `image-to-video`, `video-to-video`, `generation`, `inpainting`, `object-removal`, `cleanplate`, `face-swap`, `hdr`, `color-grade`, `structural-control` |
+   | task | `text-to-video`, `image-to-video`, `video-to-video`, `generation`, `inpainting`, `object-removal`, `cleanplate`, `face-swap`, `hdr`, `color-grade`, `structural-control`, `upscale`, `restoration` |
    | structure cues | `canny`, `depth`, `pose` |
-   | inputs / needs | `mask-required`, `no-mask`, `two-inputs`, `lora-stacking`, `ic-lora` |
+   | inputs / needs | `mask-required`, `no-mask`, `two-inputs`, `lora-stacking`, `ic-lora`, `batch` |
    | readiness | `ready-to-run` (all weights pinned) **vs** `template` (user must fill `REPLACE_*` URLs) |
 
 The existing six presets are the reference — match their tone and depth.
@@ -72,6 +72,27 @@ The existing six presets are the reference — match their tone and depth.
   its terminal node isn't a `CreateVideo`/`SaveImage`/`VHS_VideoCombine` (i.e.
   auto-detect can't find the final IMAGE). Add a new format by editing the registry
   (save-node chain + `node_pack`), not code. mp4 stays the default preview.
+- **Batch** (`--batch PATH`, repeatable; web "Batch" toggle): many inputs — video
+  files and/or image-sequence folders (EXR/PNG/JPG/TIFF) — render in ONE job, the
+  model loading once (`comfy_run.run_batch` loops the converted graph per item).
+  It's **preset-driven**, not per-preset code: a preset is batchable when it has a
+  `video`/`image` primary param **and** an `output_prefix` (so outputs are named
+  per-input). To enable a new preset, add `output_prefix` (a `nodes` entry may be
+  `{node, path, template}` so a second saver — e.g. an HDR EXR `output_dir` — gets
+  its own per-item folder) and, for `LoadVideo → GetVideoComponents` graphs, an
+  `input_anchor` pointing at the IMAGE source so a sequence loader can swap in.
+  The COMFY_BATCH manifest shape is shared by `comfy_launch.py` (CLI) and `comfy.ts`
+  (web) — keep them in sync. Two-input presets (mask/face) are not batchable.
+- **Web-previewable outputs (auto mp4).** Browsers can't play an EXR/PNG sequence
+  or a ProRes `.mov`, so `comfy_run.generate_previews` auto-encodes a small h264
+  `*.preview.mp4` for every image-sequence output and every non-mp4 video container
+  (ProRes/`.mkv`/`.avi`) after each render (EXR is tonemapped linear→sRGB). The
+  high-bit deliverable is kept; the website plays the preview inline. Best-effort,
+  idempotent, never fatal — ffmpeg is on the image. The web outputs panel only
+  inline-`<video>`s mp4/webm/m4v (NOT `.mov`, which is usually unplayable ProRes).
+  RULE: any new output format that isn't a browser-playable mp4 must be covered by
+  this (a sequence kind, or a `PREVIEW_VIDEO_EXTS` container) so results stay
+  reviewable, not download-only.
 - **Input sequences** (`--input-sequence DIR`, v2v presets): `comfy_run.rewrite_input`
   swaps the preset's IMAGE-batch loader (auto-detected `VHS_LoadVideo`/`LoadImage`,
   or a preset's `input_anchor: {node}`) in place for CoCoTools `LoadExrSequence` and

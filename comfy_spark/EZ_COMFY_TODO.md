@@ -124,11 +124,96 @@ keep the hardest logic out of TS.
 
 ---
 
+## Face-swap engines — VividFace sibling pipeline (VALIDATED on Spark 2026-05-23)
+
+A **non-Comfy** face-swap engine added beside EZ-Comfy, mirroring the `lora_train`
+trio (NOT a ComfyUI workflow → does not use the resolver / `comfy_run.py`):
+`faceswap.py` (launcher, reuses `comfy_launch` spine, `cpfx_faceswap`+`cpfx_comfy`
+tags), `faceswap_run.py` (in-container: clone → build → fetch weights → preprocess →
+run the engine's own `infer.py` → flatten swapped mp4 to `/output` → self-upload),
+`swappers/vividface.swap.json` (recipe). Built because the user's pasted face-swap
+research named **VividFace** the Tier-1 quality yardstick.
+
+- **Run it:** `python faceswap.py --recipe vividface body.mp4 --face id.png --frame-cap 40 --name <x> --idle-hold 300`
+  (or `--examples` for the bundled-sample proof, or `--dry-run` to spend nothing).
+- **R&D-ONLY — never a billed shot.** Academic weights + WebFace42M identity encoder
+  + SD-1.5 (OpenRAIL) + InsightFace default detector. `rd_only:true` → launcher prints
+  a NOT-FOR-DELIVERY banner. Deliverable face-swap stays `ltx_faceswap` (LTX-2 is
+  commercial-OK under <$10M ARR) or training your own on rights-cleared data.
+- **MUST be L40S (Ada sm_89), NOT Blackwell** — VividFace pins torch 2.4.1 (kernels
+  ≤ sm_90); RTX PRO 6000 Blackwell (sm_120) fails "CUDA capability not compatible".
+  Recipe defaults `gpu:l40s`. Base `pytorch/pytorch:2.4.1-cuda12.1-cudnn9-devel`.
+- **Validated:** `--examples` renders 4 swaps; custom real-footage path
+  (transcode → YuNet square 512 face-crop → 14-val annotations → infer) runs on a 2K
+  plate. Hard-won fixes are in the `comfy-spark-vividface` memory / the file headers
+  (git-before-clone, weights nesting, recursive BFM+epoch_20 relocate, face3dvae2
+  alias, SD-1.5 `model_index.json` marker, square-crop geometry, outputs-dir keep).
+- **Custom output is a 512 FACE-CENTRIC clip, not a full-plate composite** —
+  VividFace's inference hard-reshapes to 512×512 and isn't built to repaint a full
+  plate. Fine for quality evaluation; a full-plate deliverable would need a
+  crop→swap→paste-back layer (or just use `ltx_faceswap`).
+- **Web visibility:** jobs carry `cpfx_comfy` so tunet-web's job-detail shows the
+  media outputs panel; the swapped mp4 is flattened to the ShareSync top level (the
+  files API lists one level only). No web deploy needed (deployed app already detects
+  `cpfx_comfy`).
+
+### Still TODO on this engine
+- [ ] **Judge the swap quality** on the named run's output (PF0013) — is VividFace's
+      512 swap worth pursuing vs `ltx_faceswap`? (the actual go/no-go).
+- [x] **Tier-2 restoration DONE**: `faceswap.py --restore --download DIR` runs the swap,
+      then auto-fires a `seedvr2` upscale job on the swapped mp4 (→ `DIR/restored/`).
+      Required a `pip_extra` hook (comfy_launch sets `COMFY_PIP_EXTRA`, comfy_run installs
+      after node reqs) to pin `diffusers==0.35.0`/`transformers==4.55.4` and fix SeedVR2's
+      `flash_attn` import break. Validated: PF0013 512 swap → 1080 upscale (115s, rtxpro6000).
+- [ ] **Tier-3 license-clean path**: detector default is already YuNet (clean); note
+      ByteDance **LVFace** (MIT) as a clean identity-embedding option; real delivery =
+      train an equivalent on consented data.
+- [ ] **CLI↔GUI↔web parity**: faceswap is CLI-only today (like `lora_train`). Expose in
+      `comfy_ui.py` (tkinter) and a tunet-web submit path.
+- [ ] **Rollout**: `-SkipWeb` repo deploy so prod can launch it from the deployed repo.
+
+---
+
 ## Shipped-but-untested (verify before relying on it)
 
 Work landed in the repo but **never run against live ComfyUI/Spark or a browser**.
 Verified only structurally (graph integrity, `tsc --noEmit`). This is the "haven't
 tested yet" backlog — clear these before treating the features as working.
+
+### `seedvr2` preset + generic BATCH (`--batch` / web Batch toggle) — built, never run on Spark
+(SeedVR2 diffusion video upscaler — numz node, IceClear/ByteDance model. Graph cleaned
+from the upstream HD-video example by `presets/seedvr2.derive.py` (7 nodes, validates).
+Generic batch engine: `comfy_run.run_batch` loops the converted graph over many inputs
+on one warm node; `comfy_launch.py --batch` + web submit build an identical COMFY_BATCH
+manifest. `ltx_hdr` + `ltx_Obscura_Remova` gained `output_prefix`/`input_anchor` so they
+batch too. Resolver taught the SeedVR2 loaders → `models/SEEDVR2` (selftest PASS).)
+- [x] `--resolve-selftest --no-fetch` PASS (0 missed models; seedvr2 model dests match).
+- [x] CLI dry-runs: seedvr2 single + mixed batch (2 video + EXR + PNG folders); ltx_hdr
+      single + batch (mp4 prefix + per-item EXR `output_dir`). `tsc --noEmit` clean.
+- [ ] **`--convert-only` on Spark** for `seedvr2` — first proof the cleaned graph converts
+      (SeedVR2VideoUpscaler/LoadDiTModel/LoadVAEModel via `/object_info`, V3 IO, all scalar
+      widgets — no DynamicCombo, so the flat converter should handle it).
+- [ ] **One real render**: `seedvr2 shot.mp4` on `rtxpro6000` (default model is now **7B-fp16
+      ~15 GB**) — confirm the node pip-installs its reqs (diffusers/peft/rotary_embedding_torch/
+      gguf), the 7B+VAE download to `models/SEEDVR2`, and the upscale + CreateVideo/SaveVideo emit
+      an mp4. (3B / 7B-fp8 are selectable; they download on first use. Tune blocks_to_swap for l40s.)
+- [ ] **Auto mp4 preview** (`comfy_run.generate_previews`): confirm ffmpeg on the image encodes
+      a `*.preview.mp4` for an image-sequence output (`--output exr32`/png16) and a ProRes `.mov`
+      (`--output prores_hq`), and that the web panel plays it. Verify the EXR linear→sRGB tonemap
+      (`-apply_trc iec61966_2_1`, gamma fallback) looks right; if the build lacks the filter it
+      degrades to the gamma path (and the preset's own mp4 still covers most v2v presets).
+- [ ] **Batch render end-to-end**: confirm the model loads ONCE across items, the per-item
+      output prefix lands distinct files, and a SEQUENCE item swaps `LoadExrSequence` /
+      `VHS_LoadImagesPath` in at `input_anchor` (GetVideoComponents) + the orphaned
+      `LoadVideo` is pruned. Watch for: VHS `VHS_LoadImagesPath` `directory` arg name; the
+      `4n+1` batch_size validation; 7B picked in the form auto-downloading.
+- [ ] **Web batch round-trip**: multi-video + image-sequence folder upload (comfy_input /
+      comfy_seq roles) → submit `batch:true` → outputs panel groups per input.
+- [ ] **HDR EXR batch**: the web files API only lists top-level outputs, so per-item EXR
+      subfolders (`output/<stem>_hdr_exr/`) show via ShareSync/CLI, not the browser — the
+      mp4 previews group per input in the browser. Confirm no EXR collisions across items.
+- [ ] **Rollout**: needs a `-SkipWeb` repo deploy (preset/derive/`comfy_run.py`) AND a
+      `-SkipRepo` web deploy — same split as the other EZ-Comfy features.
 
 ### `ltx_faceswap` preset — first Spark run FAILED, root-caused + fixed; re-run pending
 (LTX-2.3 video face/head swap, Alissonerdx BFS V3 LoRA; body clip + `--face` image.
@@ -276,3 +361,75 @@ consumer rewire, audio drop, links resolve) + launcher dry-run on `ltx_Obscura_R
       appear in the dropdown until then.
 - [ ] The web changes need a **web deploy** (`-SkipRepo`). (See the deploy-split
       note in the project memory.)
+
+---
+
+## LTX-2 expansion (May 2026) — gap-closing pass vs the official repos
+
+Goal: close the gaps from the EZ-Comfy gap analysis (two-stage upscaler, lipdub,
+camera control, detailer, restoration) + a few trending models. All recon done;
+weight URLs verified ungated via the HF API. Scratch + downloaded workflows in
+`_ingest_work/` (helpers `inspect_wf.py`, `trace.py`).
+
+### Built + free-validated (resolve-selftest PASS) this pass
+- **`ltx_two_stage`** — LTX-2.3 base + 2× spatial upscaler. **convert-only GREEN**;
+  T2V render fired (rtxpro6000). The headline gap.
+- **`ltx_lipdub`** — LipDub IC-LoRA, two-stage, audio-conditioned. **convert-only GREEN**.
+- **`ltx19_generate`** + **`ltx19_detailer`** + **`loras/ltx2-19b.loras.json`** (7
+  camera LoRAs).
+  - **`ltx19_generate` convert BLOCKED (2 subgraph issues):** (1) `KeyError '5230'/'5231'`
+    — bypassed camera-LoRA loaders feeding the subgraph; FIXED by `ltx19_generate.derive.py`
+    (drop them, rewire subgraph model inputs -> checkpoint 5228). (2) After that, `Required
+    input is missing: upscale_model` — FIXED by a GENERAL change to `flatten_subgraphs`:
+    map subgraph boundary inputs by SLOT (not the litegraph-suffixed NAME) and rewire any
+    boundary input that has a real source link (dropped the `_SUBGRAPH_DATA` type-allowlist
+    that missed `LATENT_UPSCALE_MODEL`). Verified locally (all inner inputs wired) + on Spark.
+    **`ltx19_generate` convert-only is now GREEN; render in flight.** No offline-flatten needed.
+  - **`ltx19_detailer`** FLAT — **convert-only GREEN.**
+  - 19B = SEPARATE base (`Lightricks/LTX-2`); gemma is a 16-file HF FOLDER
+    (`Lightricks/gemma-3-12b-it-qat-q4_0-unquantized`); dest `models/text_encoders/...`
+    CONFIRMED correct from `gemma_encoder.py` (it scans `get_filename_list("text_encoders")`).
+- **`wan_vace_ref2video`** — Wan-VACE reference-to-video (3-input: video + `--mask` +
+  `--face` reference). Derived from the flat `wan_vace_inpaint.workflow.json`. **convert-only GREEN** (1 combo self-heal).
+- **`ltx_restore` (ICEdit-Insight) — convert-only GREEN.** Built with NO derive (dest-rename + prompt-link override). `task` param (node 5011) switches the 4 adapters.
+- **`latentsync` — convert-only GREEN.** Native deps install on yanwk; weights in the wrapper's `custom_nodes/.../checkpoints/`; version-drift fix (inference_steps/lips_expression params).
+- **ALL 7 NEW PRESETS CONVERT-GREEN.** Renders proven: `ltx_two_stage` ✅. Render in flight: `ltx19_generate`. Render-unverified (need real inputs): `ltx_lipdub`, `wan_vace_ref2video`, `ltx_restore`, `latentsync`, `ltx19_detailer`.
+- **Launcher papercut found:** `--convert-only` does NOT exit after printing
+  `VALIDATION OK` (keeps following the finished job) → wastes the run until killed.
+  Fix: have convert-only exit on the job's terminal status. Validate via streamed
+  output + `timeout`, NOT `| tail` (tail buffers until exit → zero visibility).
+
+### TODO — ICEdit-Insight (joyfox, #1 trending) — restoration/HD/watermark/subtitle
+Standalone `run_pipeline.py` (`github.com/Valiant-Cat/LTX2-ICEdit-Insight`) that ALSO
+ships ComfyUI workflows in its `workflows/` folder. **Decision still open: ComfyUI
+preset vs wrapping run_pipeline.py as a Spark job (like lora_train.py).** Having seen
+the graph, the wrap may be cleaner. If doing the ComfyUI preset, use the **official**
+version (`LTX-2.3-ICLORA编辑-官方模型版本.json`, in `_ingest_work/icedit_official.json`):
+flat (41 nodes, 0 subgraphs, 1 bypass), runs the task adapters on the STANDARD 22B.
+- [ ] Weights (all ungated, verified): checkpoint `Lightricks/LTX-2.3-fp8/ltx-2.3-22b-dev-fp8.safetensors`;
+      distill `Lightricks/LTX-2.3/ltx-2.3-22b-distilled-lora-384-1.1.safetensors`;
+      gemma — workflow wants `gemma_3_12B_it_fp8_e4m3fn` but only `gemma_3_12B_it_fp8_scaled`
+      exists at `Comfy-Org/ltx-2` → must patch the in-graph widget to `_fp8_scaled`.
+- [ ] Task adapters (joyfox/LTX2.3-ICEdit-Insight, ungated): `ltx2.3-video-restoration-general`,
+      `ltx2.3-ic-video-upscale-general`, `ltx2.3-ic-watermark-remove-general`,
+      `ltx2.3-ic-subtitles-remove-general`. Graph's widget names (`...-v2`) DON'T match
+      → a derive must rewrite the active IC-LoRA loader (**node 5011**; 5133 is an
+      inactive alternate) lora_name + expose a `task` param picking 1 of 4.
+- [ ] Prompt indirection: prompt feeds via **CR Prompt Text** (Comfyroll) 5132 → CLIPTextEncode 2483;
+      map `prompt` to the 5132 widget (confirm field name) or rewire 2483 to a plain box.
+      Input video = VHS_LoadVideo **5099**. Negative 2612 (empty).
+- [ ] 9 node packs (LTXVideo, VHS, KJNodes, essentials, rgthree, **ComfyUI_LayerStyle**
+      [pick over Swwan for the ambiguous `LayerUtility: ImageScaleByAspectRatio V2`],
+      Comfyroll, Easy-Use, masquerade). Many are utility/decoration — gate-iterate +
+      mute what's not on the active path. Expect 1-2 convert-only heal cycles.
+
+### TODO — LatentSync (ByteDance, audio-driven lip-sync) — SEPARATE ecosystem
+Not LTX. ComfyUI node pack `ShmuelRonen/ComfyUI-LatentSyncWrapper` (node `LatentSync1.6`).
+Needs a DIFFERENT image (mediapipe / face-alignment / decord / ffmpeg deps — the yanwk
+LTX image won't have them; either find a comfy image with these or pip-install via
+`fetch_nodes`' requirements). Weights ~8GB (latentsync_unet.pt, stable_syncnet.pt,
+whisper tiny, SD VAE) — ByteDance repo is private; use the **chunyu-li/LatentSync** mirror.
+Fits 24GB (could even run on the local 3090). Inputs: 25fps frontal-face video + audio.
+- [ ] Confirm chunyu-li mirror file paths + the wrapper's expected model dirs.
+- [ ] Decide the base image (deps); build preset (video + `--face`?/audio input). Distinct
+      from LTX presets — its own `base`. Lower priority than the LTX line.

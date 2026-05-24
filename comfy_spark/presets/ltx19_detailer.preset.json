@@ -1,0 +1,78 @@
+{
+  "description": "LTX-2 19B DETAILER — a video-to-video refinement pass that adds fine detail, texture and sharpness using the 'LTX-2-19b-IC-LoRA-Detailer'. Feed it a soft / low-detail / upscaled clip and it re-renders crisper detail while following the original motion and content. Runs on the 19B base (a separate family from the 2.3-22B presets). Graph: Lightricks/ComfyUI-LTXVideo example 'LTX-2_V2V_Detailer' (example_workflows/2.0).",
+
+  "docs": [
+    { "label": "Detailer IC-LoRA model card", "url": "https://huggingface.co/Lightricks/LTX-2-19b-IC-LoRA-Detailer" },
+    { "label": "LTX-2 docs", "url": "https://docs.ltx.video" },
+    { "label": "Official 2.0 example workflows", "url": "https://github.com/Lightricks/ComfyUI-LTXVideo/tree/master/example_workflows/2.0" }
+  ],
+  "tags": ["video", "ltx2-19b", "video-to-video", "detailer", "upscale", "ic-lora", "ready-to-run"],
+  "about": {
+    "what": "Sharpens and adds fine detail/texture to a video — a refinement pass for soft, low-detail, or freshly-upscaled footage, keeping the original motion and content.",
+    "inputs": "One video clip (the footage to refine). A short prompt describing the content helps.",
+    "key_knobs": "Prompt — describe what's in the clip (guides the detail it adds). The detail comes from the IC-LoRA; keep the prompt faithful to the source."
+  },
+
+  "_TEMPLATE": "READY-TO-RUN. Weights pinned to real, ungated HF URLs: the 19B dev checkpoint + the Detailer IC-LoRA (Lightricks) and the Gemma-3-12B text-encoder FOLDER (16 files; the 19B graph's LTXVGemmaCLIPModelLoader reads a HF model directory). Run --convert-only FIRST.",
+  "_HOWITRUNS": "No-build path: public yanwk image, comfy_run.py clones node_packs, downloads the weights (HEAVY 19B cold start: ~38GB checkpoint + ~24GB Gemma folder), converts UI->API, applies patches, and renders. The Detailer rides as a plain model-LoRA (LoraLoaderModelOnly 4712); the input video conditions the refine pass. rtxpro6000 recommended.",
+  "_NOTE": "LTXVSpatioTemporalTiledVAEDecode (a newer LTXVideo node) drives the tiled decode; it's part of ComfyUI-LTXVideo (the resolver's class->pack map just doesn't list it yet, but the pack IS included). Best used as the SECOND step after an upscale (e.g. take a 2x-upscaled clip and run it through Detailer to recover crisp texture).",
+
+  "base": "ltx2-19b",
+  "lora_catalog": "ltx2-19b.loras.json",
+  "lora_chain": { "anchor": "4521", "slot": 0 },
+  "requires_input": true,
+
+  "image": "yanwk/comfyui-boot:cu130-slim-v2",
+  "comfy_home": "/root/ComfyUI",
+  "comfy_bundle": "/default-comfyui-bundle/ComfyUI",
+  "python": "python3.13",
+  "gpu": "rtxpro6000",
+  "mode": "instant",
+  "extra_args": "",
+
+  "workflow": "ltx19_detailer.workflow.json",
+
+  "node_packs": [
+    "https://github.com/Lightricks/ComfyUI-LTXVideo"
+  ],
+
+  "models": [
+    { "url": "https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-19b-dev.safetensors",
+      "dest": "models/checkpoints/ltx-2-19b-dev.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/LTX-2-19b-IC-LoRA-Detailer/resolve/main/ltx-2-19b-ic-lora-detailer.safetensors",
+      "dest": "models/loras/ltx-2-19b-ic-lora-detailer.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/config.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/config.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/added_tokens.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/added_tokens.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/chat_template.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/chat_template.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/generation_config.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/generation_config.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/model-00001-of-00005.safetensors", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/model-00001-of-00005.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/model-00002-of-00005.safetensors", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/model-00002-of-00005.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/model-00003-of-00005.safetensors", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/model-00003-of-00005.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/model-00004-of-00005.safetensors", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/model-00004-of-00005.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/model-00005-of-00005.safetensors", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/model-00005-of-00005.safetensors" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/model.safetensors.index.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/model.safetensors.index.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/preprocessor_config.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/preprocessor_config.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/processor_config.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/processor_config.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/special_tokens_map.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/special_tokens_map.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/tokenizer.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/tokenizer.json" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/tokenizer.model", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/tokenizer.model" },
+    { "url": "https://huggingface.co/Lightricks/gemma-3-12b-it-qat-q4_0-unquantized/resolve/main/tokenizer_config.json", "dest": "models/text_encoders/gemma-3-12b-it-qat-q4_0-unquantized/tokenizer_config.json" }
+  ],
+
+  "ui": {
+    "title": "LTX-2 19B Detailer — add fine detail/sharpness to a video (v2v)",
+    "primary_input": {
+      "label": "Video to refine",
+      "tooltip": "The clip to sharpen / add detail to. Works best on soft or freshly-upscaled footage. Motion and content are preserved.",
+      "filetypes": [["Video", "*.mp4 *.mov *.webm *.mkv *.avi *.m4v"], ["All files", "*.*"]]
+    }
+  },
+
+  "params": {
+    "prompt": { "node": "2483", "path": "inputs.text",
+      "default": "high detail, crisp natural texture, sharp focus, realistic fine detail",
+      "ui": { "label": "Prompt", "widget": "multiline", "section": "Main", "order": 1,
+              "tooltip": "Describe what's in the clip + the detail you want recovered (texture, sharpness). Keep it faithful to the source — the Detailer adds detail to existing content, it doesn't reinvent the scene. (src: Detailer IC-LoRA model card)" } },
+    "video": { "node": "4905", "path": "inputs.file" }
+  }
+}

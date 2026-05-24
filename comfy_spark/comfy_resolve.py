@@ -64,9 +64,14 @@ LOADER_FOLDERS = {
     "UNETLoader": "diffusion_models",
     "ControlNetLoader": "controlnet",
     "UpscaleModelLoader": "upscale_models",
+    "LatentUpscaleModelLoader": "latent_upscale_models",
     "CLIPVisionLoader": "clip_vision",
     "StyleModelLoader": "style_models",
     "GLIGENLoader": "gligen",
+    # SeedVR2 video upscaler keeps its DiT + VAE weights together under models/SEEDVR2
+    # (the node's own cache dir), so both loaders map there rather than vae/unknown.
+    "SeedVR2LoadDiTModel": "SEEDVR2",
+    "SeedVR2LoadVAEModel": "SEEDVR2",
 }
 
 # Loaders whose weights are normally auto-fetched by the node pack itself, not
@@ -89,7 +94,7 @@ CORE_EXTRA = {"Note", "MarkdownNote", "Reroute", "PrimitiveNode"}
 # entry whose folder ranks earliest here.
 FOLDER_PRIORITY = ["checkpoints", "diffusion_models", "unet", "loras", "controlnet",
                    "vae", "text_encoders", "clip_vision", "style_models",
-                   "upscale_models", "gligen", "unknown"]
+                   "upscale_models", "latent_upscale_models", "gligen", "unknown"]
 
 # ── Curated seed: class -> github repo for the LTX/Wan ecosystem these presets
 # target. Covers custom nodes that ship NO provenance (cnr_id/aux_id are null in
@@ -111,6 +116,13 @@ SEED_NODE_MAP = {
     # cubiq/ComfyUI_essentials
     "SimpleMath+": "https://github.com/cubiq/ComfyUI_essentials",
     "GetImageSize+": "https://github.com/cubiq/ComfyUI_essentials",
+    # numz/ComfyUI-SeedVR2_VideoUpscaler (diffusion video super-resolution).
+    # Graphs exported with the ainvfx fork carry an aux_id (which wins); these seed
+    # entries resolve a BYO SeedVR2 graph that ships no provenance.
+    "SeedVR2VideoUpscaler": "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler",
+    "SeedVR2LoadDiTModel": "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler",
+    "SeedVR2LoadVAEModel": "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler",
+    "SeedVR2TorchCompileSettings": "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler",
 }
 
 # Some packs register only an ENUM OPTION (a scheduler/sampler name) into a CORE
@@ -212,7 +224,7 @@ def _folder_from_name(type_name):
     if "controlnet" in t:                  return "controlnet"
     if "clipvision" in t or "clip_vision" in t: return "clip_vision"
     if "textencoder" in t or "text_encoder" in t or "cliploader" in t: return "text_encoders"
-    if "upscale" in t:                     return "upscale_models"
+    if "upscale" in t:                     return "latent_upscale_models" if "latent" in t else "upscale_models"
     if "unet" in t or "diffusion" in t:    return "diffusion_models"
     return "unknown"
 
