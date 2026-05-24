@@ -13,7 +13,7 @@ export function spaceBase(): string {
   return (process.env.SPARK_FILES_BASE_URL ?? '').replace(/\/+$/, '')
 }
 
-async function dav(method: string, url: string, body?: string): Promise<Response> {
+async function dav(method: string, url: string, body?: BodyInit): Promise<Response> {
   const tok = await getToken()
   return fetch(url, {
     method,
@@ -41,6 +41,32 @@ export async function putControlFile(key: string, file: string, obj: unknown): P
   if (!res.ok) {
     const t = await res.text().catch(() => '')
     throw new Error(`ShareSync PUT ${file} → HTTP ${res.status} ${t.slice(0, 120)}`)
+  }
+}
+
+/**
+ * PUT raw bytes at `_tunet_control/<key>/<seg>/<seg>/…`, MKCOL-ing every parent
+ * collection along the way. Used to deliver post-submit validation files into a
+ * running job's control area (the trainer downloads them from there). All but
+ * the last segment are treated as directories.
+ */
+export async function putControlBytes(key: string, segs: string[], body: ArrayBuffer): Promise<void> {
+  const base = spaceBase()
+  if (!base) throw new Error('SPARK_FILES_BASE_URL not configured')
+  if (segs.length === 0) throw new Error('putControlBytes: empty path')
+  let cur = `${base}/_tunet_control`
+  await mkcol(cur)
+  cur = `${cur}/${encodeURIComponent(key)}`
+  await mkcol(cur)
+  for (const seg of segs.slice(0, -1)) {
+    cur = `${cur}/${encodeURIComponent(seg)}`
+    await mkcol(cur)
+  }
+  const url = `${cur}/${encodeURIComponent(segs[segs.length - 1])}`
+  const res = await dav('PUT', url, body)
+  if (!res.ok) {
+    const t = await res.text().catch(() => '')
+    throw new Error(`ShareSync PUT ${segs.join('/')} → HTTP ${res.status} ${t.slice(0, 120)}`)
   }
 }
 

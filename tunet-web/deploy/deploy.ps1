@@ -163,6 +163,13 @@ if ($PushEnv) {
 # ── Extract + restart (one SSH round-trip) ──────────────────────────────────
 Step 'Extracting + restarting tunet-web'
 $remoteCmd = "set -e`n"
+if ($PushEnv) {
+  # /tmp is world-readable (1777) on a shared box and pscp lands the env file
+  # ~0644 — tighten it before any other remote work so a neighbouring tenant
+  # can't read the secrets during the deploy window. (Final perms set by the
+  # `install -m 0640` below.)
+  $remoteCmd += "chmod 600 /tmp/tunet-web.env`n"
+}
 if (-not $SkipWeb) {
   # Remove the stale .next from pre-distDir deploys (runtime now uses .next-prod).
   $remoteCmd += @'

@@ -18,7 +18,8 @@ import {
 import {
   loadComfyPreset, loadComfyWorkflow, buildComfyPatches, buildComfyEnv,
   comfyInstanceType, comfyCommand, packComfyTarball, comfySecondaryParam,
-  type ComfyLora, type ComfyPatch,
+  buildComfyBatchManifest, detectSequenceDir,
+  type ComfyLora, type ComfyPatch, type ComfyBatchItem,
 } from '@/lib/comfy'
 import { buildComfyFormState } from '@/lib/comfy-form-state'
 
@@ -32,11 +33,53 @@ interface Body {
   stageId?:        string
   inputName?:      string
   secondaryName?:  string          // two-input presets: face image / mask (comfy_input2)
+  batch?:          boolean         // BATCH: render every staged input in ONE job
   gpu?:            string
   mode?:           'instant' | 'smart'
   idleHoldSeconds?: number
   loras?:          ComfyLora[]
   readyTimeout?:   number
+}
+
+interface BatchAssembly {
+  inputs:    { path: string; basename: string }[]
+  seqGroups: { subdir: string; files: { path: string; basename: string }[] }[]
+  items:     ComfyBatchItem[]
+}
+
+/** Discover a batch's inputs from the upload stage: videos under comfy_input/,
+ * image-sequence folders under comfy_seq/<tag>/. Returns null on no inputs. */
+function assembleBatch(stageId: string): BatchAssembly | { error: string } {
+  const root = path.join(os.tmpdir(), 'tunet-stages', stageId)
+  const inputs: BatchAssembly['inputs'] = []
+  const seqGroups: BatchAssembly['seqGroups'] = []
+  const items: ComfyBatchItem[] = []
+
+  const vidDir = path.join(root, 'comfy_input')
+  if (fs.existsSync(vidDir)) {
+    for (const name of fs.readdirSync(vidDir).sort()) {
+      const p = path.join(vidDir, name)
+      if (!fs.statSync(p).isFile()) continue
+      items.push({ kind: 'video', stem: name.replace(/\.[^.]+$/, ''), name })
+      inputs.push({ path: p, basename: name })
+    }
+  }
+  const seqRoot = path.join(root, 'comfy_seq')
+  if (fs.existsSync(seqRoot)) {
+    for (const tag of fs.readdirSync(seqRoot).sort()) {
+      const dir = path.join(seqRoot, tag)
+      if (!fs.statSync(dir).isDirectory()) continue
+      const seq = detectSequenceDir(dir)
+      if (!seq) return { error: `folder "${tag}" has no recognized image sequence (EXR / PNG / JPG / TIFF)` }
+      const sd = seq.kind === 'exr'
+        ? { kind: 'exr' as const, pattern: `/input/seq/${tag}/${seq.prefix}${'#'.repeat(seq.pad)}${seq.ext}`, start: seq.start, end: seq.end, step: 1, colorspace: 'linear' }
+        : { kind: 'img' as const, dir: `/input/seq/${tag}`, colorspace: 'as-is' }
+      items.push({ kind: seq.kind, stem: tag, seq: sd })
+      seqGroups.push({ subdir: tag, files: seq.files.map(f => ({ path: f, basename: path.basename(f) })) })
+    }
+  }
+  if (items.length === 0) return { error: 'batch has no inputs — upload at least one clip or image-sequence folder' }
+  return { inputs, seqGroups, items }
 }
 
 function jsonError(msg: string, status: number): Response {
@@ -88,6 +131,7 @@ export async function POST(req: Request) {
 
   // Resolve the SECONDARY staged input (face image / mask), if this is a
   // two-input preset and the form uploaded one (staged under comfy_input2).
+  // (Two-input presets aren't batchable — batch presets declare no secondary.)
   const secondaryParam = comfySecondaryParam(preset)
   let secondary: { param: string; path: string; basename: string } | null = null
   if (body.stageId && body.secondaryName && secondaryParam) {
@@ -98,8 +142,17 @@ export async function POST(req: Request) {
       return jsonError(`${secondaryParam} file not found (stage may have expired — re-upload): ${base}`, 400)
     }
     secondary = { param: secondaryParam, path: p, basename: base }
-  } else if (secondaryParam && !body.secondaryName) {
+  } else if (secondaryParam && !body.secondaryName && !body.batch) {
     return jsonError(`preset ${preset.key} needs a ${secondaryParam} file (e.g. a face reference image)`, 422)
+  }
+
+  // BATCH: discover every staged input (videos + image-sequence folders) up front.
+  let batch: BatchAssembly | null = null
+  if (body.batch) {
+    if (!body.stageId || !/^[A-Za-z0-9_-]+$/.test(body.stageId)) return jsonError('bad stageId', 400)
+    const res = assembleBatch(body.stageId)
+    if ('error' in res) return jsonError(res.error, 400)
+    batch = res
   }
 
   const t0       = Date.now()
@@ -124,9 +177,12 @@ export async function POST(req: Request) {
         send({ phase: 'pack', status: 'start' })
         const tPack    = Date.now()
         const workflow = loadComfyWorkflow(preset)
+        // For a batch, the per-input clip + output-prefix patches are applied per
+        // item on the node (run_batch), so build only the GLOBAL knob patches here
+        // (inputBasename=null skips the video + output_prefix ops).
         const patches  = buildComfyPatches(
-          preset, body.values ?? {}, inputName,
-          secondary ? { param: secondary.param, basename: secondary.basename } : null,
+          preset, body.values ?? {}, batch ? null : inputName,
+          batch ? null : (secondary ? { param: secondary.param, basename: secondary.basename } : null),
         )
         // UI-format graphs (our presets) carry a top-level `nodes` array and are
         // converted to API on the node, so patches ride in patches.json. API
@@ -135,14 +191,18 @@ export async function POST(req: Request) {
         if (!isUi) {
           for (const op of patches) applyPatch(workflow as Record<string, unknown>, op)
         }
-        const inputs = [
-          inputPath && inputName ? { path: inputPath, basename: inputName } : null,
-          secondary ? { path: secondary.path, basename: secondary.basename } : null,
-        ].filter((x): x is { path: string; basename: string } => x !== null)
+        const batchBuilt = batch ? buildComfyBatchManifest(preset, batch.items) : null
+        const inputs = batch
+          ? batch.inputs
+          : [
+              inputPath && inputName ? { path: inputPath, basename: inputName } : null,
+              secondary ? { path: secondary.path, basename: secondary.basename } : null,
+            ].filter((x): x is { path: string; basename: string } => x !== null)
         const pack = await packComfyTarball({
           workflow,
           patches: isUi ? patches : null,
           inputs,
+          seqGroups: batch?.seqGroups,
         })
         tarballPath = pack.tarballPath
         send({ phase: 'pack', status: 'done', files: pack.fileCount, kb: Math.round(pack.compressedSize / 1024), ms: Date.now() - tPack })
@@ -159,6 +219,7 @@ export async function POST(req: Request) {
           loras:        body.loras,
           readyTimeout: body.readyTimeout,
           refresh:      refreshCtx,
+          batch:        batchBuilt,
         })
         const rawName = typeof body.values?.['__name'] === 'string' ? (body.values['__name'] as string).trim() : ''
         const jobName = rawName || `comfy-${preset.key}`

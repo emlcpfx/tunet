@@ -720,6 +720,89 @@ def _build_datasets(config, src_transforms, dst_transforms, shared_transforms, s
     return dataset, dataloader, dataloader_iter, val_dataloader, val_dataset, has_val_preview, has_val_loss
 
 
+# Accumulator dirs for validation frames added to a RUNNING job via the control
+# channel (tunet-web "Add validation data"). We download new frames here and
+# rebuild the val dataset over the accumulator so adds are additive across the
+# run. Kept off /input (read-only-ish, packed) and /output (synced at exit).
+_VAL_ADD_SRC = '/tmp/tunet_val_added/val_src'
+_VAL_ADD_DST = '/tmp/tunet_val_added/val_dst'
+
+
+def _apply_validation_update(config, standard_transform):
+    """Poll the control channel for an "add validation data" request; if present,
+    download the new frames, ADD them to the current validation set, and rebuild
+    the val dataloader. Rank-0 only (validation runs on the main process, so no
+    DDP coordination is needed). Fully defensive — returns None on no-op/failure
+    so training is never disrupted.
+
+    Returns (val_dataloader, val_dataset, has_val_loss, has_val_preview) on a
+    successful update, else None (leave the caller's state unchanged).
+    """
+    import shutil
+    from exporters.export_control import poll_validation_request, fetch_validation_files
+    req = poll_validation_request()
+    if not req:
+        return None
+
+    acc_src, acc_dst = _VAL_ADD_SRC, _VAL_ADD_DST
+    orig_src, orig_dst = config.data.val_src_dir, config.data.val_dst_dir
+
+    # First add: seed the accumulator with the job's ORIGINAL validation set so
+    # new frames are additive rather than a replacement. Detected by the
+    # accumulator not yet existing (subsequent adds just append to it).
+    def _seed(orig, acc):
+        if not (orig and os.path.isdir(orig)) or os.path.abspath(orig) == os.path.abspath(acc):
+            return
+        os.makedirs(acc, exist_ok=True)
+        for fn in os.listdir(orig):
+            sp = os.path.join(orig, fn)
+            if os.path.isfile(sp):
+                try: shutil.copy2(sp, os.path.join(acc, fn))
+                except Exception as e: logging.warning(f"[val-control] seed copy failed for {fn}: {e}")
+    if not os.path.isdir(acc_src):
+        _seed(orig_src, acc_src)
+        _seed(orig_dst, acc_dst)
+
+    n_src, n_dst = fetch_validation_files(req, acc_src, acc_dst)
+    if n_src == 0 and not os.path.isdir(acc_src):
+        return None  # nothing landed and no prior set — give up cleanly
+
+    config.data.val_src_dir = acc_src
+    if os.path.isdir(acc_dst) and any(os.path.isfile(os.path.join(acc_dst, f)) for f in os.listdir(acc_dst)):
+        config.data.val_dst_dir = acc_dst
+
+    color_space     = getattr(config.data, 'color_space', 'srgb')
+    has_val_preview = bool(config.data.val_src_dir)
+    has_val_loss    = bool(config.data.val_src_dir and config.data.val_dst_dir)
+    val_dataloader, val_dataset = None, None
+    if has_val_loss:
+        # The slice-info cache is keyed by (abspath(src), abspath(dst), res, …);
+        # the accumulator path is stable, so a prior add left a stale entry —
+        # drop it (matching the val-build defaults) before rebuilding, or we'd
+        # rescan nothing and miss the new frames.
+        ck = _dataset_cache_key(config.data.val_src_dir, config.data.val_dst_dir,
+                                config.data.resolution, config.data.overlap_factor,
+                                False, 1.0, color_space, False, None)
+        _SLICE_INFO_CACHE.pop(ck, None)
+        try:
+            val_dataset = AugmentedImagePairSlicingDataset(
+                config.data.val_src_dir, config.data.val_dst_dir, config.data.resolution,
+                config.data.overlap_factor, None, None, None, standard_transform,
+                color_space=color_space)
+            val_dataloader = DataLoader(
+                val_dataset, batch_size=config.training.batch_size, shuffle=False,
+                num_workers=0, collate_fn=collate_skip_none, drop_last=False)
+            logging.info(f"[val-control] validation set updated (+{n_src} src / +{n_dst} dst) "
+                         f"→ {len(val_dataset)} slices")
+        except Exception as e:
+            logging.warning(f"[val-control] validation rebuild failed: {e}")
+            val_dataloader, val_dataset = None, None
+    else:
+        logging.info(f"[val-control] added {n_src} val_src frame(s) as previews "
+                     f"(no val_dst → no loss metrics)")
+    return (val_dataloader, val_dataset, has_val_loss, has_val_preview)
+
+
 def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_size,
                  use_lpips, use_l2, use_bce_dice, use_amp_eff, loss_fn_lpips, model_type):
     """Create the model, optimizer, scaler, and load checkpoints if available.
@@ -1745,6 +1828,27 @@ def train(config):
                     if is_main_process():
                         logging.info(f"[stop-control] max_steps set to {max_steps} @ step {global_step} "
                                      f"({'stops at next check' if max_steps and global_step >= max_steps else 'unlimited' if max_steps == 0 else 'will stop at ' + str(max_steps)})")
+
+                # Live "add validation data" from the control channel — lets
+                # tunet-web push new val frames to a running job. Rank-0 only:
+                # validation runs on the main process, so the dataset rebuild
+                # needs no DDP broadcast/barrier (non-main ranks simply skip
+                # this). Defensive — never disrupts training.
+                if is_main_process():
+                    _vu = None
+                    try:
+                        _vu = _apply_validation_update(config, standard_transform)
+                    except Exception as e:
+                        logging.warning(f"[val-control] update failed: {e}")
+                    if _vu is not None:
+                        val_dataloader, val_dataset, has_val_loss, has_val_preview = _vu
+                        if has_val_preview:
+                            try:
+                                _ns, _nd = capture_val_preview_batch(config, standard_transform, use_auto_mask=use_auto_mask, skip_empty=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold)
+                                if _ns is not None:
+                                    val_fixed_src, val_fixed_dst = _ns, _nd
+                            except Exception as e:
+                                logging.warning(f"[val-control] preview recapture failed: {e}")
 
             # --- Auto Export ---
             if is_main_process() and epoch_end_now and config.auto_export.interval > 0:

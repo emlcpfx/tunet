@@ -46,7 +46,10 @@ export const maxDuration = 300
 // 'comfy_input2' is the EZ-Comfy SECONDARY input for two-input presets (the face
 // reference image for ltx_faceswap, or the mask for wan_vace_inpaint) — same raw
 // chunked upload, into the same stage under a second role dir.
-const ALLOWED_ROLES = new Set(['src', 'dst', 'val_src', 'val_dst', 'mask', 'checkpoint', 'comfy_input', 'comfy_input2'])
+// 'comfy_seq' is a BATCH image-sequence folder: frames are staged under
+// comfy_seq/<subdir>/ (one subdir per folder) so several sequences don't collide
+// by basename. The `subdir` multipart field / 'x-subdir' header carries the folder.
+const ALLOWED_ROLES = new Set(['src', 'dst', 'val_src', 'val_dst', 'mask', 'checkpoint', 'comfy_input', 'comfy_input2', 'comfy_seq'])
 
 function stageDir(stageId: string): string {
   return path.join(os.tmpdir(), 'tunet-stages', stageId)
@@ -91,7 +94,12 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'no files in request' }, { status: 400 })
   }
 
-  const targetDir = path.join(stageDir(stageId), role)
+  // comfy_seq frames live under comfy_seq/<subdir>/ (one subdir per folder).
+  const subdirRaw = String(form.get('subdir') ?? '')
+  const subdir = role === 'comfy_seq' && subdirRaw ? path.basename(subdirRaw) : ''
+  const targetDir = subdir
+    ? path.join(stageDir(stageId), role, subdir)
+    : path.join(stageDir(stageId), role)
   await fs.promises.mkdir(targetDir, { recursive: true })
 
   // Write each file. We use the basename only to avoid path traversal — the

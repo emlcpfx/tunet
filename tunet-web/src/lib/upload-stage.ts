@@ -112,6 +112,55 @@ export async function uploadComfyInput(
   return uploadRawChunked(file, opts?.role ?? 'comfy_input', onProgress, opts?.stageId)
 }
 
+/**
+ * EZ-Comfy BATCH image-sequence folder — many frames staged under
+ * comfy_seq/<subdir>/ in one stage (one subdir per folder, so several sequences
+ * don't collide by basename). Frames go up as 64 MB multipart batches (same
+ * memory discipline as the training folder uploader). Returns the stageId so the
+ * caller chains the next folder / clip into the same stage.
+ */
+export async function uploadComfySequence(
+  files: File[],
+  subdir: string,
+  stageId: string | undefined,
+  onProgress?: (sent: number, total: number) => void,
+): Promise<{ stageId: string; count: number; bytes: number }> {
+  let sid = stageId
+  const total = files.reduce((s, f) => s + f.size, 0)
+  let sent = 0
+  let cur: File[] = []
+  let curBytes = 0
+
+  const flush = async () => {
+    if (cur.length === 0) return
+    const fd = new FormData()
+    fd.set('role', 'comfy_seq')
+    fd.set('subdir', subdir)
+    if (sid) fd.set('stageId', sid)
+    for (const f of cur) fd.append('files', f, f.name)
+    const res = await fetch('/api/spark/upload-stage', { method: 'POST', body: fd })
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}))
+      throw new Error(j.error ?? `upload-stage HTTP ${res.status}`)
+    }
+    const json = await res.json() as { stageId: string }
+    sid = json.stageId
+    sent += curBytes
+    onProgress?.(sent, total)
+    cur = []
+    curBytes = 0
+  }
+
+  for (const f of files) {
+    if (curBytes + f.size > MAX_BATCH_BYTES && cur.length > 0) await flush()
+    cur.push(f)
+    curBytes += f.size
+  }
+  await flush()
+  if (!sid) throw new Error('no frames uploaded')
+  return { stageId: sid, count: files.length, bytes: total }
+}
+
 async function uploadRawChunked(
   file: File,
   role: string,

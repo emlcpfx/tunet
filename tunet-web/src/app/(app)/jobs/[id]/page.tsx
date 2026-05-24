@@ -19,6 +19,7 @@ import { LiveStatusBadge } from '@/components/spark/live-status-badge'
 import { JobLiveView } from '@/components/spark/job-live-view'
 import { CancelJobButton } from '@/components/spark/cancel-job-button'
 import { SetMaxStepsButton } from '@/components/spark/set-max-steps-button'
+import { AddValidationButton } from '@/components/spark/add-validation-button'
 import { TrainingChart } from '@/components/spark/training-chart'
 import { TrainingStats } from '@/components/spark/training-stats'
 import { PreviewImages } from '@/components/spark/preview-images'
@@ -122,6 +123,7 @@ export default async function JobDetailPage({
             </Link>
           )}
           {isLive && !isComfy && <SetMaxStepsButton jobId={job.id} />}
+          {isLive && !isComfy && <AddValidationButton jobId={job.id} />}
           {isLive && <CancelJobButton jobId={job.id} />}
         </div>
       </div>
@@ -151,6 +153,7 @@ export default async function JobDetailPage({
             <ComfyInfo label="Preset" value={job.env?.TUNET_PRESET ?? '—'} mono />
             <ComfyInfo label="GPU"    value={jobGpuDisplay(job)} />
             <ComfyInfo label="LoRA"   value={comfyLoraSummary(job.env)} mono />
+            {comfyBatchCount(job.env) && <ComfyInfo label="Batch" value={comfyBatchCount(job.env)!} />}
           </div>
           <ComfyRenderSettings job={job} />
           <section>
@@ -287,6 +290,16 @@ function comfyLoraSummary(env: SparkJob['env']): string {
     } catch { /* fall through to the single-LoRA default */ }
   }
   return env.COMFY_LORA_NAME || 'none'
+}
+
+/** "N inputs" if this comfy job is a batch (COMFY_BATCH env), else null. */
+function comfyBatchCount(env: SparkJob['env']): string | null {
+  const raw = env?.COMFY_BATCH
+  if (!raw) return null
+  try {
+    const n = (JSON.parse(raw) as { items?: unknown[] }).items?.length ?? 0
+    return n > 0 ? `${n} input${n === 1 ? '' : 's'}` : null
+  } catch { return null }
 }
 
 function shortImage(img?: string): string {

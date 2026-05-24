@@ -46,6 +46,7 @@ export interface ComfyPreset {
   docs?:         ComfyDocLink[] | string[] | string   // link(s) to canonical docs
   tags?:         string[]                              // for sifting/filtering
   about?:        ComfyAbout                            // plain-language description
+  prompt_guide?: { url: string; tips?: string }        // model-specific prompting help (LTX-2 etc.)
   base?:         string
   image?:        string
   comfy_home?:   string
@@ -61,9 +62,27 @@ export interface ComfyPreset {
   lora_name?:    string
   lora_chain?:   { anchor: string; slot: number }
   lora_catalog?: string
-  output_prefix?: { nodes: string[]; path?: string; template?: string }
+  // A `nodes` entry is a bare node id (uses the top-level path/template) or a
+  // {node, path?, template?} object — the object form lets a second saver (e.g. an
+  // HDR EXR output_dir) get its own field + per-item template for batch runs.
+  output_prefix?: { nodes: (string | { node: string; path?: string; template?: string })[]; path?: string; template?: string }
+  input_anchor?: { node: string; slot?: number }
   ui?:           Record<string, unknown>
   params:        Record<string, ComfyParamSpec>
+}
+
+/** One batch input: a video clip, or a folder of frames (EXR / PNG / JPG / TIFF). */
+export interface ComfyBatchItem {
+  kind: 'video' | 'exr' | 'img'
+  stem: string
+  name?: string                                   // video basename (for kind=video)
+  seq?: {
+    kind: 'exr' | 'img'
+    pattern?: string                              // /input/seq/<tag>/name.####.exr (exr)
+    start?: number; end?: number; step?: number
+    dir?: string                                  // /input/seq/<tag> (img)
+    colorspace: string
+  }
 }
 
 /** comfy_spark/ sits at the repo root next to train.py. */
@@ -166,20 +185,102 @@ export function buildComfyPatches(
     ops.push({ node: String(spec.node), path: spec.path, value: val })
   }
 
-  const op = preset.output_prefix
-  if (op && inputBasename) {
-    const stem  = inputBasename.replace(/\.[^.]+$/, '')
+  if (preset.output_prefix && inputBasename) {
+    // Sanitize only the {stem} (keep slashes in a template — e.g. an EXR
+    // output_dir 'output/{stem}_exr'), matching comfy_launch.py.
+    const stem  = (inputBasename.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120)) || 'output'
     const model = String(preset.base ?? '').split('-')[0]
-    const raw   = (op.template ?? '{stem}_{preset}')
-      .replaceAll('{stem}', stem)
-      .replaceAll('{preset}', preset.key)
-      .replaceAll('{model}', model)
-    const prefix = (raw.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120)) || 'output'
-    for (const nid of op.nodes ?? []) {
-      ops.push({ node: String(nid), path: op.path ?? 'inputs.filename_prefix', value: prefix })
+    for (const t of prefixTargets(preset)) {
+      const val = t.template.replaceAll('{stem}', stem).replaceAll('{preset}', preset.key).replaceAll('{model}', model)
+      ops.push({ node: t.node, path: t.path, value: val })
     }
   }
   return ops
+}
+
+// ── Batch (many inputs, one warm node) ──────────────────────────────────────
+//
+// Mirrors comfy_launch.py's build_batch_manifest / prefix_targets so the on-node
+// run_batch loop reads an identical COMFY_BATCH manifest whether the job came
+// from the CLI or the web.
+
+export interface PrefixTarget { node: string; path: string; template: string }
+
+/** Normalize preset.output_prefix into [{node, path, template}] (bare-id or object form). */
+export function prefixTargets(preset: ComfyPreset): PrefixTarget[] {
+  const op = preset.output_prefix
+  if (!op) return []
+  const dpath = op.path ?? 'inputs.filename_prefix'
+  const dtmpl = op.template ?? '{stem}_{preset}'
+  return (op.nodes ?? []).map(e =>
+    typeof e === 'object'
+      ? { node: String(e.node), path: e.path ?? dpath, template: e.template ?? dtmpl }
+      : { node: String(e), path: dpath, template: dtmpl })
+}
+
+/** A numbered frame sequence found in a directory: kind + the pieces a loader needs. */
+export interface DetectedSequence {
+  kind: 'exr' | 'img'; prefix: string; pad: number; ext: string
+  start: number; end: number; files: string[]
+}
+
+const SEQ_EXT_KIND: Record<string, 'exr' | 'img'> = {
+  '.exr': 'exr', '.png': 'img', '.jpg': 'img', '.jpeg': 'img', '.tif': 'img', '.tiff': 'img',
+}
+
+/**
+ * Find the dominant numbered frame sequence in `dir` (mirrors comfy_launch.py's
+ * detect_sequence): group files by (prefix, ext, zero-pad) of the trailing digits,
+ * pick the largest consistent group. Returns null if no numbered frames. DPX is
+ * intentionally absent (no on-node loader yet).
+ */
+export function detectSequenceDir(dir: string): DetectedSequence | null {
+  let names: string[]
+  try { names = fs.readdirSync(dir).filter(f => fs.statSync(path.join(dir, f)).isFile()) }
+  catch { return null }
+  const groups = new Map<string, { num: number; file: string }[]>()
+  for (const fn of names.sort()) {
+    const ext = path.extname(fn).toLowerCase()
+    if (!(ext in SEQ_EXT_KIND)) continue
+    const stem = fn.slice(0, fn.length - ext.length)
+    const m = stem.match(/(\d+)$/)
+    if (!m) continue
+    const digits = m[1]
+    const key = `${stem.slice(0, stem.length - digits.length)} ${ext} ${digits.length}`
+    ;(groups.get(key) ?? groups.set(key, []).get(key)!).push({ num: parseInt(digits, 10), file: fn })
+  }
+  let best: { key: string; frames: { num: number; file: string }[] } | null = null
+  for (const [key, frames] of groups) if (!best || frames.length > best.frames.length) best = { key, frames }
+  if (!best) return null
+  best.frames.sort((a, b) => a.num - b.num)
+  const [prefix, ext, padStr] = best.key.split(' ')
+  return {
+    kind: SEQ_EXT_KIND[ext], prefix, pad: parseInt(padStr, 10), ext,
+    start: best.frames[0].num, end: best.frames[best.frames.length - 1].num,
+    files: best.frames.map(f => path.join(dir, f.file)),
+  }
+}
+
+/** Build a COMFY_BATCH manifest + the extra node packs the sequence kinds need. */
+export function buildComfyBatchManifest(
+  preset: ComfyPreset, items: ComfyBatchItem[],
+): { manifest: Record<string, unknown>; extraPacks: string[] } {
+  const prim = preset.params?.video ?? preset.params?.image
+  if (!prim) throw new Error(`preset ${preset.key} has no video/image primary input — can't batch it`)
+  const manifest = {
+    preset:       preset.key,
+    input_node:   String(prim.node),
+    input_path:   prim.path,
+    input_anchor: preset.input_anchor ? String(preset.input_anchor.node) : null,
+    prefix_targets: prefixTargets(preset),
+    items,
+  }
+  const packs = new Set<string>()
+  for (const it of items) {
+    if (it.kind === 'exr') packs.add('https://github.com/Conor-Collins/ComfyUI-CoCoTools_IO')
+    if (it.kind === 'img') packs.add('https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite')
+  }
+  return { manifest, extraPacks: [...packs] }
 }
 
 // ── Env / instance / command ──────────────────────────────────────────────────
@@ -197,7 +298,7 @@ export interface ComfyLora { url: string; file: string; strength: number }
 export function buildComfyEnv(
   preset: ComfyPreset,
   uploadToken: string,
-  opts: { hasPatches: boolean; loras?: ComfyLora[]; readyTimeout?: number; refresh?: { refreshToken: string; refreshUrl: string } | null },
+  opts: { hasPatches: boolean; loras?: ComfyLora[]; readyTimeout?: number; refresh?: { refreshToken: string; refreshUrl: string } | null; batch?: { manifest: Record<string, unknown>; extraPacks: string[] } | null },
 ): Record<string, string> {
   const env: Record<string, string> = {
     COMFY_WORKFLOW:       '/input/workflow.json',
@@ -221,8 +322,15 @@ export function buildComfyEnv(
   if (preset.extra_args)   env.COMFY_EXTRA_ARGS  = preset.extra_args
   if (preset.comfy_home)   env.COMFY_HOME        = preset.comfy_home
   if (preset.comfy_bundle) env.COMFY_BUNDLE      = preset.comfy_bundle
-  if (preset.node_packs)   env.COMFY_FETCH_NODES = JSON.stringify(preset.node_packs)
   if (preset.models)       env.COMFY_FETCH_MODELS = JSON.stringify(preset.models)
+  // Node packs: the preset's own, plus any a batch's sequence kinds pull in
+  // (CoCoTools for EXR, VideoHelperSuite for PNG/JPG/TIFF folders).
+  const nodePacks = [...(preset.node_packs ?? [])]
+  if (opts.batch) {
+    env.COMFY_BATCH = JSON.stringify(opts.batch.manifest)
+    for (const p of opts.batch.extraPacks) if (!nodePacks.includes(p)) nodePacks.push(p)
+  }
+  if (nodePacks.length) env.COMFY_FETCH_NODES = JSON.stringify(nodePacks)
   return env
 }
 
@@ -252,6 +360,9 @@ export async function packComfyTarball(opts: {
   workflow: unknown
   patches:  ComfyPatch[] | null
   inputs:   { path: string; basename: string }[]
+  // BATCH: each sequence folder packs to /input/seq/<subdir>/ so multiple
+  // sequences don't collide by basename (mirrors comfy_launch.py build_tar).
+  seqGroups?: { subdir: string; files: { path: string; basename: string }[] }[]
 }): Promise<{ tarballPath: string; fileCount: number; compressedSize: number }> {
   const runner = path.join(comfyDir(), 'comfy_run.py')
   if (!fs.existsSync(runner)) throw new Error(`comfy_run.py not found at ${runner}`)
@@ -273,6 +384,14 @@ export async function packComfyTarball(opts: {
       // basename only — the workflow references each file by bare filename
       await fs.promises.copyFile(inp.path, path.join(stage, path.basename(inp.basename)))
       fileCount += 1
+    }
+    for (const grp of opts.seqGroups ?? []) {
+      const sub = path.basename(grp.subdir)         // no traversal
+      await fs.promises.mkdir(path.join(stage, 'seq', sub), { recursive: true })
+      for (const f of grp.files) {
+        await fs.promises.copyFile(f.path, path.join(stage, 'seq', sub, path.basename(f.basename)))
+        fileCount += 1
+      }
     }
 
     const entries     = await fs.promises.readdir(stage)

@@ -28,6 +28,7 @@ import urllib.parse
 
 _last_nonce: int = 0
 _last_stop_nonce: int = 0
+_last_val_nonce: int = 0
 _output_dav: str | None = None       # cached job output WebDAV base (from meta.json)
 _meta_tried: bool = False
 
@@ -144,6 +145,70 @@ def poll_max_steps() -> int:
         return max(0, int(reqd.get('maxSteps')))
     except (TypeError, ValueError):
         return -1
+
+
+def poll_validation_request() -> dict | None:
+    """Check validation_request.json once. Returns {'batchId', 'src':[...], 'dst':[...]}
+    for a NEW request (marking it consumed via the nonce), else None.
+
+    tunet-web uploads new validation frames to _tunet_control/<key>/val_add/<batchId>/
+    then drops this manifest; train.py (rank 0) downloads + adds them to the live
+    validation set. Same cheap single-GET pattern as poll_export_request; fully
+    defensive (any failure returns None)."""
+    global _last_val_nonce
+    base  = os.environ.get('TUNET_FILES_BASE', '').rstrip('/')
+    token = _bearer()
+    key   = os.environ.get('TUNET_CONTROL_KEY', '')
+    if not (base and token and key):
+        return None
+    ctrl = f"{base}/_tunet_control/{urllib.parse.quote(key)}"
+    try:
+        reqd  = json.loads(_req(f"{ctrl}/validation_request.json", token, timeout=5))
+        nonce = int(reqd.get('nonce', 0))
+    except Exception:
+        return None
+    if nonce <= _last_val_nonce:
+        return None
+    _last_val_nonce = nonce
+    batch = str(reqd.get('batchId') or '')
+    src   = [str(n) for n in (reqd.get('src') or [])]
+    dst   = [str(n) for n in (reqd.get('dst') or [])]
+    if not batch or not src:
+        return None
+    return {'batchId': batch, 'src': src, 'dst': dst}
+
+
+def fetch_validation_files(req: dict, acc_src: str, acc_dst: str) -> tuple:
+    """Download the files named in a validation request into local accumulator
+    dirs (created as needed). Returns (n_src, n_dst) actually fetched. Defensive:
+    per-file failures are logged and skipped; never raises."""
+    base  = os.environ.get('TUNET_FILES_BASE', '').rstrip('/')
+    token = _bearer()
+    key   = os.environ.get('TUNET_CONTROL_KEY', '')
+    if not (base and token and key):
+        return (0, 0)
+    batch = req.get('batchId') or ''
+    root  = f"{base}/_tunet_control/{urllib.parse.quote(key)}/val_add/{urllib.parse.quote(batch)}"
+
+    def _grab(names, role, dest) -> int:
+        if not names:
+            return 0
+        os.makedirs(dest, exist_ok=True)
+        got = 0
+        for name in names:
+            url = f"{root}/{role}/{urllib.parse.quote(name)}"
+            try:
+                data = _req(url, token, timeout=300)
+                with open(os.path.join(dest, os.path.basename(name)), 'wb') as fh:
+                    fh.write(data)
+                got += 1
+            except Exception as e:
+                logging.warning(f"[val-control] download failed for {role}/{name}: {e}")
+        return got
+
+    n_src = _grab(req.get('src'), 'val_src', acc_src)
+    n_dst = _grab(req.get('dst'), 'val_dst', acc_dst)
+    return (n_src, n_dst)
 
 
 def run_export(model, config, ckpt_prefix, export_res, completed_ep,
