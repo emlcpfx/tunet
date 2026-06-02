@@ -30,7 +30,7 @@ import { SourceJobPicker } from '@/components/spark/source-job-picker'
 import { YamlConfigImporter } from '@/components/spark/yaml-config-importer'
 import {
   PRESETS, type Preset, type PresetKey, type AdvancedOverrides,
-  estimateTraining, pricePerHour, resolveColorSpace,
+  estimateTraining, pricePerHour, resolveColorSpace, DEFAULT_MAX_STEPS,
 } from '@/lib/spark-presets'
 import {
   buildFormState, parseFormState,
@@ -109,10 +109,11 @@ function NewJobPageInner() {
   const [gpuKey,  setGpuKey]  = useState<string>('a10')
   const [advanced, setAdvanced] = useState<AdvancedOverrides>({})
   const [showAdvanced, setShowAdvanced] = useState(false)
-  // Default to 0 (unlimited) — match the desktop app's "run until you stop
-  // it" default. Cost estimate falls back to 15k for the dollar figure but
-  // the job itself runs without a cap unless the user sets one.
-  const [maxSteps, setMaxSteps] = useState<number>(0)
+  // Default to a 150k safety cap (DEFAULT_MAX_STEPS) instead of unlimited: an
+  // un-capped run that can't be cancelled (e.g. a stale-session cancel) bills
+  // indefinitely — see the 75h dollywood runs. 150k is well past a typical
+  // converged run; the user can raise it or set 0 (no limit) below.
+  const [maxSteps, setMaxSteps] = useState<number>(DEFAULT_MAX_STEPS)
   const [pairs, setPairs] = useState<number>(200)   // user-supplied or auto-detected from folder pick
   const [pairsAutoDetected, setPairsAutoDetected] = useState(false)
   const [idleHold, setIdleHold] = useState(0)
@@ -527,6 +528,11 @@ function NewJobPageInner() {
       advanced: {
         ...advanced,
         max_steps:   maxSteps,
+        // Resolve the stop-on-plateau toggle's default (on) explicitly so the
+        // submitted job + stashed form state always record the real setting,
+        // rather than relying on the server-side default for an untouched box.
+        es_enabled:  advanced.es_enabled ?? true,
+        es_stop:     advanced.es_stop ?? true,
         // Resolve 'auto' here so the server only ever sees a concrete value.
         // tunet's YAML parser doesn't know what 'auto' means.
         color_space: resolveColorSpace(advanced.color_space, picked?.sampleExt),
@@ -1119,17 +1125,51 @@ GPU on exit (no warm-pool affinity in smart mode)."
             />
           </FormRow>
 
+          {/* Auto-stop — the billing backstop: hard step cap + stop-on-plateau */}
+          <FormRow
+            label="Auto-stop"
+            hint="Bounds how long a run can train so a forgotten or un-cancellable job can't bill indefinitely. Defaults stop a typical run after it has converged."
+            tip={`Max steps — a hard stop point. The run saves a final checkpoint and exits at this many steps. Default ${DEFAULT_MAX_STEPS.toLocaleString()} (~16h on an A10) is well above a typical converged run (~96k for ~50 frames). Set 0 for no limit — only if you're actively watching the run.
+
+Stop on plateau — ends the run automatically once the smoothed loss stops improving for ~30 epochs (a final checkpoint is saved first). Leave on unless you want to judge convergence yourself.`}
+          >
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  min={0}
+                  value={maxSteps}
+                  onChange={(e) => setMaxSteps(Math.max(0, parseInt(e.target.value || '0', 10) || 0))}
+                  className="w-36"
+                />
+                <span className="text-xs text-[#9ca3af]">
+                  {maxSteps > 0
+                    ? 'max steps (0 = no limit)'
+                    : 'no limit — bills until you stop it'}
+                </span>
+              </div>
+              <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+                <input
+                  type="checkbox"
+                  checked={advanced.es_stop ?? true}
+                  onChange={(e) =>
+                    setAdvanced({ ...advanced, es_enabled: e.target.checked, es_stop: e.target.checked })
+                  }
+                  className="accent-[#7E3AF2]"
+                />
+                <span className="text-[#374151]">
+                  Stop automatically when training plateaus
+                  <span className="text-[#9ca3af]"> (saves a final checkpoint; recommended)</span>
+                </span>
+              </label>
+            </div>
+          </FormRow>
+
           {/* Training alerts */}
           <FormRow
             label="Email alerts"
-            hint="Optional. We'll email you when the training run plateaus or diverges so you can stop it before wasting credit."
-            tip="A cron checks every 10 min and sends one email per kind:
-
-  Plateau / Done — best loss is 30-50+ epochs old (model isn't improving)
-  Diverging      — loss is going UP (LR too high, or bad pairs)
-
-Cooldown of 4 hours between same-kind alerts so you don't get spammed.
-Leave the email field empty to opt out for this job entirely."
+            hint="Saved with the job, but NOT active yet - the email notifier is being rebuilt, so no alert is sent today. Use Auto-stop (above) to bound a run and watch the live loss chart on the job page."
+            tip="Email delivery is currently disabled - the alert service was removed and is being replaced. These checkboxes still record your preference (so it takes effect when alerts return), but right now nothing is emailed. For now, the Auto-stop settings above are the real safeguard against an over-long run."
           >
             <div className="space-y-2">
               <Input

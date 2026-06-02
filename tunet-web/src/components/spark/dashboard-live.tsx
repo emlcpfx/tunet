@@ -168,6 +168,7 @@ function StuckJobsBanner({
   onAfterAction: () => void
 }) {
   const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<{ msg: string; authExpired: boolean } | null>(null)
 
   async function requestCancel(jobId: string, label: string, alreadyRequested: boolean) {
     // Confirm only on the first cancel — re-sending to an already-cancel-
@@ -177,11 +178,27 @@ function StuckJobsBanner({
       return
     }
     setBusy(jobId)
+    setError(null)
     try {
-      await fetch(`/api/spark/jobs/${jobId}/cancel`, { method: 'POST' })
+      const res = await fetch(`/api/spark/jobs/${jobId}/cancel`, { method: 'POST' })
+      // fetch() does NOT reject on HTTP 4xx/5xx, so we MUST check res.ok. The
+      // old code swallowed every non-2xx (e.g. a 401 from an expired session)
+      // and called onAfterAction anyway — the button looked like it worked
+      // while the cancel never reached Spark and the job kept billing.
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}))
+        setError({
+          msg: j.error ?? `Cancel failed (HTTP ${res.status}) — the job is still running.`,
+          authExpired: !!j.authExpired,
+        })
+        return // do NOT clear the banner — the job was NOT cancelled
+      }
       onAfterAction()
     } catch {
-      // Silent — cancel is idempotent and the user can click again.
+      setError({
+        msg: 'Cancel request could not be sent (network error). The job is still running — try again.',
+        authExpired: false,
+      })
     } finally {
       setBusy(null)
     }
@@ -235,6 +252,23 @@ function StuckJobsBanner({
           </li>
         ))}
       </ul>
+      {error && (
+        <p className="mt-3 text-xs text-[#7F1D1D] bg-[#FEF2F2] border border-[#fecaca] rounded px-3 py-2">
+          {error.msg}
+          {error.authExpired && (
+            <>
+              {' '}
+              <a
+                href="/sign-in?callbackUrl=/"
+                className="underline font-semibold"
+              >
+                Sign in again
+              </a>{' '}
+              to cancel.
+            </>
+          )}
+        </p>
+      )}
     </section>
   )
 }

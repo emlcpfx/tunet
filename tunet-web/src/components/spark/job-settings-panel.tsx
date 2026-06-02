@@ -122,6 +122,9 @@ export function JobSettingsPanel({ job }: { job: SparkJob }) {
             <Group title="Schedule">
               <Row label="Batch size" value={batchLabel} mono />
               {maxSteps !== undefined && <Row label="Max steps" value={stepsLabel} mono />}
+              {advanced.es_stop !== undefined && (
+                <Row label="Stop on plateau" value={advanced.es_stop ? 'yes' : 'no'} />
+              )}
               {idleHold !== undefined && <Row label="Idle hold" value={`${idleHold}s`} mono />}
               {pairs !== undefined && pairs > 0 && <Row label="Frame pairs" value={String(pairs)} mono />}
             </Group>

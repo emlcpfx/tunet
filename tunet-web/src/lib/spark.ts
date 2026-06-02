@@ -58,6 +58,22 @@ export type GpuKey = keyof typeof GPU_TYPES
 
 // ── Auth — forward the caller's Keycloak access token ────────────────────────
 
+/**
+ * Thrown when a Spark call fails for a reason the user can fix by signing in
+ * again: no token on the session, a stale token left behind by a failed
+ * Keycloak refresh, or a 401/403 from Spark. Routes map this to HTTP 401 with
+ * `authExpired: true` so the UI can prompt re-login instead of showing an
+ * opaque 500 — the failure mode that let a cancel silently no-op while a job
+ * kept billing.
+ */
+export class SparkAuthError extends Error {
+  readonly authExpired = true as const
+  constructor(message: string) {
+    super(message)
+    this.name = 'SparkAuthError'
+  }
+}
+
 // Prod is https, so Auth.js writes the secure-prefixed cookie; dev (http) is
 // unprefixed. getToken needs to look for the right name to find + decrypt it.
 const useSecureCookie =
@@ -91,8 +107,13 @@ export async function getToken(): Promise<string> {
     secureCookie: useSecureCookie,
   })
   const tok = jwt?.accessToken
-  if (!tok) {
-    throw new Error('Not signed in — no Spark access token on the session')
+  // A failed Keycloak refresh leaves the *stale* token in place but stamps
+  // `error: 'RefreshAccessTokenError'` (src/auth.ts). Middleware doesn't bounce
+  // those sessions — the user id is still present — so without this guard a
+  // long-idle tab sends a dead bearer to Spark and gets an opaque failure.
+  // Treat it like "not signed in" so the caller surfaces a re-login prompt.
+  if (!tok || jwt?.error === 'RefreshAccessTokenError') {
+    throw new SparkAuthError('Your session expired. Sign in again, then retry.')
   }
   return tok
 }
@@ -139,6 +160,14 @@ async function sparkFetch<T = unknown>(
   })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
+    // 401/403 means the bearer was rejected (expired/invalid token, lost SSO
+    // session). Distinguish it from a generic failure so cancel/submit/etc. can
+    // tell the user to re-auth rather than failing silently or opaquely.
+    if (res.status === 401 || res.status === 403) {
+      throw new SparkAuthError(
+        `Spark rejected the request (HTTP ${res.status}) — your session is no longer valid. Sign in again, then retry.`,
+      )
+    }
     throw new Error(`Spark ${method} ${path} → HTTP ${res.status}: ${text.slice(0, 200)}`)
   }
   return res.json() as Promise<T>

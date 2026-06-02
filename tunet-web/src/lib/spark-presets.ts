@@ -247,6 +247,16 @@ export function resolveColorSpace(
 }
 
 /**
+ * Default hard step cap for a new training run. Was effectively unlimited
+ * (max_steps=0) which let a forgotten / un-cancellable job bill for days — see
+ * the 75h dollywood runs of 2026-05. 150k is well above a typical converged run
+ * (~96k steps for ~50 frames, per the estimator notes below) so it rarely bites
+ * a legitimate run, and on a cheap A10 it bounds the worst case to ~16h.
+ * Explicit 0 from the user still means "uncapped".
+ */
+export const DEFAULT_MAX_STEPS = 150_000
+
+/**
  * Build the synthesized config dict from a preset + user inputs + overrides.
  * Result is plain JSON, ready to YAML-dump and ship in the input tarball.
  *
@@ -321,8 +331,11 @@ export function buildConfig(
         l2_weight:    overrides.l2_weight   ?? preset.training.l2_weight   ?? 0.0,
         lpips_weight: overrides.lpips_weight ?? preset.training.lpips_weight ?? 0.1,
       } : {}),
-      ...(overrides.max_steps !== undefined && overrides.max_steps > 0
-          ? { max_steps: overrides.max_steps } : {}),
+      // Safety cap: default to DEFAULT_MAX_STEPS so a runaway / forgotten job
+      // can't bill indefinitely. Explicit 0 = uncapped (omit -> train.py treats
+      // 0 as unlimited); any positive value overrides the default.
+      ...((overrides.max_steps ?? DEFAULT_MAX_STEPS) > 0
+          ? { max_steps: overrides.max_steps ?? DEFAULT_MAX_STEPS } : {}),
       ...(progressiveRes ? { progressive_resolution: true } : {}),
     },
     logging: {
@@ -340,9 +353,13 @@ export function buildConfig(
       keep_last_checkpoints: overrides.keep_last_checkpoints ?? 4,
     },
     early_stopping: {
-      enabled:  overrides.es_enabled  ?? false,
+      // Default ON: when training plateaus, stop gracefully (saving a final
+      // checkpoint) instead of billing on a converged run. The new-job form
+      // exposes this as a "Stop automatically when training plateaus" toggle;
+      // unchecking it sends es_enabled/es_stop=false.
+      enabled:  overrides.es_enabled  ?? true,
       patience: overrides.es_patience ?? 30,
-      stop:     overrides.es_stop     ?? false,
+      stop:     overrides.es_stop     ?? true,
     },
     auto_export: {
       // Default to exporting ONNX every 10 epochs during training. The

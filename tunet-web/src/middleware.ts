@@ -19,15 +19,34 @@ export default auth((req) => {
     return NextResponse.next()
   }
 
-  const userId = req.auth?.user?.id
-  if (!userId) {
-    const signIn = new URL('/sign-in', req.url)
-    const callback = `${pathname}${req.nextUrl.search}`
-    signIn.searchParams.set('callbackUrl', callback || '/')
-    return NextResponse.redirect(signIn)
+  // A session is usable only if it has a user id AND its Keycloak token didn't
+  // fail to refresh. A failed refresh leaves the *stale* token in place and
+  // stamps error='RefreshAccessTokenError' (src/auth.ts) while keeping the user
+  // id — so without the error check a long-idle tab keeps acting with a dead
+  // bearer: every Spark call 401s and (pre-fix) a cancel could silently no-op
+  // while the job kept billing.
+  const session = req.auth
+  const authed =
+    !!session?.user?.id && session.error !== 'RefreshAccessTokenError'
+  if (authed) {
+    return NextResponse.next()
   }
 
-  return NextResponse.next()
+  // API routes must NEVER be redirected: fetch() transparently follows a 307 to
+  // the /sign-in HTML page and hands the caller a 200, so a dead session reads
+  // as success in any handler that only checks res.ok. Return a clean 401 JSON
+  // (shape matches the cancel route) so the client can surface a re-login prompt.
+  if (pathname.startsWith('/api/')) {
+    return NextResponse.json(
+      { error: 'Your session expired. Sign in again, then retry.', authExpired: true },
+      { status: 401 },
+    )
+  }
+
+  const signIn = new URL('/sign-in', req.url)
+  const callback = `${pathname}${req.nextUrl.search}`
+  signIn.searchParams.set('callbackUrl', callback || '/')
+  return NextResponse.redirect(signIn)
 })
 
 export const config = {

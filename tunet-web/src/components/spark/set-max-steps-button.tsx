@@ -13,11 +13,12 @@ export function SetMaxStepsButton({ jobId }: { jobId: string }) {
   const [busy, setBusy] = useState(false)
   const [msg, setMsg]   = useState<string | null>(null)
   const [err, setErr]   = useState<string | null>(null)
+  const [authExpired, setAuthExpired] = useState(false)
 
   async function apply() {
     const n = Math.floor(Number(val))
     if (!Number.isFinite(n) || n < 0) { setErr('Enter a step number (0 = unlimited)'); return }
-    setBusy(true); setErr(null); setMsg(null)
+    setBusy(true); setErr(null); setMsg(null); setAuthExpired(false)
     try {
       const res = await fetch(`/api/spark/jobs/${jobId}/set-max-steps`, {
         method:  'POST',
@@ -25,7 +26,14 @@ export function SetMaxStepsButton({ jobId }: { jobId: string }) {
         body:    JSON.stringify({ maxSteps: n }),
       })
       const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
+      if (!res.ok) {
+        // A stale session makes the control-file write fail server-side, so the
+        // stop point never lands and the job keeps running. Surface it instead
+        // of letting it read as a no-op (this is how a 75h run slipped past a
+        // set-max-steps that the user thought had taken).
+        if (data.authExpired) setAuthExpired(true)
+        throw new Error(data.error ?? `Set max steps failed (HTTP ${res.status})`)
+      }
       setMsg(data.note ?? 'Stop point updated.')
       setOpen(false)
     } catch (e) {
@@ -34,6 +42,11 @@ export function SetMaxStepsButton({ jobId }: { jobId: string }) {
       setBusy(false)
     }
   }
+
+  const signInHref =
+    typeof window !== 'undefined'
+      ? `/sign-in?callbackUrl=${encodeURIComponent(window.location.pathname)}`
+      : '/sign-in'
 
   if (!open) {
     return (
@@ -74,7 +87,17 @@ export function SetMaxStepsButton({ jobId }: { jobId: string }) {
           ✕
         </button>
       </div>
-      {err && <p className="text-xs text-[#EF4444] max-w-[220px] text-right">{err}</p>}
+      {err && (
+        <p className="text-xs text-[#EF4444] max-w-[220px] text-right">
+          {err}
+          {authExpired && (
+            <>
+              {' '}
+              <a href={signInHref} className="underline font-semibold">Sign in again</a>
+            </>
+          )}
+        </p>
+      )}
     </div>
   )
 }
