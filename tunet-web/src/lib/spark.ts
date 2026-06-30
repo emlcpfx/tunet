@@ -271,6 +271,23 @@ export interface SubmitJobInput {
    * match Spark's `^[a-z0-9_\-:\.]+$` rule (see API v1.17 §2.3).
    */
   tags?: string[]
+  /**
+   * ShareSync path to a read-only model library Spark Fuse mounts at /assets,
+   * lazily (only the bytes read are pulled) and cached on the compute node
+   * across jobs (Spark Fuse API v1.23 §3.5). Weights staged there once are read
+   * from local disk on warm nodes instead of being re-downloaded from HF/CivitAI
+   * every cold start. PROPFIND-probed at submit (HTTP 400 if unreachable).
+   */
+  assetsShareSyncPath?: string
+  /** ShareSync Project the assets path lives in (omit = Personal space). */
+  assetsShareSyncSpaceName?: string
+  /**
+   * Cached-image placement preference (v1.23 §2.7). 'preferred' (Spark default)
+   * silently steers onto a node that already cached this image; 'required' does
+   * the same but reports cache-hit vs cold-pull on the job + log. Never delays or
+   * fails the job. Worth 'required' for our 10-20 GB comfy/training images.
+   */
+  imageAffinity?: 'preferred' | 'required'
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -347,6 +364,15 @@ export async function submitJob(input: SubmitJobInput): Promise<SubmitJobRespons
     ...(input.outputShareSyncPath
       ? { outputShareSyncPath: input.outputShareSyncPath }
       : {}),
+    // Read-only, node-cached model library (v1.23 §3.5) — lets the on-node
+    // runner read staged weights off local disk instead of re-downloading.
+    ...(input.assetsShareSyncPath
+      ? { assetsShareSyncPath: input.assetsShareSyncPath }
+      : {}),
+    ...(input.assetsShareSyncSpaceName
+      ? { assetsShareSyncSpaceName: input.assetsShareSyncSpaceName }
+      : {}),
+    ...(input.imageAffinity ? { imageAffinity: input.imageAffinity } : {}),
   })
 }
 
@@ -445,7 +471,8 @@ export function shareSyncBaseUrl(j: SparkJob): string | null {
   //      with a stale/wrong SPARK_FILES_BASE_URL value.
   //   2. Per-job env stash — only useful when the cache hasn't been seeded.
   //   3. Process env — the static fallback the user configures by hand.
-  const filesBase = readDiscoveredFilesBase()
+  const filesBase = memoFilesBase
+                 ?? readDiscoveredFilesBase()
                  ?? j.env?.TUNET_FILES_BASE
                  ?? process.env.SPARK_FILES_BASE_URL
   if (!filesBase) return null
@@ -489,7 +516,8 @@ function jobOutputSubdir(j: SparkJob): string | null {
 export function shareSyncInputBaseUrl(j: SparkJob): string | null {
   const path = j.input_share_sync_path
   if (!path) return null
-  const filesBase = readDiscoveredFilesBase()
+  const filesBase = memoFilesBase
+                 ?? readDiscoveredFilesBase()
                  ?? j.env?.TUNET_FILES_BASE
                  ?? process.env.SPARK_FILES_BASE_URL
   if (!filesBase) return null
@@ -522,6 +550,52 @@ export function readDiscoveredFilesBase(): string | null {
   } catch {
     return null
   }
+}
+
+/**
+ * In-process memo of the authoritative ShareSync files base. `undefined` = not
+ * yet resolved; a string = resolved. We never memoize a *failure*, so a
+ * transient ShareSync blip is retried on the next call. (Single-personal-space
+ * assumption, same as the on-disk cache it backs — this app submits to the
+ * caller's Personal space.)
+ */
+let memoFilesBase: string | undefined
+
+interface ShareSyncLocation {
+  filesHost?: string
+  personal?: { id?: string; name?: string; webDavBaseUrl?: string }
+}
+
+/**
+ * Resolve the WebDAV base URL for the caller's Personal ShareSync space straight
+ * from GET /api/sharesync/location (Spark Fuse API v1.23 §3.4) — authoritative,
+ * no prior job required.
+ *
+ * This replaces reverse-engineering the base from a submit response and the
+ * `TUNET_FILES_BASE` / `SPARK_FILES_BASE_URL` fallbacks — the brittle path that
+ * produced the "$ in space id eaten by dotenv-expand", "404 -> no .pth files",
+ * and "PrivateTmp wiped the cache" failures. On success it memoizes in-process
+ * AND seeds the on-disk cache so the synchronous shareSyncBaseUrl() guards and
+ * other workers pick it up. If the endpoint is unreachable it falls back to the
+ * old cache/env chain WITHOUT memoizing, so behavior degrades to prior — never
+ * worse. Auth failures are swallowed here (base resolution shouldn't be what
+ * 401s); the subsequent data fetch surfaces SparkAuthError for the re-login UX.
+ */
+export async function resolveFilesBase(): Promise<string | null> {
+  if (memoFilesBase) return memoFilesBase
+  try {
+    const loc = await sparkFetch<ShareSyncLocation>('GET', '/api/sharesync/location')
+    const raw = loc?.personal?.webDavBaseUrl
+    if (raw && raw.trim()) {
+      const base = raw.trim().replace(/\/+$/, '')
+      memoFilesBase = base
+      try { fs.writeFileSync(DISCOVERED_BASE_FILE, base, 'utf-8') } catch { /* best-effort */ }
+      return base
+    }
+  } catch {
+    /* SparkAuthError or a ShareSync/network blip — fall through to cache/env. */
+  }
+  return readDiscoveredFilesBase() ?? process.env.SPARK_FILES_BASE_URL ?? null
 }
 
 /**
@@ -583,6 +657,7 @@ export async function fetchOutputFile(
   relPath: string,
   init?: { method?: 'GET' | 'HEAD'; headers?: Record<string, string> },
 ): Promise<Response> {
+  await resolveFilesBase()
   const base = shareSyncBaseUrl(j)
   if (!base) {
     throw new Error('No ShareSync URL available for this job')
@@ -612,6 +687,7 @@ interface WebdavEntry {
  * Returns just the immediate children (no recursion).
  */
 export async function listOutputDir(j: SparkJob): Promise<WebdavEntry[]> {
+  await resolveFilesBase()
   const base = shareSyncBaseUrl(j)
   if (!base) throw new Error('No ShareSync URL available for this job')
   return propfindDir(base)

@@ -50,6 +50,15 @@ Environment (set by comfy_launch.py):
     COMFY_FETCH_MODELS  JSON list of {"url","dest"} (dest relative to COMFY_HOME,
                         e.g. "models/vae/x.safetensors"). Skipped on CONVERT_ONLY
                         — /object_info only needs the node classes, not weights.
+    COMFY_ASSETS_DIR    Read-only model library mounted by Spark Fuse from a
+                        ShareSync path (the job's assetsShareSyncPath), cached on
+                        the compute node across jobs (default /assets). When a
+                        weight or LoRA we'd otherwise download from the internet
+                        is already in here, we SYMLINK it into COMFY_HOME instead
+                        of pulling it — no HF/CivitAI fetch, no gated-token dance,
+                        and warm nodes read it straight off local disk. Staging is
+                        forgiving: a full COMFY_HOME mirror (models/...), a
+                        models/-rooted tree, or a flat dump all resolve.
 """
 
 import base64
@@ -221,16 +230,54 @@ def _fetch_node_zip(url, dest, name):
                 os.remove(p)
 
 
+def asset_path(dest):
+    """If the read-only /assets library (a ShareSync mount cached on the node)
+    holds the weight for `dest` (relative to COMFY_HOME, e.g.
+    'models/vae/x.safetensors'), return its absolute path under the assets dir;
+    else None. Staging is forgiving — we try a full COMFY_HOME mirror, a
+    models/-rooted tree, and a flat dump, first match wins."""
+    adir = env("COMFY_ASSETS_DIR", "/assets")
+    if not adir or not os.path.isdir(adir):
+        return None
+    rel = dest.lstrip("/")
+    cands = [rel]
+    if rel.startswith("models/"):
+        cands.append(rel[len("models/"):])      # staged the models/ dir as the root
+    cands.append(os.path.basename(rel))          # flat dump
+    for c in cands:
+        p = os.path.join(adir, c)
+        if os.path.isfile(p) and os.path.getsize(p) > 0:
+            return p
+    return None
+
+
+def link_from_assets(dest_abs, asset_abs, label):
+    """Symlink a weight out of the read-only /assets cache to the path ComfyUI
+    expects under COMFY_HOME — no copy, no re-download. Replaces any stale
+    file/link sitting at the destination."""
+    os.makedirs(os.path.dirname(dest_abs), exist_ok=True)
+    if os.path.islink(dest_abs) or os.path.exists(dest_abs):
+        try:
+            os.remove(dest_abs)
+        except OSError:
+            pass
+    os.symlink(asset_abs, dest_abs)
+    log(f"  {label} <- /assets ({asset_abs})")
+
+
 def precheck_model_access(comfy_home, models):
     """Cheap 1-byte Range request per model URL BEFORE pulling any weight, so a
     gated/inaccessible file (HTTP 401/403) fails the job FAST with a clear message
-    instead of after a 40+ GB download of the others. Skips files already present
-    and non-huggingface URLs we can't usefully precheck. Best-effort: a network
-    blip or odd status is ignored (the real download will surface it)."""
+    instead of after a 40+ GB download of the others. Skips files already present,
+    files served from the read-only /assets library (no remote fetch needed), and
+    non-huggingface URLs we can't usefully precheck. Best-effort: a network blip or
+    odd status is ignored (the real download will surface it)."""
     tok = env("COMFY_HF_TOKEN") or env("HF_TOKEN")
     blocked = []
     for m in models:
         if os.path.isfile(os.path.join(comfy_home, m["dest"])) and os.path.getsize(os.path.join(comfy_home, m["dest"])) > 0:
+            continue
+        if asset_path(m["dest"]):                # in /assets — we'll symlink, never fetch
             continue
         url = m["url"]
         headers = {"User-Agent": "comfy_run/1.0", "Range": "bytes=0-0"}
@@ -251,11 +298,17 @@ def precheck_model_access(comfy_home, models):
 
 
 def fetch_models(comfy_home, models):
-    """Download each {url,dest} into COMFY_HOME if not already present."""
+    """Provision each {url,dest} into COMFY_HOME, preferring local sources over a
+    remote pull: (1) already on the node, (2) symlink from the read-only /assets
+    library (staged once on ShareSync, cached across jobs), (3) download the url."""
     for m in models:
         dest = os.path.join(comfy_home, m["dest"])
         if os.path.isfile(dest) and os.path.getsize(dest) > 0:
             log(f"model present: {m['dest']}")
+            continue
+        a = asset_path(m["dest"])
+        if a:
+            link_from_assets(dest, a, m["dest"])
             continue
         download(m["url"], dest, os.path.basename(dest))
 
@@ -1403,17 +1456,29 @@ def main():
             log(f"pip install (preset pip_extra): {' '.join(_pip_extra)}")
             subprocess.run([sys.executable, "-m", "pip", "install", "-q", *_pip_extra])
         if not convert_only:
+            _adir = env("COMFY_ASSETS_DIR", "/assets")
+            if os.path.isdir(_adir):
+                log(f"/assets model library mounted at {_adir} — staged weights are symlinked, not downloaded")
             _models = json.loads(env("COMFY_FETCH_MODELS", "[]"))
             precheck_model_access(comfy_home, _models)   # fail fast on gated 401/403
             fetch_models(comfy_home, _models)
             lora_url = env("COMFY_LORA_URL")
             if lora_url:
-                download(lora_url, os.path.join(comfy_home, "models", "loras",
-                                                env("COMFY_LORA_NAME", "lora.safetensors")), "LoRA")
+                lname = env("COMFY_LORA_NAME", "lora.safetensors")
+                ldest = os.path.join(comfy_home, "models", "loras", lname)
+                la = asset_path(os.path.join("models", "loras", lname))
+                if la:
+                    link_from_assets(ldest, la, "LoRA")
+                else:
+                    download(lora_url, ldest, "LoRA")
             for lora in json.loads(env("COMFY_LORAS", "[]")):
                 dest = os.path.join(comfy_home, "models", "loras", lora["file"])
                 if os.path.isfile(dest) and os.path.getsize(dest) > 0:
                     log(f"LoRA present: {lora['file']}")
+                    continue
+                la = asset_path(os.path.join("models", "loras", lora["file"]))
+                if la:
+                    link_from_assets(dest, la, f"LoRA {lora['file']}")
                     continue
                 download(lora["url"], dest, f"LoRA {lora['file']}")
     except Exception as e:  # noqa: BLE001 — fail the job loudly

@@ -23,7 +23,7 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import {
   submitJob, uploadInputTarball, GPU_TYPES, DEFAULT_IMAGE, type GpuKey,
-  writeDiscoveredFilesBase, getJob, fetchOutputFile, shareSyncBaseUrl, getToken, getRefreshContext,
+  writeDiscoveredFilesBase, getJob, fetchOutputFile, shareSyncBaseUrl, resolveFilesBase, getToken, getRefreshContext,
 } from '@/lib/spark'
 import { packInputTarball } from '@/lib/spark-packer'
 import { putControlFile, outputDavUrl } from '@/lib/sharesync'
@@ -230,6 +230,7 @@ export async function POST(req: Request) {
         return jsonError(`failed to load source job: ${e instanceof Error ? e.message : 'unknown'}`, 502)
       }
       if (!sourceJob) return jsonError(`source job ${body.source.jobId} not found`, 404)
+      await resolveFilesBase()   // authoritative ShareSync base (v1.23 §3.4) before the sync guard
       if (!shareSyncBaseUrl(sourceJob)) {
         return jsonError(`source job has no resolvable ShareSync base URL`, 503)
       }

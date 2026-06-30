@@ -252,6 +252,14 @@ export async function POST(req: Request) {
           idleHoldSeconds: body.idleHoldSeconds ?? 0,
           tags:            ['cpfx_comfy'],
           env,
+          // Read-only, node-cached model library (v1.23 §3.5): when an operator
+          // has staged the ComfyUI models tree on ShareSync, comfy_run symlinks
+          // weights from /assets instead of re-downloading them from HF/CivitAI.
+          assetsShareSyncPath:      process.env.SPARK_COMFY_ASSETS_PATH || undefined,
+          assetsShareSyncSpaceName: process.env.SPARK_COMFY_ASSETS_SPACE || undefined,
+          // Comfy images are 10-20 GB — ask the scheduler to prefer a node that
+          // already cached the image and report cold-pull vs hit (never delays).
+          imageAffinity: 'required',
         })
         send({ phase: 'submit', status: 'done', jobId: submitResp.jobId, ms: Date.now() - tSubmit })
 

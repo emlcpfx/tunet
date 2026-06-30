@@ -422,7 +422,8 @@ def download_outputs(base_url, dest_dir, _rel=""):
     return n
 
 
-def submit_job(name, instance_type, image, command, env_vars, mode, idle, max_retries, extra_tags):
+def submit_job(name, instance_type, image, command, env_vars, mode, idle, max_retries, extra_tags,
+               assets_path=None, assets_space=None):
     tags = []
     for t in [BILLING_TAG, GROUP_TAG, *(extra_tags or [])]:
         if t and t not in tags:
@@ -441,6 +442,11 @@ def submit_job(name, instance_type, image, command, env_vars, mode, idle, max_re
         body["idleHoldSeconds"] = idle
     if mode == "smart" and max_retries is not None:
         body["maxRetriesOnInterrupt"] = max_retries
+    # Read-only model library, lazily mounted at /assets and cached across jobs.
+    if assets_path:
+        body["assetsShareSyncPath"] = assets_path
+        if assets_space:
+            body["assetsShareSyncSpaceName"] = assets_space
     return spark("POST", "/api/compute/jobs", body).json()
 
 
@@ -887,6 +893,12 @@ def main():
     ap.add_argument("--mode", choices=["instant", "smart"], help="compute mode (default instant, or preset)")
     ap.add_argument("--max-retries", type=int, help="(smart) re-launches on preemption [0-5]")
     ap.add_argument("--idle-hold", type=int, default=DEFAULT_IDLE, help="(instant) warm-hold secs after exit")
+    ap.add_argument("--assets-path", default=os.environ.get("COMFY_ASSETS_PATH"),
+                    help="ShareSync path to a read-only model library mounted at /assets and cached "
+                         "on the node across jobs. Weights staged there are symlinked instead of "
+                         "downloaded from HF/CivitAI. Defaults to $COMFY_ASSETS_PATH.")
+    ap.add_argument("--assets-space",
+                    help="ShareSync Project the --assets-path lives in (omit = your Personal space)")
     ap.add_argument("--name", help="job name")
     ap.add_argument("--tag", action="append", default=[], help="extra grouping tag (repeatable)")
     ap.add_argument("--ready-timeout", type=int, default=300, help="secs to wait for ComfyUI startup")
@@ -1223,6 +1235,9 @@ def main():
     print(f"        name      : {job_name}")
     print(f"        image     : {image or '(none — required!)'}")
     print(f"        instance  : {instance_type} ({gpu})   mode={mode}")
+    if args.assets_path:
+        print(f"        assets    : {args.assets_path}{' [' + args.assets_space + ']' if args.assets_space else ''}"
+              f"  → /assets (read-only, cached on node; staged weights symlinked not downloaded)")
     print(f"        tags      : {BILLING_TAG}, {GROUP_TAG}{''.join(', ' + t for t in args.tag)}")
     print(f"        inputs    : {[os.path.basename(p) for p in input_files] or '(none)'}")
     if seq:
@@ -1286,7 +1301,8 @@ def main():
                          seq_groups=batch_seq_groups)
     try:
         resp = submit_job(job_name, instance_type, image, command, env_vars,
-                          mode, args.idle_hold, args.max_retries, args.tag)
+                          mode, args.idle_hold, args.max_retries, args.tag,
+                          assets_path=args.assets_path, assets_space=args.assets_space)
         job_id = resp.get("jobId") or resp.get("id")
         upload_url = (resp.get("input") or {}).get("uploadUrl")
         if not job_id or not upload_url:

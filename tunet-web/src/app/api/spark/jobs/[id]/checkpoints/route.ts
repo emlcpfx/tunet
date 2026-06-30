@@ -18,7 +18,7 @@
  * Auth via the server-side Spark bearer; the browser never sees the token.
  */
 
-import { getJob, listOutputDir, shareSyncBaseUrl } from '@/lib/spark'
+import { getJob, listOutputDir, shareSyncBaseUrl, resolveFilesBase } from '@/lib/spark'
 import { jobLabel, jobPresetKey, jobGpuKey } from '@/lib/spark-types'
 
 export const dynamic = 'force-dynamic'
@@ -40,6 +40,7 @@ export async function GET(
   }
   if (!job) return jsonError('job not found', 404)
 
+  await resolveFilesBase()   // authoritative ShareSync base (v1.23 §3.4) before the sync guard
   if (!shareSyncBaseUrl(job)) {
     return jsonError(
       'ShareSync base URL not configured (set SPARK_FILES_BASE_URL in .env.local)',

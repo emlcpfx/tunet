@@ -738,6 +738,20 @@ class App:
                     width=6).pack(side="left")
         _help(r2c, "Frame rate for video outputs (ProRes). Ignored for EXR/PNG sequences.").pack(side="left", padx=6)
 
+        # Read-only model library mounted at /assets (cached on the node across jobs).
+        r2d = ttk.Frame(frame)
+        r2d.pack(fill="x", pady=3)
+        ttk.Label(r2d, text="Assets path", width=18).pack(side="left")
+        self.assets_var = tk.StringVar(value=os.environ.get("COMFY_ASSETS_PATH", ""))
+        ttk.Entry(r2d, textvariable=self.assets_var).pack(side="left", fill="x", expand=True)
+        ttk.Label(r2d, text="Space").pack(side="left", padx=(16, 4))
+        self.assets_space_var = tk.StringVar(value=os.environ.get("COMFY_ASSETS_SPACE", ""))
+        ttk.Entry(r2d, textvariable=self.assets_space_var, width=14).pack(side="left")
+        _help(r2d, "Optional ShareSync path to a read-only model library mounted at /assets and cached "
+                   "on the node across jobs. Weights staged there are symlinked instead of re-downloaded "
+                   "from HF/CivitAI. Defaults to $COMFY_ASSETS_PATH. 'Space' = the ShareSync Project it "
+                   "lives in (blank = your Personal space).").pack(side="left", padx=6)
+
         r3 = ttk.Frame(frame)
         r3.pack(fill="x", pady=3)
         ttk.Label(r3, text="Job name", width=18).pack(side="left")
@@ -790,6 +804,12 @@ class App:
 
         argv += ["--gpu", self.gpu_var.get(), "--mode", self.mode_var.get(),
                  "--idle-hold", str(self.idle_var.get())]
+        assets = self.assets_var.get().strip()
+        if assets:
+            argv += ["--assets-path", assets]
+            aspace = self.assets_space_var.get().strip()
+            if aspace:
+                argv += ["--assets-space", aspace]
         if self.mode_var.get() == "smart":
             argv += ["--max-retries", str(self.retries_var.get())]
         if self.output_var.get() and self.output_var.get() != "mp4":

@@ -30,7 +30,7 @@
 import {
   submitJob, getJob, listOutputDir, shareSyncBaseUrl, getToken,
   writeDiscoveredFilesBase, GPU_TYPES, DEFAULT_IMAGE,
-  propfindDir,
+  propfindDir, resolveFilesBase,
 } from '@/lib/spark'
 import * as fs from 'node:fs'
 import { packInputTarball } from '@/lib/spark-packer'
@@ -85,6 +85,7 @@ export async function POST(
   if (!source.output_share_sync_path) {
     return jsonError('source job has no output_share_sync_path', 422)
   }
+  await resolveFilesBase()   // authoritative ShareSync base (v1.23 §3.4) before the sync guard
   if (!shareSyncBaseUrl(source)) {
     return jsonError(
       'source job has no resolvable ShareSync base URL — fix SPARK_FILES_BASE_URL in .env.local',

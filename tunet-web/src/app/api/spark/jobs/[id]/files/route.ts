@@ -14,7 +14,7 @@
  * outside the job's own dir anyway.
  */
 
-import { getJob, fetchOutputFile, listOutputDir, propfindDir, shareSyncBaseUrl, getToken } from '@/lib/spark'
+import { getJob, fetchOutputFile, listOutputDir, propfindDir, shareSyncBaseUrl, resolveFilesBase, getToken } from '@/lib/spark'
 import type { SparkJob } from '@/lib/spark'
 
 export const dynamic = 'force-dynamic'
@@ -54,6 +54,9 @@ export async function GET(
   }
   if (!job) return jsonError('job not found', 404)
 
+  // Resolve the authoritative ShareSync base (v1.23 §3.4) before the sync guard,
+  // so a fresh worker with an empty discovered-cache still finds it.
+  await resolveFilesBase()
   // Without a base URL we can't reach ShareSync at all — surface as a
   // distinct 503 so the UI can suggest the env var.
   if (!shareSyncBaseUrl(job)) {
