@@ -423,7 +423,7 @@ def download_outputs(base_url, dest_dir, _rel=""):
 
 
 def submit_job(name, instance_type, image, command, env_vars, mode, idle, max_retries, extra_tags,
-               assets_path=None, assets_space=None, max_wallclock=None):
+               assets_path=None, assets_space=None, max_wallclock=None, instance_handle=None):
     tags = []
     for t in [BILLING_TAG, GROUP_TAG, *(extra_tags or [])]:
         if t and t not in tags:
@@ -450,7 +450,150 @@ def submit_job(name, instance_type, image, command, env_vars, mode, idle, max_re
     # Opt-in hard wall-clock kill (billing backstop). Spark range is [60, 86400].
     if max_wallclock:
         body["maxWallClockSeconds"] = max(60, min(86400, int(max_wallclock)))
+    # Route to a pre-warmed session (instant-mode only; Spark rejects it on smart).
+    if instance_handle and mode == "instant":
+        body["instanceHandle"] = instance_handle
     return spark("POST", "/api/compute/jobs", body).json()
+
+
+# ── Persistent compute sessions (instant-mode; Spark Fuse API v1.23 section 13) ─
+# Pre-warm a Spark instance once, then route many sequential jobs to it with zero
+# cold-start (no warm-pool selection, no image pull). The handle is cached in a
+# per-user dotfile so it survives across separate CLI invocations.
+# NOTE: a held instance bills for its idle wall-clock between jobs — stop it with
+# --session-stop as soon as you're done iterating.
+
+SESSION_FILE = os.path.expanduser("~/.comfy_spark_session.json")
+SESSION_TERMINAL = {"released", "expired", "failed"}
+
+
+def prepare_instance(instance_type, hold_seconds):
+    return spark("POST", "/api/compute/instances/prepare",
+                 {"instanceType": instance_type, "holdSeconds": int(hold_seconds)}).json()
+
+
+def release_instance(handle):
+    return spark("POST", f"/api/compute/instances/{handle}/release").json()
+
+
+def _get_instance_safe(handle):
+    """GET a session WITHOUT spark()'s global sys.exit-on-error, so a stale or
+    vanished handle never kills an in-progress submit. Returns the info dict or
+    None (on any HTTP/transport error)."""
+    try:
+        r = requests.get(f"{SPARK_API}/api/compute/instances/{handle}",
+                         headers={"Authorization": f"Bearer {get_token()}"}, timeout=15)
+        return r.json() if r.ok else None
+    except Exception:  # noqa: BLE001 — best-effort probe
+        return None
+
+
+def _load_session():
+    try:
+        with open(SESSION_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _save_session(d):
+    try:
+        with open(SESSION_FILE, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+    except OSError as e:
+        print(f"[session] WARNING: could not save {SESSION_FILE}: {e}")
+
+
+def _clear_session():
+    try:
+        os.remove(SESSION_FILE)
+    except OSError:
+        pass
+
+
+def session_start(instance_type, gpu_label, hold_seconds):
+    existing = _load_session()
+    if existing:
+        info = _get_instance_safe(existing["handle"])
+        if info and info.get("status") in ("preparing", "ready", "running"):
+            sys.exit(f"ERROR: a session is already active ({existing['handle']}, "
+                     f"status={info.get('status')}). Stop it first with --session-stop "
+                     f"(it keeps billing), or reuse it for {existing.get('sku')} jobs.")
+    print(f"[session] preparing {instance_type} ({gpu_label}) for up to {hold_seconds}s...")
+    info = prepare_instance(instance_type, hold_seconds)
+    handle = info.get("instanceHandle")
+    if not handle:
+        sys.exit(f"ERROR: prepare returned no instanceHandle: {info}")
+    deadline = time.time() + 600                       # 10-min ceiling (matches platform)
+    while info.get("status") != "ready":
+        st = info.get("status")
+        if st in SESSION_TERMINAL:
+            sys.exit(f"ERROR: session went {st}: {info.get('errorCode')} {info.get('errorMessage')}")
+        if time.time() > deadline:
+            sys.exit(f"ERROR: session still {st} after 10min — check --session-status")
+        print(f"[session] {handle} status={st}; waiting...")
+        time.sleep(3)
+        info = _get_instance_safe(handle) or info      # keep last-known on a transient blip
+    _save_session({"handle": handle, "sku": instance_type, "gpu": gpu_label,
+                   "hold": int(hold_seconds), "expiresAt": info.get("expiresAt")})
+    print(f"[session] READY {handle}  (expires {info.get('expiresAt')})")
+    print(f"[session] {instance_type} jobs now land here with no cold-start. "
+          f"Stop with:  python comfy_spark/comfy_launch.py --session-stop")
+    return handle
+
+
+def session_status():
+    s = _load_session()
+    if not s:
+        print("[session] no saved session.")
+        return
+    info = _get_instance_safe(s["handle"])
+    if not info:
+        print(f"[session] {s['handle']} not reachable (released/expired?); clearing saved handle.")
+        _clear_session()
+        return
+    st = info.get("status")
+    print(f"[session] {s['handle']}  sku={s.get('sku')}  status={st}  expires={info.get('expiresAt')}")
+    if st in SESSION_TERMINAL:
+        print(f"[session] terminal ({st}); clearing saved handle.")
+        _clear_session()
+
+
+def session_stop():
+    s = _load_session()
+    if not s:
+        print("[session] no saved session to stop.")
+        return
+    print(f"[session] releasing {s['handle']}...")
+    info = release_instance(s["handle"])
+    print(f"[session] status={info.get('status')}")
+    _clear_session()
+
+
+def session_handle_for(instance_type, mode, allow):
+    """The saved session handle to route a submit to, or None. Attaches only for
+    instant mode + a matching SKU + a live (ready/running) session — checked
+    against the API so we never submit against a released/expired handle."""
+    if not allow:
+        return None
+    s = _load_session()
+    if not s:
+        return None
+    if mode != "instant":
+        print("[session] saved session ignored — instanceHandle is instant-mode only.")
+        return None
+    if s.get("sku") != instance_type:
+        print(f"[session] saved session SKU {s.get('sku')} != job SKU {instance_type}; not using it.")
+        return None
+    info = _get_instance_safe(s["handle"])
+    st = (info or {}).get("status")
+    if st in ("ready", "running"):
+        print(f"[session] routing to warm instance {s['handle']} (status={st}) — no cold-start.")
+        return s["handle"]
+    print(f"[session] saved session is {st or 'unreachable'}; submitting without it.")
+    if st in SESSION_TERMINAL or info is None:
+        _clear_session()
+    return None
 
 
 def upload_tarball(upload_url, tar_path):
@@ -942,6 +1085,16 @@ def main():
     ap.add_argument("--list-jobs", action="store_true")
     ap.add_argument("--logs", metavar="JOB_ID")
     ap.add_argument("--cancel", metavar="JOB_ID")
+    ap.add_argument("--session-start", action="store_true",
+                    help="pre-warm an instant-mode instance (--gpu/--instance-type, --hold) and save its "
+                         "handle so later matching-SKU jobs land on it with no cold-start")
+    ap.add_argument("--session-status", action="store_true", help="show the saved warm session")
+    ap.add_argument("--session-stop", action="store_true",
+                    help="release the saved warm session (stops the idle billing)")
+    ap.add_argument("--hold", type=int, default=1800, metavar="SECS",
+                    help="(--session-start) max wall-clock to hold the instance [default 1800]")
+    ap.add_argument("--no-session", action="store_true",
+                    help="don't auto-route this submit to a saved warm session")
     args = ap.parse_args()
 
     # ── housekeeping sub-commands ─────────────────────────────────────────────
@@ -968,6 +1121,16 @@ def main():
         return
     if args.logs:
         return stream_logs(args.logs)
+    if args.session_status:
+        return session_status()
+    if args.session_stop:
+        return session_stop()
+    if args.session_start:
+        gpu = args.gpu or "rtxpro6000"
+        if not args.instance_type and gpu not in GPU_TYPES:
+            sys.exit(f"ERROR: unknown --gpu {gpu!r}; see --list-skus or pass --instance-type")
+        session_start(args.instance_type or GPU_TYPES[gpu], gpu, args.hold)
+        return
     if args.list_loras:
         pre = load_preset(args.preset) if args.preset else {}
         cat_name = args.catalog or pre.get("lora_catalog") or DEFAULT_CATALOG
@@ -1244,6 +1407,9 @@ def main():
     if args.assets_path:
         print(f"        assets    : {args.assets_path}{' [' + args.assets_space + ']' if args.assets_space else ''}"
               f"  → /assets (read-only, cached on node; staged weights symlinked not downloaded)")
+    if not args.no_session and _load_session():
+        print(f"        session   : will route to the saved warm instance if SKU matches "
+              f"(--no-session to skip)")
     print(f"        tags      : {BILLING_TAG}, {GROUP_TAG}{''.join(', ' + t for t in args.tag)}")
     print(f"        inputs    : {[os.path.basename(p) for p in input_files] or '(none)'}")
     if seq:
@@ -1306,10 +1472,11 @@ def main():
                          seq_files=seq["files"] if seq else None,
                          seq_groups=batch_seq_groups)
     try:
+        session_handle = session_handle_for(instance_type, mode, allow=not args.no_session)
         resp = submit_job(job_name, instance_type, image, command, env_vars,
                           mode, args.idle_hold, args.max_retries, args.tag,
                           assets_path=args.assets_path, assets_space=args.assets_space,
-                          max_wallclock=args.max_wallclock)
+                          max_wallclock=args.max_wallclock, instance_handle=session_handle)
         job_id = resp.get("jobId") or resp.get("id")
         upload_url = (resp.get("input") or {}).get("uploadUrl")
         if not job_id or not upload_url:

@@ -215,6 +215,10 @@ class App:
         co.pack(side="left", padx=(12, 0))
         _help(bar, "Convert the UI graph to API format on Spark and emit it (no render, no "
                    "weight download). The cheap way to validate a workflow / template preset.").pack(side="left", padx=4)
+        self.use_session = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="Use warm session", variable=self.use_session).pack(side="left", padx=(12, 0))
+        _help(bar, "Route this job to a pre-warmed instance (Queue panel -> Warm: Start) when its SKU "
+                   "matches, for zero cold-start. Uncheck to force a fresh placement.").pack(side="left", padx=4)
         self.add_btn = ttk.Button(bar, text="▶ Add to queue", command=lambda: self.enqueue(False))
         self.add_btn.pack(side="right")
         self.dry_btn = ttk.Button(bar, text="Dry run", command=lambda: self.enqueue(True))
@@ -238,6 +242,11 @@ class App:
         self.stop_btn.pack(fill="x", pady=1)
         ttk.Button(qb, text="Remove", command=self._remove_selected).pack(fill="x", pady=1)
         ttk.Button(qb, text="Clear finished", command=self._clear_finished).pack(fill="x", pady=1)
+        # Persistent compute session (pre-warm one instance, route jobs to it).
+        ttk.Separator(qb, orient="horizontal").pack(fill="x", pady=3)
+        ttk.Button(qb, text="Warm: Start",   command=lambda: self._session_cmd("start")).pack(fill="x", pady=1)
+        ttk.Button(qb, text="Warm: Status",  command=lambda: self._session_cmd("status")).pack(fill="x", pady=1)
+        ttk.Button(qb, text="Warm: Release", command=lambda: self._session_cmd("stop")).pack(fill="x", pady=1)
 
         # log
         logf = ttk.LabelFrame(root, text="Job log", padding=4)
@@ -819,6 +828,8 @@ class App:
         wc = self.wallclock_var.get()
         if wc and wc > 0:
             argv += ["--max-wallclock", str(wc)]
+        if not self.use_session.get():
+            argv.append("--no-session")
         if self.mode_var.get() == "smart":
             argv += ["--max-retries", str(self.retries_var.get())]
         if self.output_var.get() and self.output_var.get() != "mp4":
@@ -845,6 +856,11 @@ class App:
         argv = self.build_argv(dry_run)
         prim = os.path.basename(self.primary_var.get().strip()) or "(no input)"
         label = ("[dry] " if dry_run else "") + f"{self.preset_var.get()} · {prim}"
+        self._enqueue_argv(argv, label)
+
+    def _enqueue_argv(self, argv, label):
+        """Queue an arbitrary launcher argv (a render OR a --session-* management
+        command) and start it if the serial queue is idle."""
         jid = self._next_id
         self._next_id += 1
         self.jobq[jid] = {"id": jid, "label": label, "argv": argv, "status": "queued", "log": []}
@@ -854,6 +870,15 @@ class App:
         if self._viewing is None:           # show the very first job right away
             self._select_and_view(jid)
         self._pump()
+
+    def _session_cmd(self, action):
+        """Run a persistent-session lifecycle command through the same serial
+        queue + log pane as a render. 'start' pre-warms the currently-selected
+        GPU for 1800s; matching-SKU jobs then auto-route to it."""
+        argv = [sys.executable, "-u", LAUNCH, f"--session-{action}"]
+        if action == "start":
+            argv += ["--gpu", self.gpu_var.get(), "--hold", "1800"]
+        self._enqueue_argv(argv, f"warm session: {action}")
 
     def _pump(self):
         """Start the next queued job if nothing is running (serial). Gated on a
