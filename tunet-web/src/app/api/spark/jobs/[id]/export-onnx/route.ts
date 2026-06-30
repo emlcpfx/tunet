@@ -30,7 +30,7 @@
 import {
   submitJob, getJob, listOutputDir, shareSyncBaseUrl, getToken,
   writeDiscoveredFilesBase, GPU_TYPES, DEFAULT_IMAGE,
-  propfindDir, resolveFilesBase,
+  propfindDir, resolveFilesBase, runawayWallClockSeconds,
 } from '@/lib/spark'
 import * as fs from 'node:fs'
 import { packInputTarball } from '@/lib/spark-packer'
@@ -209,6 +209,7 @@ export async function POST(
       idleHoldSeconds:    0,
       mode:               'smart',                    // ~60% cheaper, preempt is fine
       maxRetriesOnInterrupt: 2,
+      maxWallClockSeconds: runawayWallClockSeconds(),  // billing backstop (export is bounded)
       // Write back into the source job's ShareSync dir so the resulting
       // exports/ tree shows up alongside the .pth in the same Downloads
       // panel — no separate page needed.

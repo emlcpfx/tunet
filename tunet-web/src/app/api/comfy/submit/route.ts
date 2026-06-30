@@ -14,6 +14,7 @@ import * as path from 'node:path'
 import * as os from 'node:os'
 import {
   submitJob, uploadInputTarball, getToken, getRefreshContext, writeDiscoveredFilesBase,
+  runawayWallClockSeconds,
 } from '@/lib/spark'
 import {
   loadComfyPreset, loadComfyWorkflow, buildComfyPatches, buildComfyEnv,
@@ -260,6 +261,9 @@ export async function POST(req: Request) {
           // Comfy images are 10-20 GB — ask the scheduler to prefer a node that
           // already cached the image and report cold-pull vs hit (never delays).
           imageAffinity: 'required',
+          // Billing backstop: a render is bounded, so cap wall-clock (24h default)
+          // — a wedged job or missed cancel can't bill for days.
+          maxWallClockSeconds: runawayWallClockSeconds(),
         })
         send({ phase: 'submit', status: 'done', jobId: submitResp.jobId, ms: Date.now() - tSubmit })
 

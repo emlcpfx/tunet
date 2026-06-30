@@ -288,6 +288,15 @@ export interface SubmitJobInput {
    * fails the job. Worth 'required' for our 10-20 GB comfy/training images.
    */
   imageAffinity?: 'preferred' | 'required'
+  /**
+   * Opt-in hard wall-clock ceiling in seconds (v1.23 §2.2). When the container
+   * has run this long, Spark Fuse SIGKILLs it and the job fails with
+   * `wallclock_exceeded`. Omit = no time-based kill at all. Range [60, 86400]
+   * (24 h max). We use it as a billing backstop on BOUNDED jobs (renders,
+   * exports) so a wedged container or missed cancel can't bill for days — see
+   * runawayWallClockSeconds(). NOT for training (legit multi-hour runs).
+   */
+  maxWallClockSeconds?: number
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -373,7 +382,30 @@ export async function submitJob(input: SubmitJobInput): Promise<SubmitJobRespons
       ? { assetsShareSyncSpaceName: input.assetsShareSyncSpaceName }
       : {}),
     ...(input.imageAffinity ? { imageAffinity: input.imageAffinity } : {}),
+    // Billing backstop on bounded jobs (v1.23 §2.2) — a hard wall-clock kill so
+    // a wedged container / missed cancel can't bill indefinitely. Omitted by
+    // callers that legitimately run long (training).
+    ...(input.maxWallClockSeconds
+      ? { maxWallClockSeconds: input.maxWallClockSeconds }
+      : {}),
   })
+}
+
+/**
+ * Hard wall-clock backstop (seconds) for BOUNDED jobs — renders, exports,
+ * benchmarks — so a wedged container or a missed cancel can't bill for days
+ * (the failure mode behind the two ~75 h runaway training runs). Defaults to
+ * Spark's 24 h maximum, which only ever trips a true runaway; operator-tunable
+ * via SPARK_MAX_WALLCLOCK_SECONDS. Clamped to Spark's [60, 86400] range.
+ *
+ * Deliberately NOT applied to training submits: real training can legitimately
+ * run many hours, and it's already covered by the step cap (DEFAULT_MAX_STEPS)
+ * plus the platform's default 30-min container-inactivity kill.
+ */
+export function runawayWallClockSeconds(): number {
+  const raw = Number(process.env.SPARK_MAX_WALLCLOCK_SECONDS)
+  const v = Number.isFinite(raw) && raw > 0 ? raw : 86_400   // 24 h = the API max
+  return Math.min(86_400, Math.max(60, Math.round(v)))
 }
 
 /**

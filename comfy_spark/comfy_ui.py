@@ -721,6 +721,12 @@ class App:
         ttk.Spinbox(r2, from_=0, to=5, increment=1, textvariable=self.retries_var,
                     width=5).pack(side="left")
         _help(r2, "Only used when Mode = smart: re-launches on preemption [0–5]. Ignored in instant mode.").pack(side="left", padx=6)
+        ttk.Label(r2, text="Max wall-clock (s)").pack(side="left", padx=(16, 4))
+        self.wallclock_var = tk.IntVar(value=0)
+        ttk.Spinbox(r2, from_=0, to=86400, increment=3600, textvariable=self.wallclock_var,
+                    width=8).pack(side="left")
+        _help(r2, "Billing backstop: SIGKILL the job once it has run this long (0 = no time-based "
+                  "kill). Catches a wedged job or a missed cancel. 86400 = 24h max.").pack(side="left", padx=6)
 
         # Output format (high-bit EXR / ProRes). mp4 = the preset's own preview output.
         r2c = ttk.Frame(frame)
@@ -810,6 +816,9 @@ class App:
             aspace = self.assets_space_var.get().strip()
             if aspace:
                 argv += ["--assets-space", aspace]
+        wc = self.wallclock_var.get()
+        if wc and wc > 0:
+            argv += ["--max-wallclock", str(wc)]
         if self.mode_var.get() == "smart":
             argv += ["--max-retries", str(self.retries_var.get())]
         if self.output_var.get() and self.output_var.get() != "mp4":

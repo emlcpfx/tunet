@@ -36,7 +36,7 @@ import * as path from 'node:path'
 import * as os from 'node:os'
 import * as crypto from 'node:crypto'
 import sharp from 'sharp'
-import { submitJob, uploadInputTarball, listSkus, GPU_TYPES, DEFAULT_IMAGE, type GpuKey, writeDiscoveredFilesBase } from '@/lib/spark'
+import { submitJob, uploadInputTarball, listSkus, GPU_TYPES, DEFAULT_IMAGE, type GpuKey, writeDiscoveredFilesBase, runawayWallClockSeconds } from '@/lib/spark'
 import { packInputTarball } from '@/lib/spark-packer'
 
 export const dynamic = 'force-dynamic'
@@ -254,6 +254,7 @@ export async function POST(req: Request) {
       image:           DEFAULT_IMAGE,
       command:         ['bash', '/input/spark_start.sh', outputDir, '/input/config.yaml'],
       idleHoldSeconds: 0,
+      maxWallClockSeconds: runawayWallClockSeconds(),  // billing backstop (a bench cell is bounded)
       env: {
         TUNET_JOB_NAME:    jobName,
         TUNET_PRESET:      'benchmark',

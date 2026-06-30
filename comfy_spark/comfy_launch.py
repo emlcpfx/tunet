@@ -423,7 +423,7 @@ def download_outputs(base_url, dest_dir, _rel=""):
 
 
 def submit_job(name, instance_type, image, command, env_vars, mode, idle, max_retries, extra_tags,
-               assets_path=None, assets_space=None):
+               assets_path=None, assets_space=None, max_wallclock=None):
     tags = []
     for t in [BILLING_TAG, GROUP_TAG, *(extra_tags or [])]:
         if t and t not in tags:
@@ -447,6 +447,9 @@ def submit_job(name, instance_type, image, command, env_vars, mode, idle, max_re
         body["assetsShareSyncPath"] = assets_path
         if assets_space:
             body["assetsShareSyncSpaceName"] = assets_space
+    # Opt-in hard wall-clock kill (billing backstop). Spark range is [60, 86400].
+    if max_wallclock:
+        body["maxWallClockSeconds"] = max(60, min(86400, int(max_wallclock)))
     return spark("POST", "/api/compute/jobs", body).json()
 
 
@@ -899,6 +902,9 @@ def main():
                          "downloaded from HF/CivitAI. Defaults to $COMFY_ASSETS_PATH.")
     ap.add_argument("--assets-space",
                     help="ShareSync Project the --assets-path lives in (omit = your Personal space)")
+    ap.add_argument("--max-wallclock", type=int, metavar="SECS",
+                    help="hard wall-clock kill (billing backstop) in seconds [60-86400]; "
+                         "omit = no time-based kill. SIGKILLs the container at this age.")
     ap.add_argument("--name", help="job name")
     ap.add_argument("--tag", action="append", default=[], help="extra grouping tag (repeatable)")
     ap.add_argument("--ready-timeout", type=int, default=300, help="secs to wait for ComfyUI startup")
@@ -1302,7 +1308,8 @@ def main():
     try:
         resp = submit_job(job_name, instance_type, image, command, env_vars,
                           mode, args.idle_hold, args.max_retries, args.tag,
-                          assets_path=args.assets_path, assets_space=args.assets_space)
+                          assets_path=args.assets_path, assets_space=args.assets_space,
+                          max_wallclock=args.max_wallclock)
         job_id = resp.get("jobId") or resp.get("id")
         upload_url = (resp.get("input") or {}).get("uploadUrl")
         if not job_id or not upload_url:
