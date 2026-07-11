@@ -73,6 +73,65 @@ def denormalize_linear(tensor):
         return tensor
 
 
+def _exr_samples_along(min_v, max_v, sampling):
+    """Number of stored samples along one axis for a (possibly subsampled) EXR channel.
+
+    Mirrors OpenEXR's storage semantics: samples sit at coordinates divisible by
+    ``sampling`` within the inclusive ``[min_v, max_v]`` data-window range.
+    """
+    return (max_v // sampling) - (-(-min_v // sampling)) + 1
+
+
+def _read_exr_channel_2d(exr_file, header, ch_name, dw):
+    """Read one EXR channel as a full-resolution (dw_height, dw_width) float32 array.
+
+    Channels may be *subsampled* (``xSampling``/``ySampling`` > 1), in which case the
+    raw buffer holds fewer samples than the data window's pixel count. Reshaping the
+    buffer straight to the data-window size then fails with
+    ``cannot reshape array of size N into shape (H, W)``. Here we reshape to the actual
+    stored sample grid and nearest-neighbour upsample back to full resolution.
+    """
+    FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
+    dw_width = dw.max.x - dw.min.x + 1
+    dw_height = dw.max.y - dw.min.y + 1
+
+    data = exr_file.channel(ch_name, FLOAT)
+    arr = np.frombuffer(data, dtype=np.float32)
+
+    # Fast path: buffer already matches the full data window.
+    if arr.size == dw_width * dw_height:
+        return arr.reshape((dw_height, dw_width))
+
+    # Subsampled channel: reshape to the stored grid, then upsample.
+    ch = header['channels'].get(ch_name)
+    xs = int(getattr(ch, 'xSampling', 1) or 1)
+    ys = int(getattr(ch, 'ySampling', 1) or 1)
+    sw = _exr_samples_along(dw.min.x, dw.max.x, xs)
+    sh = _exr_samples_along(dw.min.y, dw.max.y, ys)
+
+    if (xs, ys) == (1, 1) or arr.size != sw * sh:
+        # Header sampling doesn't explain the mismatch (e.g. a data window that
+        # doesn't match the stored channel resolution). Infer a uniform integer
+        # downscale factor so the file is still usable instead of skipped.
+        for f in range(2, 9):
+            fw = -(-dw_width // f)
+            fh = -(-dw_height // f)
+            if arr.size == fw * fh:
+                xs = ys = f
+                sw, sh = fw, fh
+                break
+        else:
+            raise ValueError(
+                f"channel '{ch_name}' has {arr.size} samples, incompatible with data "
+                f"window {dw_width}x{dw_height} ({dw_width * dw_height} px)"
+            )
+
+    arr = arr.reshape((sh, sw))
+    if (xs, ys) != (1, 1):
+        arr = np.repeat(np.repeat(arr, ys, axis=0), xs, axis=1)[:dw_height, :dw_width]
+    return arr
+
+
 def load_exr_full_frame(image_path):
     """Load an EXR file as a float32 RGB numpy array using the displayWindow.
 
@@ -92,19 +151,13 @@ def load_exr_full_frame(image_path):
         dw_width = dw.max.x - dw.min.x + 1
         dw_height = dw.max.y - dw.min.y + 1
 
-        FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
         channels = ['R', 'G', 'B']
         available = list(header['channels'].keys())
         if not all(c in available for c in channels):
-            ch_name = available[0]
-            channel_data = [exr_file.channel(ch_name, FLOAT)] * 3
+            arr = _read_exr_channel_2d(exr_file, header, available[0], dw)
+            img_channels = [arr, arr, arr]
         else:
-            channel_data = [exr_file.channel(c, FLOAT) for c in channels]
-
-        img_channels = []
-        for data in channel_data:
-            arr = np.frombuffer(data, dtype=np.float32).reshape((dw_height, dw_width))
-            img_channels.append(arr)
+            img_channels = [_read_exr_channel_2d(exr_file, header, c, dw) for c in channels]
         data_img = np.stack(img_channels, axis=2)
 
         if (dw.min.x == disp.min.x and dw.min.y == disp.min.y
@@ -181,11 +234,9 @@ def load_mask_image(image_path):
             dw_width = dw.max.x - dw.min.x + 1
             dw_height = dw.max.y - dw.min.y + 1
 
-            FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
             available = list(header['channels'].keys())
             ch_name = 'Y' if 'Y' in available else available[0]
-            data = exr_file.channel(ch_name, FLOAT)
-            mask_data = np.frombuffer(data, dtype=np.float32).reshape((dw_height, dw_width))
+            mask_data = _read_exr_channel_2d(exr_file, header, ch_name, dw)
 
             if (dw.min.x == disp.min.x and dw.min.y == disp.min.y
                     and dw_width == disp_width and dw_height == disp_height):
