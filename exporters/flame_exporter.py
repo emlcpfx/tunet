@@ -144,8 +144,13 @@ def load_model_for_export(checkpoint_path, device):
     # --- Instantiate the WRAPPER ---
     use_sigmoid = (loss_mode == 'bce+dice')
     color_space = getattr(data_config, 'color_space', 'srgb')
-    logging.info(f"Wrapping UNet model with Normalization layer (use_sigmoid={use_sigmoid}, color_space={color_space})...")
-    wrapped_model = NormalizedUNet(base_model, use_sigmoid=use_sigmoid, color_space=color_space)
+    predict_residual = bool(getattr(training_config, 'predict_residual', False))
+    if predict_residual and use_sigmoid:
+        logging.warning("predict_residual ignored for bce+dice (matte) export.")
+        predict_residual = False
+    logging.info(f"Wrapping UNet model with Normalization layer (use_sigmoid={use_sigmoid}, color_space={color_space}, residual={predict_residual})...")
+    wrapped_model = NormalizedUNet(base_model, use_sigmoid=use_sigmoid, color_space=color_space,
+                                   predict_residual=predict_residual)
     logging.info(f"Moving wrapped model to device: {device}")
     wrapped_model.to(device)
     wrapped_model.eval()

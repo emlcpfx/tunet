@@ -68,7 +68,11 @@ def export_flame(model, config, output_dir, epoch, resolution, loss_mode='l1', c
 
         use_sigmoid = (loss_mode == 'bce+dice')
         color_space = getattr(getattr(config, 'data', None), 'color_space', 'srgb') if config else 'srgb'
-        wrapped = NormalizedUNet(base_model_cpu, use_sigmoid=use_sigmoid, color_space=color_space)
+        predict_residual = bool(getattr(getattr(config, 'training', None), 'predict_residual', False)) if config else False
+        if predict_residual and use_sigmoid:
+            predict_residual = False
+        wrapped = NormalizedUNet(base_model_cpu, use_sigmoid=use_sigmoid, color_space=color_space,
+                                 predict_residual=predict_residual)
         wrapped.eval()
 
         dummy_input = torch.rand(1, 3, resolution, resolution)
@@ -148,7 +152,11 @@ def export_nuke(model, config, output_dir, epoch, resolution, loss_mode='l1', ck
 
         use_sigmoid = (loss_mode == 'bce+dice')
         color_space = getattr(getattr(config, 'data', None), 'color_space', 'srgb') if config else 'srgb'
-        wrapped = NormalizedUNet(base_model_cpu, use_sigmoid=use_sigmoid, color_space=color_space)
+        predict_residual = bool(getattr(getattr(config, 'training', None), 'predict_residual', False)) if config else False
+        if predict_residual and use_sigmoid:
+            predict_residual = False
+        wrapped = NormalizedUNet(base_model_cpu, use_sigmoid=use_sigmoid, color_space=color_space,
+                                 predict_residual=predict_residual)
         wrapped.eval()
 
         scripted = torch.jit.script(wrapped)

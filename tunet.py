@@ -90,6 +90,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         self._cached_resolution = None
         self._cached_loss_mode = None
         self._cached_color_space = 'srgb'
+        self._cached_predict_residual = False
 
         # --- Build UI ---
         self.central_widget = QWidget()
@@ -1067,6 +1068,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                 'l1_weight': self.l1_weight_input.value(),
                 'l2_weight': self.l2_weight_input.value(),
                 'lpips_weight': self.lpips_weight_input.value(),
+                'predict_residual': self.predict_residual_input.isChecked(),
             },
             'logging': {
                 'log_interval': self.log_interval_input.value(),
@@ -1184,6 +1186,8 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         self.l1_weight_input.setValue(training.get('l1_weight', 1.0))
         self.l2_weight_input.setValue(training.get('l2_weight', 0.0))
         self.lpips_weight_input.setValue(training.get('lpips_weight', 0.1))
+        self.predict_residual_input.setChecked(training.get('predict_residual', False))
+        self._sync_residual_enabled_for_loss()
 
         # Logging
         log_cfg = config.get('logging', {})
@@ -1725,6 +1729,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         self.inf_progress_label.setText("")
         self._cached_model = None
         self._cached_color_space = 'srgb'
+        self._cached_predict_residual = False
 
     def _inf_request_stop(self):
         self.inference_stop_requested = True
@@ -1745,7 +1750,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             import torchvision.transforms as T
             from inference import load_model_and_config, process_image, denormalize, NORM_MEAN, NORM_STD, load_image_any_format
 
-            model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch, color_space = self._inf_load_model()
+            model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch, color_space, predict_residual = self._inf_load_model()
             input_dir = self._get_path(self.inf_input_dir)
             output_root = self._get_path(self.inf_output_root)
             checkpoint = self._get_path(self.inf_checkpoint_input)
@@ -1754,7 +1759,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             logging.info(f"Output folder: {output_dir}")
             self._inf_process_folder(model, input_dir, output_dir, resolution, stride,
                                      device, use_amp, transform, loss_mode, tile_batch,
-                                     color_space=color_space)
+                                     color_space=color_space, predict_residual=predict_residual)
             if not self.inference_stop_requested:
                 logging.info("Inference complete!")
                 QTimer.singleShot(0, lambda: QMessageBox.information(self, "Done", "Inference completed successfully!"))
@@ -1780,7 +1785,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
 
     def _inf_run_queue_thread(self):
         try:
-            model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch, color_space = self._inf_load_model()
+            model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch, color_space, predict_residual = self._inf_load_model()
             pending = [q for q in self.inference_queue if q['status'] == 'pending']
             total_items = len(pending)
 
@@ -1803,7 +1808,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                     logging.info(f"Output folder: {output_dir}")
                     self._inf_process_folder(model, item['input_dir'], output_dir,
                                              resolution, stride, device, use_amp, transform, loss_mode, tile_batch,
-                                             color_space=color_space)
+                                             color_space=color_space, predict_residual=predict_residual)
                     if not self.inference_stop_requested:
                         item['status'] = 'done'
                     else:
@@ -1843,10 +1848,11 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             resolution = self._cached_resolution
             loss_mode = self._cached_loss_mode
             color_space = self._cached_color_space
+            predict_residual = self._cached_predict_residual
         else:
             logging.info(f"Using device: {device}")
             logging.info("Loading model...")
-            model, resolution, use_mask_input, loss_mode, color_space = load_model_and_config(checkpoint, device)
+            model, resolution, use_mask_input, loss_mode, color_space, predict_residual = load_model_and_config(checkpoint, device)
             if os.name != 'nt':
                 try:
                     model = torch.compile(model, mode='reduce-overhead')
@@ -1860,6 +1866,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
             self._cached_resolution = resolution
             self._cached_loss_mode = loss_mode
             self._cached_color_space = color_space
+            self._cached_predict_residual = predict_residual
 
         transform = T.Compose([T.ToTensor(), T.Normalize(mean=NORM_MEAN, std=NORM_STD)])
         stride = max(1, self.inf_stride.value())
@@ -1880,7 +1887,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
         else:
             tile_batch = 1
 
-        return model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch, color_space
+        return model, resolution, loss_mode, device, use_amp, transform, stride, tile_batch, color_space, predict_residual
 
     @staticmethod
     def _inf_resolve_output_dir(input_dir, output_root, checkpoint_path, skip_existing=False):
@@ -1957,7 +1964,7 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
 
     def _inf_process_folder(self, model, input_dir, output_dir, resolution, stride,
                             device, use_amp, transform, loss_mode, tile_batch=4,
-                            color_space='srgb'):
+                            color_space='srgb', predict_residual=False):
         """Process all images in a folder (ported from inference_gui.py)."""
         from inference import process_image, denormalize, denormalize_linear, load_image_any_format, load_image_linear
         from inference_config import InferenceConfig
@@ -2080,7 +2087,8 @@ class MainWindow(DataTabMixin, TrainingTabMixin, PreviewsTabMixin, ExportTabMixi
                     resolution=resolution, stride=stride, device=device,
                     batch_size=tile_batch, use_amp=use_amp,
                     half_res=self.inf_half_res.isChecked(),
-                    loss_mode=loss_mode, color_space=color_space)
+                    loss_mode=loss_mode, color_space=color_space,
+                    predict_residual=predict_residual)
                 process_image(model, img_path, write_path, inf_cfg, transform, denorm_fn,
                               src_image=img_data)
                 elapsed = time.perf_counter() - t0

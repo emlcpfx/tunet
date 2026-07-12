@@ -15,3 +15,4 @@ class InferenceConfig:
     use_mask_input: bool = False
     loss_mode: str = 'l1'
     color_space: str = 'srgb'
+    predict_residual: bool = False

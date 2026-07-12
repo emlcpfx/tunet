@@ -21,3 +21,4 @@ class PreviewContext:
     auto_mask_gamma: float = 1.0
     diff_amplify: float = 5.0
     color_space: str = 'srgb'
+    predict_residual: bool = False

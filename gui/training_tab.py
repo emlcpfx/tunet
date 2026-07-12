@@ -27,6 +27,7 @@ class TrainingTabMixin:
                 "use_auto_mask": False,
                 "skip_empty_patches": False,
                 "progressive_resolution": False,
+                "predict_residual": False,
             },
             "Beauty / Paint Fix": {
                 "model_type": "msrn",
@@ -43,12 +44,15 @@ class TrainingTabMixin:
                 # training. At weight=100 the masked region contributes ~23%
                 # of total loss for typical small-ROI work; at the platform
                 # default of 10 it'd be ~3% and the optimizer would happily
-                # output the source unchanged. See tunet-web/spark-presets.ts
-                # for the same change applied to the Spark side.
+                # output the source unchanged.
                 "use_mask_loss": True,
                 "mask_weight": 100.0,
                 "skip_empty_patches": True,
                 "progressive_resolution": False,
+                # Residual: learn edit delta only (out = src + delta). Stacks
+                # with auto-mask — architecture makes untouched pixels identity
+                # by construction instead of fighting full-RGB re-encode.
+                "predict_residual": True,
             },
             "Paintout / Cleanup": {
                 "model_type": "msrn",
@@ -65,6 +69,7 @@ class TrainingTabMixin:
                 "auto_mask_gamma": 0.5,
                 "skip_empty_patches": True,
                 "progressive_resolution": False,
+                "predict_residual": True,
             },
             "Roto / Matte": {
                 "model_type": "unet",
@@ -77,6 +82,7 @@ class TrainingTabMixin:
                 "use_auto_mask": False,
                 "skip_empty_patches": False,
                 "progressive_resolution": True,
+                "predict_residual": False,
             },
         }
         p = presets.get(preset_name)
@@ -116,6 +122,16 @@ class TrainingTabMixin:
             self.mask_weight_input.setValue(p["mask_weight"])
         self.skip_empty_patches_input.setChecked(p["skip_empty_patches"])
         self.progressive_res_check.setChecked(p.get("progressive_resolution", False))
+        if "predict_residual" in p:
+            self.predict_residual_input.setChecked(p["predict_residual"])
+        self._sync_residual_enabled_for_loss()
+
+    def _sync_residual_enabled_for_loss(self):
+        """Disable residual when loss is bce+dice (matte mode)."""
+        is_matte = self.loss_input.currentText() == "bce+dice"
+        self.predict_residual_input.setEnabled(not is_matte)
+        if is_matte:
+            self.predict_residual_input.setChecked(False)
 
     def _sync_aug_enabled(self):
         """Sync augmentation sub-widget enabled state to their parent checkboxes."""
@@ -154,8 +170,8 @@ class TrainingTabMixin:
         self.preset_input.setToolTip(
             "Quick-start presets that configure model, loss, and patch settings.\n\n"
             "  General — Good all-around starting point for image-to-image tasks\n"
-            "  Beauty / Paint Fix — Perceptual loss for faces, skin, hair\n"
-            "  Paintout / Cleanup — Weighted loss for removing objects\n"
+            "  Beauty / Paint Fix — Perceptual loss for faces, skin, hair (residual on)\n"
+            "  Paintout / Cleanup — Weighted loss for removing objects (residual on)\n"
             "  Roto / Matte — Binary mask output for rotoscoping\n\n"
             "Select a preset then adjust individual settings as needed.\n"
             "Changing any setting afterwards keeps your changes (won't revert).")
@@ -510,6 +526,17 @@ class TrainingTabMixin:
             lambda checked: self.auto_mask_hint.setText(
                 "(Mask directory not needed with Auto Mask)" if checked else ""))
 
+        self.predict_residual_input = QCheckBox("Predict residual (src + delta)")
+        self.predict_residual_input.setChecked(False)
+        self.predict_residual_input.setToolTip(
+            "Learn only the edit: model outputs a delta, composed as out = src + delta.\n"
+            "Untouched pixels stay identity by construction — best for local fixes\n"
+            "(beauty, gloves, paintouts). Stacks with auto-mask.\n\n"
+            "Off for full-frame looks and matte training.\n"
+            "Warning: Changes architecture — cannot toggle mid-training.")
+        self.loss_input.currentTextChanged.connect(
+            lambda _t: self._sync_residual_enabled_for_loss())
+
         self.skip_empty_patches_input = QCheckBox("Skip empty patches")
         self.skip_empty_patches_input.setChecked(True)
         self.skip_empty_patches_input.setToolTip(
@@ -559,6 +586,7 @@ class TrainingTabMixin:
         form_mask.addRow(mask_weight_row)
         form_mask.addRow(self.use_mask_input_input)
         form_mask.addRow(self.use_auto_mask_input)
+        form_mask.addRow(self.predict_residual_input)
         auto_mask_gamma_row = QHBoxLayout()
         auto_mask_gamma_row.addWidget(QLabel("Auto Mask Gamma:"))
         auto_mask_gamma_row.addWidget(self.auto_mask_gamma_input)

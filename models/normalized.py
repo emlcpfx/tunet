@@ -8,13 +8,21 @@ class NormalizedUNet(nn.Module):
     sRGB mode:   Accepts [0,1] input → [-1,1] → UNet → [0,1] output (clamped).
     Linear mode: Accepts [0,+inf) linear input → log1p → [-1,1] → UNet
                  → denorm to log-space → expm1 → linear output (no upper clamp).
+
+    When predict_residual is True, the UNet output is treated as a delta in
+    normalized space and added to the normalized plate before denorm
+    (out = src + delta). Incompatible with use_sigmoid (matte mode).
     """
 
-    def __init__(self, unet_model, use_sigmoid=False, color_space='srgb'):
+    def __init__(self, unet_model, use_sigmoid=False, color_space='srgb',
+                 predict_residual=False):
         super().__init__()
+        if use_sigmoid and predict_residual:
+            raise ValueError("predict_residual is incompatible with use_sigmoid (matte mode)")
         self.unet = unet_model
         self.use_sigmoid = use_sigmoid
         self.color_space = color_space
+        self.predict_residual = predict_residual
         self.register_buffer('mean', torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1))
         self.register_buffer('std', torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1))
 
@@ -25,6 +33,8 @@ class NormalizedUNet(nn.Module):
         unet_output = self.unet(normalized_x)
         if self.use_sigmoid:
             return torch.sigmoid(unet_output)
+        if self.predict_residual:
+            unet_output = normalized_x[:, :3] + unet_output
         denormalized = (unet_output * self.std) + self.mean
         if self.color_space == 'linear':
             return torch.expm1(denormalized.clamp(min=0.0))

@@ -8,6 +8,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from distributed import is_main_process
 from .loss import dice_loss
+from .residual import apply_residual
 
 
 def _psnr(pred, target):
@@ -56,7 +57,7 @@ def _ssim(pred, target, window_size=11, C1=0.01**2, C2=0.03**2):
 def run_validation(model, val_dataloader, device, device_type, use_amp, use_lpips,
                    loss_fn_lpips, use_bce_dice, criterion_l1, current_ep_idx,
                    global_step, lambda_lpips=1.0, use_mask_input=False,
-                   val_dataset=None):
+                   val_dataset=None, predict_residual=False):
     """Run validation over entire val dataset, return avg losses.
 
     Also computes PSNR and SSIM metrics, and logs the worst-performing batch
@@ -102,6 +103,8 @@ def run_validation(model, val_dataloader, device, device_type, use_amp, use_lpip
                         # For PSNR/SSIM, use sigmoid output for BCE+Dice
                         out_for_metrics = torch.sigmoid(out) * 2.0 - 1.0  # back to [-1, 1]
                     else:
+                        if predict_residual:
+                            out = apply_residual(out, model_in)
                         l1 = criterion_l1(out, dst)
                         lp = torch.tensor(0.0, device=device)
                         if use_lpips and loss_fn_lpips:

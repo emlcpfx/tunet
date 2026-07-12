@@ -209,8 +209,13 @@ def load_model_for_conversion(checkpoint_path, device='cpu'):
 
     # --- Instantiate the WRAPPER ---
     color_space = getattr(data_config, 'color_space', 'srgb')
-    logging.info(f"Wrapping UNet model with Normalization layer (color_space={color_space})...")
-    wrapped_model = NormalizedUNet(base_model, color_space=color_space)
+    predict_residual = bool(getattr(training_config, 'predict_residual', False))
+    if predict_residual and loss_mode == 'bce+dice':
+        logging.warning("predict_residual ignored for bce+dice (matte) export.")
+        predict_residual = False
+    logging.info(f"Wrapping UNet model with Normalization layer (color_space={color_space}, residual={predict_residual})...")
+    wrapped_model = NormalizedUNet(base_model, color_space=color_space,
+                                   predict_residual=predict_residual)
 
     # Move the entire wrapped model (including the base model) to the target device
     logging.info(f"Moving wrapped model to device: {device}")
