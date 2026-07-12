@@ -208,6 +208,9 @@ systemctl restart tunet-web
 sleep 2
 systemctl is-active tunet-web
 '@
+# PowerShell/Windows here-strings are CRLF; remote bash treats trailing \r as
+# part of the path ("/opt/tunet-web\r"). Normalize before plink.
+$remoteCmd = $remoteCmd -replace "`r`n", "`n" -replace "`r", "`n"
 SshRun $remoteCmd
 
 if ($webTar)  { Remove-Item $webTar  -ErrorAction SilentlyContinue }
