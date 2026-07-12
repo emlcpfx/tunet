@@ -46,6 +46,7 @@ from image_io import (load_image_any_format, load_image_linear, load_mask_image,
                       denormalize_linear, linear_to_log, log_to_linear)
 from config import config_to_dict, dict_to_sns, merge_configs
 from training.loss import dice_loss, diff_heatmap, refine_auto_mask, compute_auto_mask
+from training.residual import apply_residual, zero_init_output_layer
 from training.context import PreviewContext
 from training.previews import save_previews, capture_preview_batch, save_val_previews, capture_val_preview_batch
 from training.validation import run_validation
@@ -804,7 +805,8 @@ def _apply_validation_update(config, standard_transform):
 
 
 def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_size,
-                 use_lpips, use_l2, use_bce_dice, use_amp_eff, loss_fn_lpips, model_type):
+                 use_lpips, use_l2, use_bce_dice, use_amp_eff, loss_fn_lpips, model_type,
+                 predict_residual=False):
     """Create the model, optimizer, scaler, and load checkpoints if available.
 
     Returns (model, optimizer, scaler, start_epoch, start_step, ckpt_prefix, use_amp_eff).
@@ -812,6 +814,12 @@ def _build_model(config, device, device_type, world_size, rank, n_input_ch, eff_
     recurrence_t = getattr(config.model, 'recurrence_steps', 2)
     model = create_model(model_type=model_type, n_ch=n_input_ch, n_cls=3,
                          hidden_size=eff_size, t=recurrence_t).to(device)
+    if predict_residual and not use_bce_dice:
+        if zero_init_output_layer(model):
+            if is_main_process():
+                logging.info("Residual mode: zero-initialized final OutConv (starts as identity).")
+        elif is_main_process():
+            logging.warning("Residual mode: could not find OutConv to zero-init.")
     if is_main_process():
         logging.debug(f"{model_type.upper()} instantiated: hidden_size={eff_size}, device={device}.")
     if world_size > 1 and device_type == 'cuda':
@@ -1092,7 +1100,7 @@ _DIAG_LOGGED: dict = {'mask': False, 'lpips_err': False}
 def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion_l1, criterion_l2,
                            loss_fn_lpips, criterion_bce, config, device, device_type, use_amp_eff,
                            use_bce_dice, use_lpips, use_weighted, use_l2, use_mask_loss, use_auto_mask,
-                           mask_batch, auto_mask_raw):
+                           mask_batch, auto_mask_raw, predict_residual=False):
     """Run forward pass, compute loss, backward pass, and optimizer step.
 
     Handles both AMP and non-AMP paths. Returns (l1_val, lp_val, l2_val, out_tensor, loss_finite).
@@ -1117,6 +1125,8 @@ def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion
             loss = l1
             out = torch.sigmoid(out)
         else:
+            if predict_residual:
+                out = apply_residual(out, model_input)
             if use_mask_loss and mask_batch is not None:
                 weight_map = 1.0 + mask_batch * (config.mask.mask_weight - 1.0)
                 l1 = (torch.abs(out - dst) * weight_map).mean()
@@ -1304,6 +1314,13 @@ def train(config):
     if is_main_process() and config.mask.skip_empty_patches and use_auto_mask:
         logging.info(f"Skip empty patches: enabled (max pixel diff threshold={config.mask.skip_empty_threshold}/255)")
 
+    predict_residual = bool(getattr(config.training, 'predict_residual', False))
+    if predict_residual and config.training.loss == 'bce+dice':
+        logging.error("FATAL: training.predict_residual is incompatible with bce+dice (matte mode).")
+        cleanup_ddp(); return
+    if is_main_process() and predict_residual:
+        logging.info("Residual prediction enabled: model outputs delta, composed as out = src + delta")
+
     # --- Dataset & DataLoader ---
     auto_batch_pending = config.training.batch_size <= 0
     if auto_batch_pending:
@@ -1390,7 +1407,8 @@ def train(config):
         (model, optimizer, scaler, scheduler, start_epoch, start_step, ckpt_prefix,
          use_amp_eff, criterion_l1, criterion_l2, criterion_bce) = _build_model(
             config, device, device_type, world_size, rank, n_input_ch, eff_size,
-            use_lpips, use_l2, use_bce_dice, False, loss_fn_lpips, model_type)
+            use_lpips, use_l2, use_bce_dice, False, loss_fn_lpips, model_type,
+            predict_residual=predict_residual)
     except Exception as model_err: logging.error(f"FATAL: Model setup/resume error: {model_err}. Exiting.", exc_info=True); cleanup_ddp(); return
 
     # --- Auto Batch Size (after model exists) ---
@@ -1611,7 +1629,7 @@ def train(config):
                 model, model_input, dst, optimizer, scaler, criterion_l1, criterion_l2,
                 loss_fn_lpips, criterion_bce, config, device, device_type, use_amp_eff,
                 use_bce_dice, use_lpips, use_weighted, use_l2, use_mask_loss, use_auto_mask,
-                mask_batch, auto_mask_raw)
+                mask_batch, auto_mask_raw, predict_residual=predict_residual)
 
             if not loss_finite:
                 logging.error(f"S{global_step}: NaN/Inf loss ({batch_l1})! Skip update.")
@@ -1731,7 +1749,7 @@ def train(config):
                      elif fixed_src is None: logging.warning(f"S{global_step}: Preview refresh failed (no initial).")
                      else: logging.warning(f"S{global_step}: Preview refresh failed, using old.")
                 if fixed_src is not None:
-                    preview_ctx = PreviewContext(model=model, output_dir=config.data.output_dir, device=device, current_epoch=current_ep_idx, global_step=global_step, preview_save_count=preview_count, preview_refresh_rate=config.logging.preview_refresh_rate, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, auto_mask_gamma=config.mask.auto_mask_gamma, diff_amplify=float(config.logging.diff_amplify), color_space=color_space)
+                    preview_ctx = PreviewContext(model=model, output_dir=config.data.output_dir, device=device, current_epoch=current_ep_idx, global_step=global_step, preview_save_count=preview_count, preview_refresh_rate=config.logging.preview_refresh_rate, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, auto_mask_gamma=config.mask.auto_mask_gamma, diff_amplify=float(config.logging.diff_amplify), color_space=color_space, predict_residual=predict_residual)
                     save_previews(preview_ctx, fixed_src, fixed_dst, fixed_mask_batch=fixed_mask, fixed_auto_mask_batch=fixed_auto_mask); preview_count += 1
                 elif preview_count == 0: logging.warning(f"S{global_step}: Skipping preview (no batch).")
 
@@ -1884,7 +1902,7 @@ def train(config):
                 if epoch_end_now: run_val_loss_now = True
                 elif val_interval > 0 and global_step % val_interval == 0: run_val_loss_now = True
             if run_val_loss_now:
-                run_validation(model, val_dataloader, device, device_type, use_amp_eff, use_lpips, loss_fn_lpips, use_bce_dice, criterion_l1, current_ep_idx, global_step, lambda_lpips=config.training.lambda_lpips, use_mask_input=use_mask_input, val_dataset=val_dataset)
+                run_validation(model, val_dataloader, device, device_type, use_amp_eff, use_lpips, loss_fn_lpips, use_bce_dice, criterion_l1, current_ep_idx, global_step, lambda_lpips=config.training.lambda_lpips, use_mask_input=use_mask_input, val_dataset=val_dataset, predict_residual=predict_residual)
             # Val preview runs on its own schedule (epoch end or val_interval), even without dst
             run_val_preview_now = is_main_process() and has_val_preview and val_fixed_src is not None and (epoch_end_now or (val_interval > 0 and global_step % val_interval == 0))
             if run_val_preview_now:
@@ -1893,7 +1911,7 @@ def train(config):
                     new_val_src, new_val_dst = capture_val_preview_batch(config, standard_transform, use_auto_mask=use_auto_mask, skip_empty=skip_empty, skip_empty_threshold=config.mask.skip_empty_threshold)
                     if new_val_src is not None: val_fixed_src, val_fixed_dst = new_val_src, new_val_dst
                     else: logging.warning(f"S{global_step}: Val preview refresh failed, using old.")
-                val_ctx = PreviewContext(model=model, output_dir=config.data.output_dir, device=device, current_epoch=current_ep_idx, global_step=global_step, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, diff_amplify=float(config.logging.diff_amplify), color_space=color_space)
+                val_ctx = PreviewContext(model=model, output_dir=config.data.output_dir, device=device, current_epoch=current_ep_idx, global_step=global_step, use_mask_input=use_mask_input, use_bce_dice=use_bce_dice, use_amp=use_amp_eff, use_auto_mask=use_auto_mask, diff_amplify=float(config.logging.diff_amplify), color_space=color_space, predict_residual=predict_residual)
                 save_val_previews(val_ctx, val_fixed_src, val_fixed_dst); val_preview_count += 1
 
             # --- LR Scheduler: ReduceLROnPlateau steps at epoch end ---
@@ -2172,6 +2190,7 @@ if __name__ == "__main__":
     config.training.l1_weight = getattr(config.training, 'l1_weight', 1.0)
     config.training.l2_weight = getattr(config.training, 'l2_weight', 0.0)
     config.training.lpips_weight = getattr(config.training, 'lpips_weight', 0.1)
+    config.training.predict_residual = getattr(config.training, 'predict_residual', False)
     # Validation defaults
     config.data.val_src_dir = getattr(config.data, 'val_src_dir', None)
     config.data.val_dst_dir = getattr(config.data, 'val_dst_dir', None)
@@ -2227,6 +2246,8 @@ if __name__ == "__main__":
                     elif not os.path.isdir(config.data.mask_dir):
                         error_msgs.append(f"data.mask_dir missing: {config.data.mask_dir}")
             if config.mask.mask_weight < 1.0: error_msgs.append("mask.mask_weight must be >= 1.0")
+            if getattr(config.training, 'predict_residual', False) and config.training.loss == 'bce+dice':
+                error_msgs.append("training.predict_residual is incompatible with loss=bce+dice (matte mode)")
             # Validation dir checks
             if config.data.val_src_dir and not os.path.isdir(config.data.val_src_dir): error_msgs.append(f"data.val_src_dir missing: {config.data.val_src_dir}")
             if config.data.val_dst_dir and not os.path.isdir(config.data.val_dst_dir): error_msgs.append(f"data.val_dst_dir missing: {config.data.val_dst_dir}")

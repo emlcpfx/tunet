@@ -168,6 +168,14 @@ Areas that differ become white (important), identical areas become black.
 
 Great for: beauty work, paint fixes, cleanup — no manual mask files needed.`,
 
+  predict_residual:
+    `Learn only the edit: model outputs a delta, composed as out = src + delta.
+Untouched pixels stay identity by construction — best for local fixes
+(beauty, gloves, paintouts). Stacks with auto-mask.
+
+Off for full-frame looks and matte training.
+Warning: Changes architecture — cannot toggle mid-training.`,
+
   auto_mask_gamma:
     `Gamma curve applied to auto-mask.
   < 1.0 — expands white coverage (e.g. 0.5 for subtle beauty work)

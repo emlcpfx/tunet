@@ -31,6 +31,8 @@ export interface Preset {
     l1_weight?:       number
     l2_weight?:       number
     lpips_weight?:    number
+    /** Learn edit delta only (out = src + delta). Beauty/Paintout default on. */
+    predict_residual?: boolean
   }
   mask: {
     use_auto_mask:    boolean
@@ -63,7 +65,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
     tags:        ['whole-frame', 'global looks'],
     model:    { model_type: 'msrn', model_size_dims: 64, recurrence_steps: 2 },
     data:     { resolution: 512, overlap_factor: 0.5 },
-    training: { loss: 'l1', lambda_lpips: 0, lr: 1e-4, iterations_per_epoch: 500 },
+    training: { loss: 'l1', lambda_lpips: 0, lr: 1e-4, iterations_per_epoch: 500, predict_residual: false },
     mask:     { use_auto_mask: false },
     skip_empty_patches: false,
     progressive_resolution: false,
@@ -71,11 +73,11 @@ export const PRESETS: Record<PresetKey, Preset> = {
   beauty: {
     key:         'beauty',
     name:        'Beauty / Paint Fix',
-    description: 'Best for small, local fixes — blemishes, wire/rig removal, skin retouch. Focuses hard on just the area you changed so tiny edits aren\'t washed out, and is tuned to keep skin and texture looking real.',
-    tags:        ['small fixes', 'most popular', 'auto-mask'],
+    description: 'Best for small, local fixes — blemishes, wire/rig removal, skin retouch. Focuses hard on just the area you changed so tiny edits aren\'t washed out, and is tuned to keep skin and texture looking real. Residual mode learns only the edit (src + delta) so jewelry/hair stay sharp.',
+    tags:        ['small fixes', 'most popular', 'auto-mask', 'residual'],
     model:    { model_type: 'msrn', model_size_dims: 64, recurrence_steps: 2 },
     data:     { resolution: 512, overlap_factor: 0.5 },
-    training: { loss: 'l1+lpips', lambda_lpips: 0.2, lr: 1e-4, iterations_per_epoch: 500 },
+    training: { loss: 'l1+lpips', lambda_lpips: 0.2, lr: 1e-4, iterations_per_epoch: 500, predict_residual: true },
     // use_mask_loss + mask_weight=100 are the difference between this preset
     // actually fixing small smudges and the optimizer collapsing to identity.
     // With small ROIs (e.g. a lipstick smudge on a glass that's 0.3% of frame
@@ -96,8 +98,8 @@ export const PRESETS: Record<PresetKey, Preset> = {
   paintout: {
     key:         'paintout',
     name:        'Paintout / Cleanup',
-    description: 'Best for removing large objects and cleaning big areas. Tuned for smooth, even blends across the fill, and skips the untouched parts of the frame so training goes where the work is.',
-    tags:        ['large areas', 'smooth blends', 'auto-mask'],
+    description: 'Best for removing large objects and cleaning big areas. Tuned for smooth, even blends across the fill, and skips the untouched parts of the frame so training goes where the work is. Residual mode keeps untouched pixels as identity.',
+    tags:        ['large areas', 'smooth blends', 'auto-mask', 'residual'],
     model:    { model_type: 'msrn', model_size_dims: 64, recurrence_steps: 2 },
     data:     { resolution: 512, overlap_factor: 0.75 },
     training: {
@@ -108,6 +110,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       l1_weight:        0.5,
       l2_weight:        0.5,
       lpips_weight:     0,
+      predict_residual: true,
     },
     mask:     { use_auto_mask: true, auto_mask_gamma: 0.5 },
     skip_empty_patches: true,
@@ -120,7 +123,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
     tags:        ['matte', 'B/W output'],
     model:    { model_type: 'unet', model_size_dims: 128 },
     data:     { resolution: 512, overlap_factor: 0.25 },
-    training: { loss: 'bce+dice', lambda_lpips: 0, lr: 3e-4, iterations_per_epoch: 500 },
+    training: { loss: 'bce+dice', lambda_lpips: 0, lr: 3e-4, iterations_per_epoch: 500, predict_residual: false },
     mask:     { use_auto_mask: false },
     skip_empty_patches: false,
     progressive_resolution: true,
@@ -159,6 +162,7 @@ export interface AdvancedOverrides {
   l2_weight?:        number
   lpips_weight?:     number
   use_amp?:          boolean
+  predict_residual?: boolean
 
   // Schedule
   batch_size?:                number   // 0 = auto-batch
@@ -270,6 +274,9 @@ export function buildConfig(
   // Resolve common values with fallbacks
   const useAutoMask = overrides.use_auto_mask ?? preset.mask.use_auto_mask
   const loss        = overrides.loss          ?? preset.training.loss
+  const predictResidual = (loss === 'bce+dice')
+    ? false
+    : (overrides.predict_residual ?? preset.training.predict_residual ?? false)
   // Read mask settings from preset first, then override, then hardcoded
   // default — so presets that ship with mask weighting enabled (e.g. Beauty)
   // actually train with weighting on. Pre-presets-with-mask-defaults the
@@ -326,6 +333,7 @@ export function buildConfig(
       // ancient cards without TC support won't see the speedup but won't
       // see harm either; AMP gracefully degrades.
       use_amp:              overrides.use_amp ?? true,
+      predict_residual:     predictResidual,
       ...(loss === 'weighted' ? {
         l1_weight:    overrides.l1_weight   ?? preset.training.l1_weight   ?? 1.0,
         l2_weight:    overrides.l2_weight   ?? preset.training.l2_weight   ?? 0.0,

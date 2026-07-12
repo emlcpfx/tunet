@@ -25,6 +25,7 @@ from config import dict_to_namespace
 from image_io import (load_image_any_format, load_image_linear, load_mask_image,
                       denormalize, denormalize_linear, save_exr, NORM_MEAN, NORM_STD)
 from inference_config import InferenceConfig
+from training.residual import apply_residual
 
 # --- Updated load_model_and_config ---
 def load_model_and_config(checkpoint_path, device):
@@ -51,21 +52,25 @@ def load_model_and_config(checkpoint_path, device):
 
     # <-- CHANGED: Extract model size with fallback -->
     model_size_saved = default_hidden_size # Start with default
+    predict_residual = False
     if is_new_format:
         # Try new key first, then old key within model section
         model_config = getattr(config_source, 'model', SimpleNamespace())
         model_size_saved = getattr(model_config, 'model_size_dims', getattr(model_config, 'unet_hidden_size', default_hidden_size))
-        loss_mode = getattr(getattr(config_source, 'training', SimpleNamespace()), 'loss', default_loss)
+        training_config = getattr(config_source, 'training', SimpleNamespace())
+        loss_mode = getattr(training_config, 'loss', default_loss)
+        predict_residual = bool(getattr(training_config, 'predict_residual', False))
         resolution = getattr(getattr(config_source, 'data', SimpleNamespace()), 'resolution', default_resolution)
         bilinear_mode = default_bilinear # Use class default
     else: # Old format (args)
         # Try new key first (in case args somehow had it), then old key
         model_size_saved = getattr(config_source, 'model_size_dims', getattr(config_source, 'unet_hidden_size', default_hidden_size))
         loss_mode = getattr(config_source, 'loss', default_loss)
+        predict_residual = bool(getattr(config_source, 'predict_residual', False))
         resolution = getattr(config_source, 'resolution', default_resolution)
         bilinear_mode = getattr(config_source, 'bilinear', default_bilinear)
 
-    logging.info(f"Checkpoint parameters: Saved Model Size={model_size_saved}, Loss Mode='{loss_mode}', Resolution={resolution}, Bilinear={bilinear_mode}")
+    logging.info(f"Checkpoint parameters: Saved Model Size={model_size_saved}, Loss Mode='{loss_mode}', Resolution={resolution}, Bilinear={bilinear_mode}, Residual={predict_residual}")
 
     # Calculate Effective Hidden Size (using extracted model_size_saved)
     hq_default_bump_size = 96 # Match training script
@@ -115,8 +120,10 @@ def load_model_and_config(checkpoint_path, device):
         color_space = getattr(getattr(config_source, 'data', SimpleNamespace()), 'color_space', 'srgb')
     if color_space == 'linear':
         logging.info("Model trained in linear (scene-linear) color space — will use log-space encoding.")
+    if predict_residual:
+        logging.info("Residual prediction: inference will compose out = src + delta.")
 
-    return model, resolution, use_mask_input, loss_mode, color_space
+    return model, resolution, use_mask_input, loss_mode, color_space, predict_residual
 
 # --- create_blend_mask ---
 # ... (remains the same) ...
@@ -217,6 +224,8 @@ def process_image(model, image_path, output_path, cfg: InferenceConfig, transfor
                 batch_output_tensor = model(batch_src_tensor)
                 if cfg.loss_mode == 'bce+dice':
                     batch_output_tensor = torch.sigmoid(batch_output_tensor)
+                elif cfg.predict_residual:
+                    batch_output_tensor = apply_residual(batch_output_tensor, batch_src_tensor)
             batch_output_tensor_cpu = batch_output_tensor.cpu().float()
             for j, coords in enumerate(batch_coords):
                 x, y, _, _ = coords
@@ -326,6 +335,8 @@ def process_image_batch(model, frame_imgs, write_paths, cfg: InferenceConfig,
             outputs = model(batch)
             if cfg.loss_mode == 'bce+dice':
                 outputs = torch.sigmoid(outputs)
+            elif cfg.predict_residual:
+                outputs = apply_residual(outputs, batch)
 
     outputs_cpu = outputs.cpu().float()
 
@@ -401,7 +412,7 @@ if __name__ == "__main__":
         args.use_amp = False
 
     try:
-        model, resolution, use_mask_input, loss_mode, color_space = load_model_and_config(args.checkpoint, device)
+        model, resolution, use_mask_input, loss_mode, color_space, predict_residual = load_model_and_config(args.checkpoint, device)
     except Exception as e:
         logging.error(f"Failed to load model: {e}", exc_info=True)
         exit(1)
@@ -460,7 +471,8 @@ if __name__ == "__main__":
             resolution=resolution, stride=stride, device=device,
             batch_size=args.batch_size, use_amp=args.use_amp,
             half_res=args.half_res, use_mask_input=use_mask_input,
-            loss_mode=loss_mode, color_space=color_space)
+            loss_mode=loss_mode, color_space=color_space,
+            predict_residual=predict_residual)
         process_image(model, img_path, output_path, inf_cfg, transform, denorm_fn,
                       mask_path=mask_path)
 

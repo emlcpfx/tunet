@@ -12,6 +12,7 @@ from distributed import is_main_process
 from image_io.image_loader import denormalize, denormalize_linear
 from .context import PreviewContext
 from .loss import diff_heatmap, refine_auto_mask, compute_auto_mask
+from .residual import apply_residual
 from .dataloader_utils import collate_skip_none
 
 
@@ -57,6 +58,8 @@ def save_previews(ctx: PreviewContext, fixed_src_batch, fixed_dst_batch,
             predicted_batch = model_module(model_input)
             if ctx.use_bce_dice:
                 predicted_batch = torch.sigmoid(predicted_batch)
+            elif ctx.predict_residual:
+                predicted_batch = apply_residual(predicted_batch, model_input)
         pred_select = predicted_batch.cpu().float()
     except Exception as e:
         logging.error(f"Preview inference error (Step {ctx.global_step}): {e}")
@@ -184,6 +187,8 @@ def save_val_previews(ctx: PreviewContext, fixed_src_batch, fixed_dst_batch):
             predicted_batch = model_module(model_input)
             if ctx.use_bce_dice:
                 predicted_batch = torch.sigmoid(predicted_batch)
+            elif ctx.predict_residual:
+                predicted_batch = apply_residual(predicted_batch, model_input)
         pred_select = predicted_batch.cpu().float()
     except Exception as e:
         logging.error(f"Val preview inference error (Step {ctx.global_step}): {e}")
