@@ -13,7 +13,7 @@ import re
 _SRC_SUFFIXES = ('_src', '_source', '_in', '_input')
 _DST_SUFFIXES = ('_dst', '_dest', '_destination', '_out', '_output', '_target')
 
-_IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.bmp', '.webp', '.tiff', '.tif', '.exr')
+_IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.bmp', '.webp', '.tiff', '.tif', '.exr', '.dpx')
 
 # Pre-compiled pattern: match any src suffix at end of stem (case-insensitive)
 _SRC_SUFFIX_RE = re.compile(
@@ -42,21 +42,38 @@ def find_dst_file(src_path, dst_dir):
     basename = os.path.basename(src_path)
     stem, src_ext = os.path.splitext(basename)
 
-    # 1 & 2: Try exact name, then cross-extension
-    for ext in _unique_exts(src_ext):
-        candidate = os.path.join(dst_dir, stem + ext)
-        if os.path.exists(candidate):
-            return candidate
+    # Some pipelines emit a stray trailing dot in the frame name (e.g. "shot_01001..dpx"
+    # -> stem "shot_01001."). Try both the literal stem and a dot-trimmed variant so a
+    # source's dot convention doesn't have to match the destination's exactly.
+    stems = [stem]
+    trimmed = stem.rstrip('.')
+    if trimmed != stem:
+        stems.append(trimmed)
 
-    # 3: Suffix swap — only if the stem ends with a recognized src suffix
-    core, matched_suffix = _strip_src_suffix(stem)
-    if matched_suffix is not None:
+    # 1 & 2: Try exact name, then cross-extension (for each stem variant)
+    for s in stems:
+        for ext in _unique_exts(src_ext):
+            candidate = os.path.join(dst_dir, s + ext)
+            if os.path.exists(candidate):
+                return candidate
+
+    # 3: Suffix swap — only if the stem ends with a recognized src suffix.
+    # A stray trailing dot may sit before the src suffix; strip it for matching but
+    # also try re-appending it so either dot convention on the destination is found.
+    had_trailing_dot = stem != trimmed
+    for s in stems:
+        core, matched_suffix = _strip_src_suffix(s)
+        if matched_suffix is None:
+            continue
         for dst_sfx in _DST_SUFFIXES:
-            dst_stem = core + dst_sfx
-            for ext in _unique_exts(src_ext):
-                candidate = os.path.join(dst_dir, dst_stem + ext)
-                if os.path.exists(candidate):
-                    return candidate
+            dst_stems = [core + dst_sfx]
+            if had_trailing_dot:
+                dst_stems.append(core + dst_sfx + '.')
+            for dst_stem in dst_stems:
+                for ext in _unique_exts(src_ext):
+                    candidate = os.path.join(dst_dir, dst_stem + ext)
+                    if os.path.exists(candidate):
+                        return candidate
 
     return None
 

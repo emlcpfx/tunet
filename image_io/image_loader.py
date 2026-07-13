@@ -1,4 +1,5 @@
 import os
+import struct
 import logging
 
 import numpy as np
@@ -182,12 +183,109 @@ def load_exr_full_frame(image_path):
     raise ValueError(f"Failed to load EXR file: {image_path}. Install OpenEXR library: pip install OpenEXR")
 
 
+def load_dpx(image_path):
+    """Load a DPX (SMPTE 268M) file as a float32 (H, W, 3) RGB array in [0, 1].
+
+    Self-contained reader — DPX is a fixed-layout format, so no external library is
+    required. Handles the common uncompressed flavours produced by film-scan / VFX
+    pipelines: 8-, 10-, 12- and 16-bit, RGB / RGBA / single-channel.
+
+    Values are the raw normalized code values (log DPX is *not* linearized here) so
+    the file is treated like any other non-EXR image by the rest of the pipeline.
+    Raises ValueError on formats we don't decode (e.g. RLE compression), so the
+    dataset skips the file with a clear reason instead of crashing.
+    """
+    with open(image_path, 'rb') as f:
+        raw = f.read()
+    if len(raw) < 812:
+        raise ValueError(f"DPX truncated or too small ({len(raw)} bytes): {image_path}")
+
+    magic = raw[:4]
+    if magic == b'SDPX':
+        end = '>'          # big-endian
+    elif magic == b'XPDS':
+        end = '<'          # little-endian
+    else:
+        raise ValueError(f"Not a DPX file (bad magic {magic!r}): {image_path}")
+
+    u16 = lambda off: struct.unpack_from(end + 'H', raw, off)[0]
+    u32 = lambda off: struct.unpack_from(end + 'I', raw, off)[0]
+
+    data_off_file = u32(4)          # generic header: offset to image data
+    width = u32(772)
+    height = u32(776)
+    descriptor = raw[800]           # image element 0 descriptor
+    bit_depth = raw[803]
+    encoding = u16(806)             # 0 = none, 1 = RLE
+    elem_off = u32(808)
+    data_off = elem_off if elem_off not in (0, 0xFFFFFFFF) else data_off_file
+
+    if width == 0 or height == 0:
+        raise ValueError(f"DPX has zero dimensions ({width}x{height}): {image_path}")
+    if encoding == 1:
+        raise ValueError(f"RLE-compressed DPX not supported: {image_path}")
+
+    if descriptor == 50:            # RGB
+        ch = 3
+    elif descriptor in (51, 52):    # RGBA / ABGR
+        ch = 4
+    elif descriptor in (1, 2, 3, 4, 6):  # single component (red/green/blue/alpha/luma)
+        ch = 1
+    else:
+        raise ValueError(f"Unsupported DPX descriptor {descriptor} (need RGB/RGBA/luma): {image_path}")
+
+    buf = raw[data_off:]
+
+    if bit_depth == 10:
+        if ch != 3:
+            raise ValueError(f"10-bit DPX only supported for RGB, got descriptor {descriptor}: {image_path}")
+        need = width * height
+        if len(buf) < need * 4:
+            raise ValueError(f"DPX pixel data short: need {need * 4} bytes, have {len(buf)} "
+                             f"(line padding or non-standard packing?): {image_path}")
+        words = np.frombuffer(buf, dtype=np.dtype(end + 'u4'), count=need).astype(np.uint32)
+        r = (words >> 22) & 0x3FF
+        g = (words >> 12) & 0x3FF
+        b = (words >> 2) & 0x3FF
+        arr = np.stack([r, g, b], axis=-1).astype(np.float32).reshape(height, width, 3) / 1023.0
+    else:
+        if bit_depth == 8:
+            dt, maxv = np.uint8, 255.0
+        elif bit_depth == 12:
+            dt, maxv = np.dtype(end + 'u2'), 4095.0   # Method A: 12 bits right-justified in 16
+        elif bit_depth == 16:
+            dt, maxv = np.dtype(end + 'u2'), 65535.0
+        else:
+            raise ValueError(f"Unsupported DPX bit depth {bit_depth}: {image_path}")
+        need = width * height * ch
+        itemsize = np.dtype(dt).itemsize
+        if len(buf) < need * itemsize:
+            raise ValueError(f"DPX pixel data short: need {need * itemsize} bytes, have {len(buf)}: {image_path}")
+        samples = np.frombuffer(buf, dtype=dt, count=need).astype(np.float32)
+        if bit_depth == 12:
+            samples = np.mod(samples, 4096.0)         # mask to low 12 bits
+        arr = (samples / maxv).reshape(height, width, ch)
+
+    if ch == 1:
+        arr = np.repeat(arr, 3, axis=2)
+    elif ch == 4:
+        if descriptor == 52:        # ABGR -> RGB
+            arr = arr[:, :, 3:0:-1]
+        else:                       # RGBA -> RGB
+            arr = arr[:, :, :3]
+    return np.ascontiguousarray(arr, dtype=np.float32)
+
+
 def load_image_any_format(image_path):
     """Load an image in any format including EXR. Returns a PIL Image in RGB mode."""
     _, ext = os.path.splitext(image_path.lower())
     if ext == '.exr':
         img_float = load_exr_full_frame(image_path)
         np.nan_to_num(img_float, copy=False, nan=0.0, posinf=1.0, neginf=0.0)
+        img_8bit = np.clip(img_float * 255, 0, 255).astype(np.uint8)
+        return Image.fromarray(img_8bit, mode='RGB')
+    elif ext == '.dpx':
+        img_float = load_dpx(image_path)  # (H,W,3) float32 in [0,1]
         img_8bit = np.clip(img_float * 255, 0, 255).astype(np.uint8)
         return Image.fromarray(img_8bit, mode='RGB')
     else:
@@ -206,6 +304,10 @@ def load_image_linear(image_path):
         img_float = load_exr_full_frame(image_path)
         np.nan_to_num(img_float, copy=False, nan=0.0, posinf=10.0, neginf=0.0)
         return np.clip(img_float, 0.0, None)  # allow >1.0, clamp negatives
+    elif ext == '.dpx':
+        img_float = load_dpx(image_path)  # (H,W,3) float32 in [0,1]
+        np.nan_to_num(img_float, copy=False, nan=0.0, posinf=1.0, neginf=0.0)
+        return np.clip(img_float, 0.0, None)
     else:
         img = Image.open(image_path).convert('RGB')
         return np.array(img, dtype=np.float32) / 255.0

@@ -37,7 +37,7 @@ def verify_dataset(src_dir, dst_dir, mask_dir=None, resolution=512, color_space=
 
     src_files = sorted(glob.glob(os.path.join(os.path.abspath(src_dir), '*.*')))
     # Filter to known image extensions
-    image_exts = {'.png', '.jpg', '.jpeg', '.bmp', '.webp', '.tiff', '.tif', '.exr'}
+    image_exts = {'.png', '.jpg', '.jpeg', '.bmp', '.webp', '.tiff', '.tif', '.exr', '.dpx'}
     src_files = [f for f in src_files if os.path.splitext(f)[1].lower() in image_exts]
 
     if not src_files:

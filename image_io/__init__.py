@@ -3,6 +3,7 @@ from .image_loader import (
     load_image_linear,
     load_mask_image,
     load_exr_full_frame,
+    load_dpx,
     save_exr,
     HAS_OPENEXR,
     NORM_MEAN,
