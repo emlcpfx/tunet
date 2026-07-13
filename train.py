@@ -1055,7 +1055,15 @@ def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion
 
     # --- Forward + Loss (shared logic for AMP and non-AMP) ---
     def _forward_and_loss(model_input, dst):
-        out = model(model_input)
+        # Model forward keeps AMP (fp16) for speed/memory; the LOSS is computed in
+        # fp32. fp16 LPIPS (VGG backbone) and the squared/reduced L2 term can exceed
+        # fp16's ~65504 range and poison the loss with NaN/Inf — the classic AMP
+        # training failure. Running the loss in fp32 fixes it while keeping the
+        # forward fast. When AMP is off this is a no-op (tensors are already fp32).
+        with autocast(device_type=device_type, enabled=use_amp_eff):
+            out = model(model_input)
+        out = out.float()
+        dst = dst.float()
         if use_bce_dice:
             dst_01 = dst * 0.5 + 0.5
             bce_total = torch.tensor(0.0, device=device)
@@ -1072,7 +1080,7 @@ def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion
             out = torch.sigmoid(out)
         else:
             if predict_residual:
-                out = apply_residual(out, model_input)
+                out = apply_residual(out, model_input.float())
             if use_mask_loss and mask_batch is not None:
                 weight_map = 1.0 + mask_batch * (config.mask.mask_weight - 1.0)
                 l1 = (torch.abs(out - dst) * weight_map).mean()
@@ -1168,12 +1176,8 @@ def _compute_training_step(model, model_input, dst, optimizer, scaler, criterion
         l2_out = l2_val if not use_bce_dice else torch.tensor(0.0, device=device)
         return out, l1, lp, l2_out, loss
 
-    # --- AMP vs non-AMP execution ---
-    if use_amp_eff:
-        with autocast(device_type=device_type, enabled=True):
-            out, l1, lp, l2_val, loss = _forward_and_loss(model_input, dst)
-    else:
-        out, l1, lp, l2_val, loss = _forward_and_loss(model_input, dst)
+    # --- Forward (AMP inside _forward_and_loss) + fp32 loss ---
+    out, l1, lp, l2_val, loss = _forward_and_loss(model_input, dst)
 
     # --- Check for NaN/Inf loss ---
     if not torch.isfinite(loss):
