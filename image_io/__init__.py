@@ -1,6 +1,7 @@
 from .image_loader import (
     load_image_any_format,
     load_image_linear,
+    load_image_srgb,
     load_mask_image,
     load_exr_full_frame,
     load_dpx,

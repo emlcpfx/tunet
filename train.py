@@ -41,7 +41,7 @@ from albumentations.pytorch import ToTensorV2
 from distributed import setup_ddp, cleanup_ddp, get_rank, get_world_size, is_main_process, CURRENT_OS
 from models import create_model, UNet, MSRNet
 from utils.pair_matching import find_dst_file
-from image_io import (load_image_any_format, load_image_linear, load_mask_image,
+from image_io import (load_image_any_format, load_image_linear, load_image_srgb, load_mask_image,
                       load_exr_full_frame, NORM_MEAN, NORM_STD, denormalize,
                       denormalize_linear, linear_to_log, log_to_linear)
 from config import config_to_dict, dict_to_sns, merge_configs
@@ -116,8 +116,9 @@ def create_augmentations(augmentation_list, has_mask=False, use_auto_mask=False)
 _SLICE_INFO_CACHE = {}
 
 # --- Image pixel cache (process-level, avoids re-decoding the same image file) ---
-# Key: absolute file path  |  Value: decoded numpy HWC array
-# Linear images: float32 linear RGB  |  sRGB images: uint8 RGB
+# Key: absolute file path  |  Value: decoded float32 HWC array
+# Linear images: float32 linear RGB (may exceed 1.0)  |  sRGB images: float32 RGB in [0,1]
+# Both paths keep full bit depth — no 8-bit round-trip (critical for 16-bit VFX plates).
 _IMAGE_PIXEL_CACHE: dict = {}
 
 def _load_cached_image(path: str, is_linear: bool) -> np.ndarray:
@@ -126,9 +127,7 @@ def _load_cached_image(path: str, is_linear: bool) -> np.ndarray:
         if is_linear:
             _IMAGE_PIXEL_CACHE[path] = load_image_linear(path)
         else:
-            img = load_image_any_format(path)
-            _IMAGE_PIXEL_CACHE[path] = np.array(img)
-            img.close()
+            _IMAGE_PIXEL_CACHE[path] = load_image_srgb(path)  # float32 [0,1], full precision
     return _IMAGE_PIXEL_CACHE[path]
 
 def _dataset_cache_key(src_dir, dst_dir, resolution, overlap_factor,
@@ -344,21 +343,31 @@ class AugmentedImagePairSlicingDataset(Dataset):
                 norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist())
                 src_tensor, dst_tensor = norm(src_tensor), norm(dst_tensor)
             else:
-                # --- sRGB uint8 path (original) ---
-                # src_img_np / dst_img_np are uint8 HWC from cache — slice directly
+                # --- sRGB path (float32 [0,1], full bit depth preserved) ---
+                # src_img_np / dst_img_np are float32 HWC in [0,1] from cache — no 8-bit
+                # round-trip, so 16-bit VFX plates keep their precision through training.
                 use_numpy = isinstance(self.shared_transforms, A.Compose) or isinstance(self.src_transforms, A.Compose) or isinstance(self.dst_transforms, A.Compose)
+                uses_torchvision = isinstance(self.shared_transforms, T.Compose) or isinstance(self.src_transforms, T.Compose) or isinstance(self.dst_transforms, T.Compose)
                 src_slice_current = src_img_np[y1:y2, x1:x2].copy()
                 dst_slice_current = dst_img_np[y1:y2, x1:x2].copy()
-                if not use_numpy:
-                    src_slice_current = Image.fromarray(src_slice_current)
-                    dst_slice_current = Image.fromarray(dst_slice_current)
 
-                # Compute auto-mask raw diff BEFORE augmentation (no border artifacts)
+                # Only the legacy torchvision-augmentation path needs 8-bit PIL images.
+                # Albumentations (numpy) and the no-augmentation path stay float32.
+                to_pil_uint8 = uses_torchvision and not use_numpy
+                if to_pil_uint8:
+                    src_slice_current = Image.fromarray(np.clip(src_slice_current * 255.0, 0, 255).astype(np.uint8))
+                    dst_slice_current = Image.fromarray(np.clip(dst_slice_current * 255.0, 0, 255).astype(np.uint8))
+
+                # Compute auto-mask raw diff BEFORE augmentation (no border artifacts).
+                # Diff is in [0,1]: float slices are already normalized; uint8 PIL is /255.
                 auto_mask_slice = None
                 if self.use_auto_mask:
-                    src_np = src_slice_current if use_numpy else np.array(src_slice_current)
-                    dst_np = dst_slice_current if use_numpy else np.array(dst_slice_current)
-                    auto_mask_slice = np.abs(src_np.astype(np.float32) - dst_np.astype(np.float32)).mean(axis=2) / 255.0
+                    if to_pil_uint8:
+                        src_np = np.asarray(src_slice_current, dtype=np.float32) / 255.0
+                        dst_np = np.asarray(dst_slice_current, dtype=np.float32) / 255.0
+                    else:
+                        src_np, dst_np = src_slice_current, dst_slice_current
+                    auto_mask_slice = np.abs(src_np - dst_np).mean(axis=2)
 
                 if self.shared_transforms:
                     if isinstance(self.shared_transforms, A.Compose):
@@ -378,12 +387,21 @@ class AugmentedImagePairSlicingDataset(Dataset):
                     elif isinstance(self.dst_transforms, T.Compose): dst_slice_current = self.dst_transforms(dst_slice_current)
 
                 if self.final_transform:
-                    if use_numpy: src_final_input, dst_final_input = Image.fromarray(src_slice_current), Image.fromarray(dst_slice_current)
-                    else: src_final_input, dst_final_input = src_slice_current, dst_slice_current
+                    # final_transform = ToTensor + Normalize. ToTensor does NOT rescale
+                    # float arrays, so feeding float32 [0,1] numpy keeps full precision;
+                    # the legacy uint8 PIL path is scaled by /255 by ToTensor as before.
+                    if to_pil_uint8:
+                        src_final_input, dst_final_input = src_slice_current, dst_slice_current
+                    else:
+                        src_final_input = np.ascontiguousarray(src_slice_current, dtype=np.float32)
+                        dst_final_input = np.ascontiguousarray(dst_slice_current, dtype=np.float32)
                     src_tensor, dst_tensor = self.final_transform(src_final_input), self.final_transform(dst_final_input)
                 else:
-                    if not use_numpy: src_slice_current, dst_slice_current = np.array(src_slice_current), np.array(dst_slice_current)
-                    src_tensor = torch.from_numpy(src_slice_current.transpose(2, 0, 1)).float() / 255.0; dst_tensor = torch.from_numpy(dst_slice_current.transpose(2, 0, 1)).float() / 255.0
+                    if to_pil_uint8:
+                        src_slice_current = np.asarray(src_slice_current, dtype=np.float32) / 255.0
+                        dst_slice_current = np.asarray(dst_slice_current, dtype=np.float32) / 255.0
+                    src_tensor = torch.from_numpy(np.ascontiguousarray(src_slice_current.transpose(2, 0, 1))).float()
+                    dst_tensor = torch.from_numpy(np.ascontiguousarray(dst_slice_current.transpose(2, 0, 1))).float()
                     norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist()); src_tensor, dst_tensor = norm(src_tensor), norm(dst_tensor)
             # Convert mask to tensor (1, H, W) in [0,1] - no normalization
             if mask_slice is not None:

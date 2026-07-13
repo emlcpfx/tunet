@@ -331,6 +331,31 @@ def load_image_any_format(image_path):
         return Image.open(image_path).convert('RGB')
 
 
+def load_image_srgb(image_path):
+    """Load an image as float32 (H, W, 3) RGB in [0, 1] at full bit depth.
+
+    The sRGB / display-referred counterpart to load_image_linear: values are the
+    normalized code values clamped to [0, 1] (no log encoding). Unlike the legacy
+    8-bit PIL path, this preserves 16-bit precision for DPX / TIFF / EXR sources —
+    which matters for VFX, where banding from an 8-bit round-trip is unacceptable.
+    """
+    _, ext = os.path.splitext(image_path.lower())
+    if ext == '.exr':
+        img = load_exr_full_frame(image_path)
+        np.nan_to_num(img, copy=False, nan=0.0, posinf=1.0, neginf=0.0)
+        return np.clip(img, 0.0, 1.0)
+    elif ext == '.dpx':
+        img = load_dpx(image_path)
+        return np.clip(img, 0.0, 1.0)
+    elif ext in ('.tif', '.tiff'):
+        img = load_tiff(image_path)
+        np.nan_to_num(img, copy=False, nan=0.0, posinf=1.0, neginf=0.0)
+        return np.clip(img, 0.0, 1.0)
+    else:
+        img = Image.open(image_path).convert('RGB')
+        return np.ascontiguousarray(np.asarray(img, dtype=np.float32) / 255.0)
+
+
 def load_image_linear(image_path):
     """Load an image preserving float32 linear values (H,W,3).
 
