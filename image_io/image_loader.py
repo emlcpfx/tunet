@@ -132,51 +132,71 @@ def _read_exr_channel_2d(exr_file, header, ch_name, dw):
     return arr
 
 
+def _load_exr_opencv(image_path):
+    """Load EXR via OpenCV as float32 RGB (H, W, 3)."""
+    img_cv = cv2.imread(image_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+    if img_cv is None:
+        return None
+    if len(img_cv.shape) == 3 and img_cv.shape[2] >= 3:
+        return cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)[:, :, :3].astype(np.float32)
+    if len(img_cv.shape) == 2:
+        return np.stack([img_cv, img_cv, img_cv], axis=2).astype(np.float32)
+    return None
+
+
 def load_exr_full_frame(image_path):
     """Load an EXR file as a float32 RGB numpy array using the displayWindow.
 
     EXR files have a displayWindow (full frame) and dataWindow (bounding box of actual data).
     OpenCV only reads the dataWindow, which gives wrong dimensions for compositing EXRs.
     This function always returns a full displayWindow-sized image with dataWindow placed correctly.
+
+    Non-RGB layouts (e.g. Y/RY/BY chroma-subsampled) and OpenEXR read failures fall back
+    to OpenCV, which handles many comp-pipeline EXRs that the Python OpenEXR bindings choke on.
     """
     if HAS_OPENEXR:
-        exr_file = OpenEXR.InputFile(image_path)
-        header = exr_file.header()
+        try:
+            exr_file = OpenEXR.InputFile(image_path)
+            header = exr_file.header()
 
-        disp = header['displayWindow']
-        disp_width = disp.max.x - disp.min.x + 1
-        disp_height = disp.max.y - disp.min.y + 1
+            disp = header['displayWindow']
+            disp_width = disp.max.x - disp.min.x + 1
+            disp_height = disp.max.y - disp.min.y + 1
 
-        dw = header['dataWindow']
-        dw_width = dw.max.x - dw.min.x + 1
-        dw_height = dw.max.y - dw.min.y + 1
+            dw = header['dataWindow']
+            dw_width = dw.max.x - dw.min.x + 1
+            dw_height = dw.max.y - dw.min.y + 1
 
-        channels = ['R', 'G', 'B']
-        available = list(header['channels'].keys())
-        if not all(c in available for c in channels):
-            arr = _read_exr_channel_2d(exr_file, header, available[0], dw)
-            img_channels = [arr, arr, arr]
-        else:
+            channels = ['R', 'G', 'B']
+            available = list(header['channels'].keys())
+            if not all(c in available for c in channels):
+                # e.g. Y + subsampled RY/BY — old code picked available[0] (BY) and
+                # reshaped to full frame → "cannot reshape … into shape (3024,4096)".
+                raise ValueError(
+                    f"non-RGB channels {available}; using OpenCV fallback"
+                )
+
             img_channels = [_read_exr_channel_2d(exr_file, header, c, dw) for c in channels]
-        data_img = np.stack(img_channels, axis=2)
+            data_img = np.stack(img_channels, axis=2)
 
-        if (dw.min.x == disp.min.x and dw.min.y == disp.min.y
-                and dw_width == disp_width and dw_height == disp_height):
-            return data_img
+            if (dw.min.x == disp.min.x and dw.min.y == disp.min.y
+                    and dw_width == disp_width and dw_height == disp_height):
+                return data_img
 
-        full_img = np.zeros((disp_height, disp_width, 3), dtype=np.float32)
-        x_off = dw.min.x - disp.min.x
-        y_off = dw.min.y - disp.min.y
-        full_img[y_off:y_off + dw_height, x_off:x_off + dw_width, :] = data_img
-        return full_img
+            full_img = np.zeros((disp_height, disp_width, 3), dtype=np.float32)
+            x_off = dw.min.x - disp.min.x
+            y_off = dw.min.y - disp.min.y
+            full_img[y_off:y_off + dw_height, x_off:x_off + dw_width, :] = data_img
+            return full_img
+        except Exception as e:
+            logging.warning(
+                f"OpenEXR load failed ({e}), falling back to OpenCV: {image_path}"
+            )
 
-    img_cv = cv2.imread(image_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+    img_cv = _load_exr_opencv(image_path)
     if img_cv is not None:
-        if len(img_cv.shape) == 3 and img_cv.shape[2] >= 3:
-            img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)[:, :, :3].astype(np.float32)
-        elif len(img_cv.shape) == 2:
-            img_cv = np.stack([img_cv, img_cv, img_cv], axis=2).astype(np.float32)
-        logging.warning(f"Loaded EXR with OpenCV (no displayWindow support): {image_path}")
+        if not HAS_OPENEXR:
+            logging.warning(f"Loaded EXR with OpenCV (OpenEXR not installed): {image_path}")
         return img_cv
 
     raise ValueError(f"Failed to load EXR file: {image_path}. Install OpenEXR library: pip install OpenEXR")
