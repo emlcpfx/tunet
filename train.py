@@ -462,12 +462,20 @@ class SourceOnlySlicingDataset(Dataset):
                 norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist())
                 return norm(src_tensor)
             else:
-                src_img = load_image_any_format(info['src_path'])
-                if info['crop_box'] is not None: src_slice = src_img.crop(info['crop_box'])
-                else: src_slice = src_img.resize((self.resolution, self.resolution), Image.LANCZOS)
-                src_img.close()
-                if self.final_transform: src_tensor = self.final_transform(src_slice)
-                else: src_np = np.array(src_slice); src_tensor = torch.from_numpy(src_np.transpose(2, 0, 1)).float() / 255.0; norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist()); src_tensor = norm(src_tensor)
+                # sRGB preview at full bit depth (float32 [0,1]) — no 8-bit round-trip.
+                src_np = load_image_srgb(info['src_path'])
+                if info['crop_box'] is not None:
+                    x1, y1, x2, y2 = info['crop_box']
+                    src_slice_np = src_np[y1:y2, x1:x2]
+                else:
+                    src_slice_np = cv2.resize(src_np, (self.resolution, self.resolution), interpolation=cv2.INTER_LANCZOS4)
+                src_slice_np = np.ascontiguousarray(src_slice_np, dtype=np.float32)
+                if self.final_transform:
+                    # ToTensor does not rescale float arrays, so float32 [0,1] is preserved.
+                    src_tensor = self.final_transform(src_slice_np)
+                else:
+                    src_tensor = torch.from_numpy(src_slice_np.transpose(2, 0, 1)).float()
+                    norm = T.Normalize(mean=NORM_MEAN.tolist(), std=NORM_STD.tolist()); src_tensor = norm(src_tensor)
                 return src_tensor
         except Exception as e: logging.error(f"SrcOnly item {idx} error: {e}"); return None
 
