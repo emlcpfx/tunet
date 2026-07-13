@@ -343,6 +343,14 @@ class AugmentedImagePairSlicingDataset(Dataset):
                     if mask_slice is not None: mask_slice = aug['loss_mask']
                     if auto_mask_slice is not None: auto_mask_slice = aug['auto_mask']
 
+                # Per-side augmentations (src-only / dst-only). Albumentations only,
+                # matching the shared-transform handling above — the linear path works
+                # on float32 numpy, so torchvision (PIL/tensor) pipelines don't apply.
+                if self.src_transforms and isinstance(self.src_transforms, A.Compose):
+                    src_slice_current = self.src_transforms(image=src_slice_current)['image']
+                if self.dst_transforms and isinstance(self.dst_transforms, A.Compose):
+                    dst_slice_current = self.dst_transforms(image=dst_slice_current)['image']
+
                 # Apply log1p encoding then normalize to [-1,1]
                 src_log = np.log1p(np.clip(src_slice_current, 0.0, None))
                 dst_log = np.log1p(np.clip(dst_slice_current, 0.0, None))
