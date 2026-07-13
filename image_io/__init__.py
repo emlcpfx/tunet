@@ -4,6 +4,7 @@ from .image_loader import (
     load_mask_image,
     load_exr_full_frame,
     load_dpx,
+    load_tiff,
     save_exr,
     HAS_OPENEXR,
     NORM_MEAN,

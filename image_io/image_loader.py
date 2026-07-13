@@ -276,6 +276,41 @@ def load_dpx(image_path):
     return np.ascontiguousarray(arr, dtype=np.float32)
 
 
+def load_tiff(image_path):
+    """Load a TIFF as float32 (H, W, 3) RGB, preserving bit depth.
+
+    Reads via OpenCV so 16-bit and 32-bit-float TIFFs keep their precision — PIL's
+    ``convert('RGB')`` would collapse them to 8-bit. Integer TIFFs are normalized to
+    [0, 1] by their bit depth; float TIFFs are returned as-is (values may exceed 1.0,
+    like EXR). Falls back to PIL for anything OpenCV can't decode.
+    """
+    img = cv2.imread(image_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+    if img is None:
+        pil = Image.open(image_path).convert('RGB')
+        return np.array(pil, dtype=np.float32) / 255.0
+
+    if img.dtype == np.uint8:
+        maxv = 255.0
+    elif img.dtype == np.uint16:
+        maxv = 65535.0
+    elif img.dtype in (np.float32, np.float64):
+        maxv = 1.0                       # already normalized / scene-linear; preserve range
+    else:
+        maxv = float(np.iinfo(img.dtype).max)
+
+    arr = img.astype(np.float32)
+    if arr.ndim == 2:                    # grayscale -> RGB
+        arr = np.repeat(arr[:, :, None], 3, axis=2)
+    elif arr.shape[2] == 4:              # BGRA -> RGB
+        arr = cv2.cvtColor(arr, cv2.COLOR_BGRA2RGB)
+    else:                                # BGR (>=3 channels) -> RGB
+        arr = cv2.cvtColor(arr[:, :, :3], cv2.COLOR_BGR2RGB)
+
+    if maxv != 1.0:
+        arr = arr / maxv
+    return np.ascontiguousarray(arr, dtype=np.float32)
+
+
 def load_image_any_format(image_path):
     """Load an image in any format including EXR. Returns a PIL Image in RGB mode."""
     _, ext = os.path.splitext(image_path.lower())
@@ -288,6 +323,10 @@ def load_image_any_format(image_path):
         img_float = load_dpx(image_path)  # (H,W,3) float32 in [0,1]
         img_8bit = np.clip(img_float * 255, 0, 255).astype(np.uint8)
         return Image.fromarray(img_8bit, mode='RGB')
+    elif ext in ('.tif', '.tiff'):
+        img_float = load_tiff(image_path)  # (H,W,3) float32, bit-depth preserved
+        img_8bit = np.clip(img_float * 255, 0, 255).astype(np.uint8)
+        return Image.fromarray(img_8bit, mode='RGB')
     else:
         return Image.open(image_path).convert('RGB')
 
@@ -295,9 +334,9 @@ def load_image_any_format(image_path):
 def load_image_linear(image_path):
     """Load an image preserving float32 linear values (H,W,3).
 
-    EXR files are kept as scene-linear float32.  Other formats are read as
-    uint8 and converted to [0,1] float32 (assumed to already be linear or
-    close enough for the user's purposes).
+    EXR, DPX and TIFF are read at full bit depth (16-bit / 32-bit-float preserved).
+    Other formats are read as uint8 and converted to [0,1] float32 (assumed to
+    already be linear or close enough for the user's purposes).
     """
     _, ext = os.path.splitext(image_path.lower())
     if ext == '.exr':
@@ -308,6 +347,10 @@ def load_image_linear(image_path):
         img_float = load_dpx(image_path)  # (H,W,3) float32 in [0,1]
         np.nan_to_num(img_float, copy=False, nan=0.0, posinf=1.0, neginf=0.0)
         return np.clip(img_float, 0.0, None)
+    elif ext in ('.tif', '.tiff'):
+        img_float = load_tiff(image_path)  # (H,W,3) float32, bit-depth preserved
+        np.nan_to_num(img_float, copy=False, nan=0.0, posinf=10.0, neginf=0.0)
+        return np.clip(img_float, 0.0, None)  # allow >1.0 for float TIFFs, clamp negatives
     else:
         img = Image.open(image_path).convert('RGB')
         return np.array(img, dtype=np.float32) / 255.0
@@ -359,6 +402,9 @@ def load_mask_image(image_path):
         else:
             mask = img_cv
         return np.clip(mask.astype(np.float32), 0.0, 1.0)
+    elif ext in ('.tif', '.tiff'):
+        rgb = load_tiff(image_path)          # (H,W,3) float32, bit-depth preserved
+        return np.clip(rgb.mean(axis=2), 0.0, 1.0)
     else:
         img = Image.open(image_path).convert('L')
         return np.array(img, dtype=np.float32) / 255.0
