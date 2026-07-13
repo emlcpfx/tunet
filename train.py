@@ -56,7 +56,7 @@ from training.dataloader_utils import cycle, collate_skip_none, auto_detect_num_
 # --- Data Loading and Augmentation ---
 
 # --- Augmentation Creation Function ---
-def create_augmentations(augmentation_list, has_mask=False, use_auto_mask=False):
+def create_augmentations(augmentation_list, has_mask=False, use_auto_mask=False, paired=False):
     transforms = []
     uses_albumentations = False
     if not isinstance(augmentation_list, list):
@@ -103,6 +103,12 @@ def create_augmentations(augmentation_list, has_mask=False, use_auto_mask=False)
     if uses_albumentations:
         logging.debug(f"Creating Albumentations pipeline ({len(transforms)} steps).")
         additional_targets = {}
+        # dst is a second *image*, not a mask: albumentations skips pixel-level
+        # transforms (gamma, brightness, ...) on 'mask' targets, so passing dst as a
+        # mask would apply photometric augs to src only and desync the pair. As an
+        # 'image' target it gets the SAME geometric AND pixel transforms as src.
+        if paired: additional_targets['target_image'] = 'image'
+        # Genuine masks (loss weight map, auto-mask) stay 'mask' → geometric-only.
         if has_mask: additional_targets['loss_mask'] = 'mask'
         if use_auto_mask: additional_targets['auto_mask'] = 'mask'
         if additional_targets: return A.Compose(transforms, additional_targets=additional_targets)
@@ -327,11 +333,13 @@ class AugmentedImagePairSlicingDataset(Dataset):
 
                 # Geometric augmentations work on float32 numpy directly
                 if self.shared_transforms and isinstance(self.shared_transforms, A.Compose):
-                    aug_kwargs = {'image': src_slice_current, 'mask': dst_slice_current}
+                    # dst goes in as 'target_image' (image target) so shared pixel augs
+                    # apply to it identically to src; masks stay geometric-only.
+                    aug_kwargs = {'image': src_slice_current, 'target_image': dst_slice_current}
                     if mask_slice is not None: aug_kwargs['loss_mask'] = mask_slice
                     if auto_mask_slice is not None: aug_kwargs['auto_mask'] = auto_mask_slice
                     aug = self.shared_transforms(**aug_kwargs)
-                    src_slice_current, dst_slice_current = aug['image'], aug['mask']
+                    src_slice_current, dst_slice_current = aug['image'], aug['target_image']
                     if mask_slice is not None: mask_slice = aug['loss_mask']
                     if auto_mask_slice is not None: auto_mask_slice = aug['auto_mask']
 
@@ -371,11 +379,13 @@ class AugmentedImagePairSlicingDataset(Dataset):
 
                 if self.shared_transforms:
                     if isinstance(self.shared_transforms, A.Compose):
-                        aug_kwargs = {'image': src_slice_current, 'mask': dst_slice_current}
+                        # dst as 'target_image' (image target) → shared pixel augs hit
+                        # both src and dst identically; real masks stay geometric-only.
+                        aug_kwargs = {'image': src_slice_current, 'target_image': dst_slice_current}
                         if mask_slice is not None: aug_kwargs['loss_mask'] = mask_slice
                         if auto_mask_slice is not None: aug_kwargs['auto_mask'] = auto_mask_slice
                         aug = self.shared_transforms(**aug_kwargs)
-                        src_slice_current, dst_slice_current = aug['image'], aug['mask']
+                        src_slice_current, dst_slice_current = aug['image'], aug['target_image']
                         if mask_slice is not None: mask_slice = aug['loss_mask']
                         if auto_mask_slice is not None: auto_mask_slice = aug['auto_mask']
                     elif isinstance(self.shared_transforms, T.Compose): seed = random.randint(0, 2**32-1); torch.manual_seed(seed); random.seed(seed); src_slice_current = self.shared_transforms(src_slice_current); torch.manual_seed(seed); random.seed(seed); dst_slice_current = self.shared_transforms(dst_slice_current)
@@ -1234,7 +1244,7 @@ def train(config):
         src_list = getattr(datasets_config, 'src_augs', []); dst_list = getattr(datasets_config, 'dst_augs', []); shared_list = getattr(datasets_config, 'shared_augs', [])
         src_transforms = create_augmentations(src_list if isinstance(src_list, list) else [])
         dst_transforms = create_augmentations(dst_list if isinstance(dst_list, list) else [])
-        shared_transforms = create_augmentations(shared_list if isinstance(shared_list, list) else [], has_mask=bool(config.data.mask_dir), use_auto_mask=use_auto_mask)
+        shared_transforms = create_augmentations(shared_list if isinstance(shared_list, list) else [], has_mask=bool(config.data.mask_dir), use_auto_mask=use_auto_mask, paired=True)
         if is_main_process(): logging.debug("Augmentation pipelines created (if configured).")
     except Exception as e: logging.error(f"FATAL: Augmentation creation failed: {e}. Exiting.", exc_info=True); cleanup_ddp(); return
 
